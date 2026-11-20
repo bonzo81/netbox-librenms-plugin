@@ -125,7 +125,7 @@ class FilterDevicesJob(JobRunner):
         )
 
         # Store device IDs for result retrieval
-        # Note: Validated devices are cached with shared keys by process_device_filters
+        # process_device_filters cached the raw row of each device; the results page validates them again.
         device_ids = [device["device_id"] for device in validated_devices]
 
         # Track cache timestamp for frontend expiration warnings
@@ -134,13 +134,14 @@ class FilterDevicesJob(JobRunner):
         cached_at = datetime.now(timezone.utc).isoformat()
 
         # Store only metadata in job data (not the full device list)
-        # Devices are retrieved via shared cache keys in _load_job_results
+        # _load_job_results reads the raw rows from the cache and validates them again
         self.job.data = {
             "device_ids": device_ids,
             "total_processed": len(validated_devices),
             "filters": filters,
             "server_key": api.server_key,
             "vc_detection_enabled": vc_detection_enabled,
+            "exclude_existing": exclude_existing,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
             "serial_rules": serial_rules_version(serial_rules),

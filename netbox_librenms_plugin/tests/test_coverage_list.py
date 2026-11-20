@@ -983,9 +983,9 @@ class TestImportListRequest:
         assert search["serial_rules"] == serial_rules_version(snapshot)
 
     @pytest.mark.django_db
-    @pytest.mark.parametrize("version", ["changed", "missing"])
-    def test_job_only_results_require_the_serial_rule_version_used_by_the_job(
-        self, client, django_user_model, librenms_server, version
+    @pytest.mark.parametrize("job_has_rule_version", [True, False])
+    def test_job_only_results_validate_the_jobs_rows_under_current_serial_rules(
+        self, client, django_user_model, librenms_server, job_has_rule_version
     ):
         from core.choices import JobStatusChoices
         from core.models import Job
@@ -997,9 +997,12 @@ class TestImportListRequest:
         user = _create_user(django_user_model, "versioned-job-results")
         client.force_login(user)
         rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        holder = make_device("job-serial-holder", serial="JOB-SERIAL-41")
 
         def run_search(*ids):
-            _register_devices(librenms_server, [_device(device_id) for device_id in ids])
+            _register_devices(
+                librenms_server, [{**_device(device_id), "serial": f"SN: JOB-SERIAL-{device_id}"} for device_id in ids]
+            )
             job = Job.objects.create(name="Serial rule search", user=user, job_id=uuid4(), data={})
             FilterDevicesJob.handle(
                 job=job,
@@ -1019,20 +1022,24 @@ class TestImportListRequest:
             return response
 
         first = run_search(41, 42)
-        assert sorted(row["device_id"] for row in open_results(first).context["table"].data) == [41, 42]
+        before = {row["device_id"]: row["_validation"] for row in open_results(first).context["table"].data}
+        assert sorted(before) == [41, 42]
+        assert before[41]["existing_device"] is None
 
-        if version == "changed":
-            NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
-            second = run_search(42, 43)
-            assert sorted(row["device_id"] for row in open_results(second).context["table"].data) == [42, 43]
-        else:
+        NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+        second = run_search(42, 43)
+        assert sorted(row["device_id"] for row in open_results(second).context["table"].data) == [42, 43]
+        if not job_has_rule_version:
             first.data.pop("serial_rules", None)
             first.save(update_fields=["data"])
 
         response = open_results(first)
 
-        assert list(response.context["table"].data) == []
-        assert len(message_texts(response.wsgi_request, "warning")) == 1
+        after = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+        assert sorted(after) == [41, 42]
+        assert after[41]["existing_device"] == holder
+        assert after[41]["existing_match_type"] == "serial"
+        assert message_texts(response.wsgi_request, "warning") == []
 
     @pytest.mark.django_db
     def test_expired_completed_job_renders_one_actionable_warning(
