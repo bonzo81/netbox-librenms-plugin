@@ -1,0 +1,21 @@
+{% comment %}
+The column filters of one sync tab, opened by the Filters button. Its fields and Apply belong to the GET form
+of _sync_filter_form.html through the form attribute, so they are never part of the sync POST.
+librenms_sync.css sizes each field for its column through data-filter-field.
+Takes: filters (SyncFilters), prefix, section_id.
+{% endcomment %}
+{% with form=filters.form form_id=prefix|add:"filter-form" %}
+<div class="collapse noprint mb-3{% if form.columns_have_input %} show{% endif %}" id="{{ section_id }}"{% if form.columns_have_input %} data-filter-open="true"{% endif %}>
+    <div class="sync-filter-panel">
+        {% for field in form.column_fields %}
+        <div class="sync-filter-field" data-filter-field="{{ field.html_name }}">
+            <label class="form-label" for="{{ field.auto_id }}">{{ field.label }}</label>
+            <input type="text" form="{{ form_id }}" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
+                class="form-control form-control-sm{% if field.errors %} is-invalid{% endif %}"
+                {% if field.errors %}aria-invalid="true" aria-describedby="{{ prefix }}filter-errors"{% endif %}>
+        </div>
+        {% endfor %}
+        <button type="submit" form="{{ form_id }}" class="btn btn-sm btn-primary">Apply</button>
+    </div>
+</div>
+{% endwith %}

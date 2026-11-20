@@ -15,6 +15,7 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import configured_server_key
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
 
 class TestSlashlessRouteAliases:
@@ -2162,8 +2163,8 @@ class TestModuleCreationIsGuarded:
     # qualified function -> why it may create a Module without the device-scoped guard
     EXEMPT = {
         "ReplaceModuleView.post": (
-            "runs its own global serial-conflict resolution under select_for_update, including the "
-            "permission-masked count refusal; deliberately not narrowed to the device"
+            "runs its own global serial-conflict resolution inside the complete Device scope, including "
+            "the permission-masked count refusal; deliberately not narrowed to the device"
         ),
     }
 
@@ -2589,10 +2590,11 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_replace_fails_closed_on_a_hidden_serial_conflict(self):
         """An existing serial outside delete scope must block replacement, not become a duplicate."""
-        from dcim.models import Device, Interface, Module, ModuleType
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
@@ -2615,6 +2617,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-replace-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
                 (ModuleType, "view", {"pk": module_type.pk}),
                 (Module, "view", {"pk": target.pk}),
                 (Module, "add", None),
@@ -2660,11 +2663,80 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert target.serial == "OLD-CONFLICT"
         assert hidden.serial == "INCOMING-CONFLICT"
         assert Module.objects.filter(serial="INCOMING-CONFLICT").count() == 1
-        assert any("cannot remove" in text for text in message_texts(request, "error"))
+        # The preview showed no holder of the serial, so the grant refuses the holder that appeared since.
+        assert message_texts(request, "error") == [GrantRefusal.STALE.message]
+
+    def test_module_replace_keeps_a_previewed_serial_holder_outside_delete_scope(self):
+        """The preview shows the holder, so the grant is fresh; the delete scope of the holder must refuse."""
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView, _SerialConflictUnavailable
+
+        device = make_device("scope-replace-kept")
+        other_device = make_device("scope-replace-kept-holder")
+        module_type = make_module_type("MT-scope-replace-kept")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial="OLD-KEPT",
+        )
+        holder = Module.objects.create(
+            device=other_device,
+            module_bay=make_module_bay(other_device, "Holder Slot"),
+            module_type=module_type,
+            serial="INCOMING-KEPT",
+        )
+        # The viewer sees the holder, its Device and its bay, so the preview signs the Replace with the holder.
+        user = self._user(
+            "scope-replace-kept",
+            [
+                (Device, "view", {"pk__in": [device.pk, other_device.pk]}),
+                (ModuleBay, "view", {"pk__in": [target.module_bay_id, holder.module_bay_id]}),
+                (ModuleType, "view", {"pk": module_type.pk}),
+                (Module, "view", {"pk__in": [target.pk, holder.pk]}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "INCOMING-KEPT",
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        assert fields["conflict_module_id"] == str(holder.pk)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        target.refresh_from_db()
+        holder.refresh_from_db()
+        assert (target.serial, holder.serial) == ("OLD-KEPT", "INCOMING-KEPT")
+        # The refusal of the holder's delete scope, not an earlier refusal of the preview.
+        assert message_texts(request, "error") == [_SerialConflictUnavailable.MESSAGE.format(serial="INCOMING-KEPT")]
 
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""
-        from dcim.models import Device, Module
+        from dcim.models import Device, Module, ModuleBay
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -2690,6 +2762,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-preview-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
                 (Module, "view", {"pk": target.pk}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
@@ -2741,6 +2814,351 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert f'name="conflict_module_id" value="{hidden.pk}"' not in html
         assert "cannot view" in html
         assert "Update Serial Only" not in html
+
+    def test_module_preview_does_not_name_a_conflict_bay_outside_view_scope(self):
+        """The viewer sees the conflicting Module and its Device but not its bay, so the preview must not name the bay."""
+        from dcim.models import Device, Module, ModuleBay
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_query
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("scope-preview-bay-target")
+        holder_device = make_device("scope-preview-bay-holder")
+        module_type = make_module_type("MT-scope-preview-bay")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Visible Slot"),
+            module_type=module_type,
+            serial="OLD-PREVIEW-BAY",
+        )
+        holder = Module.objects.create(
+            device=holder_device,
+            module_bay=make_module_bay(holder_device, "Unlisted Bay"),
+            module_type=module_type,
+            serial="INCOMING-PREVIEW-BAY",
+        )
+        user = self._user(
+            "scope-preview-bay",
+            [
+                (Device, "view", {"pk__in": [device.pk, holder_device.pk]}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
+                (Module, "view", {"pk__in": [target.pk, holder.pk]}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+            ],
+        )
+        view = ModuleMismatchPreviewView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": holder.serial,
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [item], server_key=server_key))
+        query = rendered_preview_query(device, 100, user=user, server_key=server_key)
+        request = self._request(user, query, method="get")
+        view.setup(request)
+        try:
+            response = view.get(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert holder.module_bay.name not in html
+        assert f'name="conflict_module_id" value="{holder.pk}"' not in html
+
+    def test_module_preview_does_not_name_an_installed_bay_outside_view_scope(self):
+        """The viewer loses the target bay after the table rendered, so the preview must not name that bay."""
+        from dcim.models import Device, Module, ModuleBay
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.http import Http404
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_query
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("scope-preview-installed-bay")
+        module_type = make_module_type("MT-scope-preview-installed-bay")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Unlisted Installed Bay"),
+            module_type=module_type,
+            serial="OLD-INSTALLED-BAY",
+        )
+        user = self._user(
+            "scope-preview-installed-bay",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
+                (Module, "view", {"pk": target.pk}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+            ],
+        )
+        view = ModuleMismatchPreviewView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "NEW-INSTALLED-BAY",
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [item], server_key=server_key))
+        query = rendered_preview_query(device, 100, user=user, server_key=server_key)
+        # The ModuleBay grant loses the target bay after the table rendered.
+        ObjectPermission.objects.filter(name="scope-preview-installed-bay-view-1").update(constraints={"pk": 0})
+        user = get_user_model().objects.get(pk=user.pk)
+        request = self._request(user, query, method="get")
+        view.setup(request)
+        try:
+            html = view.get(request, pk=device.pk).content.decode()
+        except Http404:
+            html = ""
+        finally:
+            cache.delete(cache_key)
+
+        assert target.module_bay.name not in html
+
+    def test_module_table_does_not_name_a_conflict_bay_outside_view_scope(self):
+        """The table names the holder of a serial only when the viewer may see the holder's bay too."""
+        from dcim.models import Device, Module, ModuleBay
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device("scope-table-bay-target")
+        holder_device = make_device("scope-table-bay-holder")
+        module_type = make_module_type("MT-scope-table-bay")
+        holder = Module.objects.create(
+            device=holder_device,
+            module_bay=make_module_bay(holder_device, "Unlisted Bay"),
+            module_type=module_type,
+            serial="INCOMING-TABLE-BAY",
+        )
+        user = self._user(
+            "scope-table-bay",
+            [
+                (Device, "view", {"pk__in": [device.pk, holder_device.pk]}),
+                (ModuleBay, "view", {"device_id": device.pk}),
+                (Module, "view", None),
+            ],
+        )
+        server_key = configured_server_key()
+        item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 9",
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": holder.serial,
+        }
+        cache_key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [item], server_key=server_key))
+        try:
+            html = render_module_tab(device, user=user, server_key=server_key)
+        finally:
+            cache.delete(cache_key)
+
+        assert holder_device.name not in html
+        assert holder.module_bay.name not in html
+
+    def test_module_replace_does_not_name_the_replaced_bay_outside_view_scope(self):
+        """The viewer loses the target bay after the preview; the success message must not name that bay."""
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("scope-replace-target-bay")
+        module_type = make_module_type("MT-scope-replace-target-bay")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Unlisted Target Bay"),
+            module_type=module_type,
+            serial="OLD-TARGET-BAY",
+        )
+        user = self._user(
+            "scope-replace-target-bay",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
+                (ModuleType, "view", None),
+                (Module, "view", None),
+                (Module, "add", None),
+                (Module, "change", None),
+                (Module, "delete", None),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "NEW-TARGET-BAY",
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        # The ModuleBay grant loses the target bay after the preview.
+        ObjectPermission.objects.filter(name="scope-replace-target-bay-view-1").update(constraints={"pk": 0})
+        user = get_user_model().objects.get(pk=user.pk)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert not Module.objects.filter(pk=target.pk).exists()
+        assert message_texts(request, "success")
+        assert all(target.module_bay.name not in text for text in message_texts(request))
+
+    def test_module_replace_does_not_name_a_removed_holder_bay_outside_view_scope(self):
+        """The delete scope removes the holder; the message names its place only when the viewer may see the bay."""
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("scope-replace-named")
+        other_device = make_device("scope-replace-named-holder")
+        module_type = make_module_type("MT-scope-replace-named")
+        target = Module.objects.create(
+            device=device, module_bay=make_module_bay(device, "Slot 1"), module_type=module_type, serial="OLD-NAMED"
+        )
+        holder = Module.objects.create(
+            device=other_device,
+            module_bay=make_module_bay(other_device, "Unlisted Holder Bay"),
+            module_type=module_type,
+            serial="INCOMING-NAMED",
+        )
+        user = self._user(
+            "scope-replace-named",
+            [
+                (Device, "view", {"pk__in": [device.pk, other_device.pk]}),
+                (ModuleBay, "view", {"pk__in": [target.module_bay_id, holder.module_bay_id]}),
+                (ModuleType, "view", None),
+                (Module, "view", None),
+                (Module, "add", None),
+                (Module, "change", None),
+                (Module, "delete", None),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": holder.serial,
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        assert fields["conflict_module_id"] == str(holder.pk)
+        # The ModuleBay grant loses the holder's bay after the preview.
+        ObjectPermission.objects.filter(name="scope-replace-named-view-1").update(
+            constraints={"pk": target.module_bay_id}
+        )
+        user = get_user_model().objects.get(pk=user.pk)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert not Module.objects.filter(pk=holder.pk).exists()
+        assert message_texts(request, "success")
+        assert all(holder.module_bay.name not in text for text in message_texts(request))
+
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    def test_module_move_does_not_name_a_source_bay_outside_view_scope(self):
+        """The change scope moves the module; the message names its source bay only when the viewer may see it."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Module, ModuleBay
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_view, message_texts, post
+        from netbox_librenms_plugin.views.sync.modules import MoveModuleView
+
+        source_device = make_device("scope-move-named-source")
+        target_device = make_device("scope-move-named-target")
+        source_bay = make_module_bay(source_device, "Unlisted Source Bay")
+        target_bay = make_module_bay(target_device, "Target Bay")
+        moving = Module.objects.create(
+            device=source_device, module_bay=source_bay, module_type=make_module_type("MT-scope-move-named")
+        )
+        user = self._user(
+            "scope-move-named",
+            [
+                (Device, "view", {"pk__in": [source_device.pk, target_device.pk]}),
+                (ModuleBay, "view", {"pk": target_bay.pk}),
+                (Module, "view", None),
+                (Module, "change", None),
+                (Module, "delete", None),
+            ],
+        )
+        server_key = configured_server_key()
+        request = self._request(
+            user,
+            {
+                "conflict_module_id": str(moving.pk),
+                "target_bay_id": str(target_bay.pk),
+                "selected_device_id": str(target_device.pk),
+                "server_key": server_key,
+            },
+        )
+
+        post(
+            make_view(MoveModuleView, request, librenms_api=SimpleNamespace(server_key=server_key)),
+            request,
+            pk=target_device.pk,
+        )
+
+        moving.refresh_from_db()
+        assert moving.module_bay_id == target_bay.pk
+        assert message_texts(request, "success")
+        assert all(source_bay.name not in text for text in message_texts(request))
 
     def test_site_location_push_refuses_a_site_outside_the_grant(self):
         """SyncSiteLocationView is gated by the plugin write permission alone and takes the site pk from the POST body."""
@@ -3149,3 +3567,192 @@ def test_import_reexports_document_the_active_lint_policy():
     assert "F401" in config["tool"]["ruff"]["lint"]["per-file-ignores"]["__init__.py"]
     assert "per-file ignore" in import_utils.__doc__
     assert callable(import_utils.bulk_import_devices)
+
+
+class TestModuleWriterOwnership:
+    """A narrow participation check for the nine known writer groups.
+
+    This does not prove runtime scope completeness. It does not follow aliases,
+    raw SQL, dynamic dispatch, external writers or arbitrary delegated functions.
+    Real owner and concurrency tests establish the runtime contract.
+    """
+
+    WRITERS = {
+        "InstallModuleView.post",
+        "InstallBranchView._install_branch",
+        "InstallSelectedView.post",
+        "UpdateModuleSerialView.post",
+        "UpdateModuleInterfaceView.post",
+        "ApplyModuleInterfaceTypesView.post",
+        "ReplaceModuleView.post",
+        "MoveModuleView.post",
+        "AddBayTemplateView.post",
+    }
+    TYPE_GUARDS = {
+        "InstallModuleView.post": "lock_module_types",
+        "InstallBranchView._install_branch": "lock_module_types",
+        "InstallSelectedView.post": "lock_module_types",
+        "ReplaceModuleView.post": "lock_module_types",
+        "AddBayTemplateView.post": "lock_template_type",
+    }
+    DOWNSTREAM = {
+        "select_for_update",
+        "save",
+        "delete",
+        "bulk_create",
+        "bulk_update",
+        "update_existing_row",
+        "_install_single",
+        "_save_module_with_scoped_component_adoption",
+        "_save_module_with_expected_component_adoption",
+        "_instantiate_template_on_existing",
+        "_bind_and_adopt",
+    }
+
+    @classmethod
+    def _violations(cls, tree, writers):
+        import ast
+
+        failures = []
+        definitions = dict(TestModuleCreationIsGuarded._definitions(tree))
+        for name in sorted(writers):
+            method = definitions.get(name)
+            if method is None:
+                failures.append(f"{name}: missing writer")
+                continue
+            calls = []
+
+            def walk(node, parents=(), method=method, calls=calls):
+                # A move's mutation callback executes through update_existing_row.
+                if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    return
+                for child in ast.iter_child_nodes(node):
+                    walk(child, (*parents, node))
+                # After its receiver and arguments, so the list is in call order.
+                if isinstance(node, ast.Call):
+                    calls.append((getattr(node.func, "id", getattr(node.func, "attr", "")), node, parents))
+
+            walk(method)
+            # A conditional expression arm or a short-circuited operand can skip a lock, as an if statement can.
+            conditional = (ast.For, ast.AsyncFor, ast.While, ast.If, ast.IfExp, ast.BoolOp)
+            order = {id(node): position for position, (_call, node, _parents) in enumerate(calls)}
+            scopes = [(node, parents) for call, node, parents in calls if call == "lock_module_write"]
+            if len(scopes) != 1:
+                failures.append(f"{name}: expected one complete owner lock")
+                continue
+            lock, parents = scopes[0]
+            if any(isinstance(parent, conditional) for parent in parents):
+                failures.append(f"{name}: owner lock is conditional or incremental")
+            if not any(call == "observe_module_write" for call, _node, _parents in calls):
+                failures.append(f"{name}: missing observation")
+            if any(call in cls.DOWNSTREAM and order[id(node)] < order[id(lock)] for call, node, _parents in calls):
+                failures.append(f"{name}: downstream lock or write precedes owner lock")
+            if type_guard := cls.TYPE_GUARDS.get(name):
+                claims = [(node, parents) for call, node, parents in calls if call == type_guard]
+                if len(claims) != 1:
+                    failures.append(f"{name}: expected one complete type lock")
+                    continue
+                claim, parents = claims[0]
+                if order[id(claim)] < order[id(lock)] or any(isinstance(parent, conditional) for parent in parents):
+                    failures.append(f"{name}: type lock precedes Devices or is conditional or incremental")
+                if any(call in cls.DOWNSTREAM and order[id(node)] < order[id(claim)] for call, node, _parents in calls):
+                    failures.append(f"{name}: downstream lock or write precedes type lock")
+        return failures
+
+    def test_known_writers_take_one_complete_scope_before_downstream_locks(self):
+        import ast
+
+        from netbox_librenms_plugin.views.sync import modules
+
+        tree = ast.parse(Path(modules.__file__).read_text())
+        assert not self._violations(tree, self.WRITERS)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "observe_module_write(device_ids=targets)\nModule().save()",
+            "if indexed:\n    lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+            "for target in targets:\n    lock_module_write(observe_module_write(device_ids=[target]))\n    Module().save()",
+            "Module.objects.select_for_update()\nlock_module_write(observe_module_write(device_ids=targets))",
+            "lock_module_write(observe_module_write(device_ids=targets), incoming=[Module.objects.select_for_update()])",
+            "lock_module_write(observe_module_write(device_ids=targets)) if indexed else None\nModule().save()",
+            "indexed and lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+        ],
+        ids=[
+            "missing",
+            "carrier-unguarded",
+            "incremental-bulk",
+            "late-owner",
+            "write-in-owner-argument",
+            "owner-in-conditional-expression",
+            "owner-in-short-circuit",
+        ],
+    )
+    def test_guard_rejects_known_omissions(self, body):
+        import ast
+        import textwrap
+
+        tree = ast.parse("def writer():\n" + textwrap.indent(body, "    "))
+        assert self._violations(tree, {"writer"})
+
+    def test_guard_accepts_complete_scope_outside_the_install_loop(self):
+        import ast
+
+        tree = ast.parse(
+            "def writer():\n"
+            "    lock_module_write(observe_module_write(device_ids=targets))\n"
+            "    for target in targets:\n"
+            "        Module().save()\n"
+        )
+        assert not self._violations(tree, {"writer"})
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+            "lock_module_write(observe_module_write(device_ids=targets))\nfor target in targets:\n    scope.lock_module_types([target])\n    Module().save()",
+            "scope.lock_module_types(types)\nlock_module_write(observe_module_write(device_ids=targets))",
+            "lock_module_write(observe_module_write(device_ids=targets)).lock_module_types([Module().save()])",
+            "lock_module_write(observe_module_write(device_ids=targets))\nscope.lock_module_types(types) if types else None\nModule().save()",
+            "lock_module_write(observe_module_write(device_ids=targets))\ntypes or scope.lock_module_types(types)\nModule().save()",
+        ],
+        ids=[
+            "missing-type",
+            "incremental-types",
+            "types-before-devices",
+            "write-in-type-argument",
+            "types-in-conditional-expression",
+            "types-in-short-circuit",
+        ],
+    )
+    def test_guard_rejects_known_type_claim_omissions(self, body):
+        import ast
+        import textwrap
+
+        tree = ast.parse("class InstallSelectedView:\n    def post(self):\n" + textwrap.indent(body, "        "))
+        assert self._violations(tree, {"InstallSelectedView.post"})
+
+    def test_guard_accepts_complete_types_before_the_install_loop(self):
+        import ast
+
+        tree = ast.parse(
+            "class InstallSelectedView:\n"
+            "    def post(self):\n"
+            "        lock_module_write(observe_module_write(device_ids=targets))\n"
+            "        scope.lock_module_types(types)\n"
+            "        for target in targets:\n"
+            "            Module().save()\n"
+        )
+        assert not self._violations(tree, {"InstallSelectedView.post"})
+
+    def test_guard_accepts_a_type_lock_on_the_owner_lock_result(self):
+        """The receiver takes the owner lock before the type lock runs."""
+        import ast
+
+        tree = ast.parse(
+            "class InstallSelectedView:\n"
+            "    def post(self):\n"
+            "        lock_module_write(observe_module_write(device_ids=targets)).lock_module_types(types)\n"
+            "        Module().save()\n"
+        )
+        assert not self._violations(tree, {"InstallSelectedView.post"})

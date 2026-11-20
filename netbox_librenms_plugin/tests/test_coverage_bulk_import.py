@@ -7,9 +7,8 @@ from netbox_librenms_plugin.tests.conftest import (
     delete_keeping_pk,
     make_device,
     make_superuser,
-    make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 
 
 class TestStackKey:
@@ -17,19 +16,23 @@ class TestStackKey:
 
     def test_member_serials_key_the_stack(self):
         from netbox_librenms_plugin.import_utils.bulk_import import stack_key
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         members = [{"serial": "FOC2"}, {"serial": "FOC1"}]
+        context = plain_context()
 
-        assert (
-            stack_key({"members": members}, 7) == stack_key({"members": members[::-1]}, 8) == "librenms-stack-FOC1,FOC2"
-        )
+        assert stack_key({"members": members}, 7, context) == stack_key({"members": members[::-1]}, 8, context)
+        assert stack_key({"members": members}, 7, context) != stack_key({"members": members[:1]}, 7, context)
+        other = [{"serial": "FOC3"}, {"serial": "FOC4"}]
+        assert stack_key({"members": members}, 7, context) != stack_key({"members": other}, 7, context)
 
     def test_stacks_without_member_serials_get_distinct_keys(self):
         """A shared key would let the first such stack suppress chassis creation for every other one."""
         from netbox_librenms_plugin.import_utils.bulk_import import stack_key
+        from netbox_librenms_plugin.serial_identity import plain_context
 
-        first = stack_key({"members": [{"serial": "-"}]}, 7)
-        second = stack_key({"members": [{"serial": "-"}]}, 8)
+        first = stack_key({"members": [{"serial": "-"}]}, 7, plain_context())
+        second = stack_key({"members": [{"serial": "-"}]}, 8, plain_context())
 
         assert first != second
 
@@ -70,41 +73,6 @@ def _register_device(live_librenms, row):
         {"status": "ok", "devices": [row]},
     )
     live_librenms.server.inventory_response(device_id, [])
-
-
-def _validation(existing=None, *, import_as_vm=False):
-    return {
-        "resolved_name": getattr(existing, "name", "new-device"),
-        "existing_device": existing,
-        "existing_match_type": "hostname" if existing else None,
-        "existing_librenms_link": None,
-        "import_as_vm": import_as_vm,
-        "is_ready": existing is None,
-        "can_import": existing is None,
-        "status": "active",
-        "issues": [],
-        "serial_action": None,
-        "oob_candidate": None,
-        "merge_candidates": [],
-        "promote_to_host_candidate": None,
-        "librenms_id_needs_migration": False,
-        "device_type_mismatch": False,
-        "site": {"found": True},
-        "device_type": {"found": True},
-        "device_role": {"found": True, "role": getattr(existing, "role", None), "available_roles": []},
-        "platform": {"found": False, "platform": None},
-        "cluster": {
-            "found": bool(getattr(existing, "cluster_id", None)),
-            "cluster": getattr(existing, "cluster", None),
-            "available_clusters": [],
-        },
-        "vm_placement": {
-            "method": "cluster" if getattr(existing, "cluster_id", None) else "site",
-            "found": True,
-            "host_device": None,
-        },
-        "virtual_chassis": {"is_stack": False, "members": []},
-    }
 
 
 class TestBulkPrecheckDecision:
@@ -208,6 +176,24 @@ class TestCollisionDetection:
 
         assert collisions == []
         assert unresolved == []
+
+    def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(self, live_librenms):
+        """The legacy ID names the Device, so another maker's broken rule must not drop the row from the grouping."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
+
+        target = make_device("collision-legacy-target", serial="LEGACY-COLLIDE", librenms_cf=53)
+        _broken_serial_rule("collision-legacy")
+        legacy = _libre_device(53, "collision-legacy-other-name", serial="LEGACY-COLLIDE")
+        by_name = _libre_device(54, target.name)
+        _register_device(live_librenms, legacy)
+        _register_device(live_librenms, by_name)
+
+        collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
+
+        assert unresolved == []
+        assert [collision["nb_device_pk"] for collision in collisions] == [target.pk]
+        assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {53, 54}
 
     def test_missing_live_device_is_unresolved(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
@@ -342,8 +328,9 @@ class TestBulkImportIntegration:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, DeviceSerialLookup
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
@@ -392,7 +379,7 @@ class TestBulkImportIntegration:
             return result, serial_reads
 
         with CaptureQueriesContext(connection) as key_queries:
-            DeviceSerialLookup().key_for(DeviceType.objects.get(pk=prerequisites["device_type_id"]).manufacturer)
+            SerialRules.load().candidates()
         one_key_read_count = len([q for q in key_queries if table in q["sql"] and "'serial'" in q["sql"]])
         assert one_key_read_count > 0
 
@@ -400,7 +387,7 @@ class TestBulkImportIntegration:
         assert len(first["failed"]) == 3
         assert all("dcim.add_virtualchassis" in row["error"] for row in first["failed"])
         assert len(reads) == one_key_read_count
-        rule.replacement = r"changed-\1"
+        rule.match_pattern = r"^SN:\s+(.+)$"
         rule.save()
 
         second, reads = run_batch()
@@ -447,149 +434,7 @@ class TestBulkImportIntegration:
         assert live_librenms.server.requests[0]["path"] == "/api/v0/devices/91"
 
 
-class TestRefreshLibreNMSLinkage:
-    def test_host_mapping_promotes_a_stale_hostname_match(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-host-link")
-        seed_stored_mapping(device, {"default": {"id": 101}}, save=True)
-        validation = _validation(device)
-
-        _refresh_librenms_linkage(validation, device, {"device_id": 101}, "default")
-
-        assert validation["existing_match_type"] == "librenms_id"
-        assert validation["existing_librenms_link"]["host_id"] == 101
-
-    def test_oob_mapping_is_classified_separately(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-oob-link")
-        seed_stored_mapping(device, {"default": {"id": 101, "oob": {"id": 102, "type": "controller"}}}, save=True)
-        validation = _validation(device)
-
-        _refresh_librenms_linkage(validation, device, {"device_id": 102}, "default")
-
-        assert validation["existing_match_type"] == "librenms_oob"
-        assert validation["existing_librenms_link"]["oob_id"] == 102
-
-    def test_repointed_mapping_neutralizes_a_stale_id_match(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-repointed-link")
-        seed_mapping(device, "default", own=103)
-        validation = _validation(device)
-        validation["existing_match_type"] = "librenms_id"
-
-        _refresh_librenms_linkage(validation, device, {"device_id": 104}, "default")
-
-        assert validation["existing_match_type"] is None
-
-    def test_missing_scanned_id_preserves_a_live_mapping(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-missing-scan-id")
-        seed_mapping(device, "default", own=105)
-        validation = _validation(device)
-        validation["existing_match_type"] = "librenms_id"
-
-        _refresh_librenms_linkage(validation, device, {}, "default")
-
-        assert validation["existing_match_type"] == "librenms_id"
-
-
-class TestRefreshExistingDevice:
-    def test_real_device_is_reloaded_and_stays_non_importable(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        device = make_device("refresh-existing")
-        validation = _validation(device)
-        device.serial = "UPDATED-SERIAL"
-        device.save(update_fields=["serial"])
-
-        _refresh_existing_device(validation, _libre_device(111, device.name), "default")
-
-        assert validation["existing_device"].serial == "UPDATED-SERIAL"
-        assert validation["can_import"] is False
-        assert validation["is_ready"] is False
-        assert validation["device_role"]["role"] == device.role
-
-    def test_deleted_device_clears_match_actions_and_reasserts_role_blocker(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        device = make_device("refresh-deleted")
-        validation = _validation(device)
-        validation.update(
-            {
-                "serial_action": "merge_netbox_devices",
-                "oob_candidate": device,
-                "merge_candidates": [device],
-                "promote_to_host": {"existing_device": device},
-            }
-        )
-        delete_keeping_pk(device)
-
-        _refresh_existing_device(validation, None, "default")
-
-        assert validation["existing_device"] is None
-        assert validation["existing_match_type"] is None
-        assert validation["serial_action"] is None
-        assert validation["merge_candidates"] is None
-        assert "promote_to_host" not in validation
-        assert validation["device_role"]["role"] is None
-        assert "Device role must be manually selected before import" in validation["issues"]
-        assert validation["can_import"] is False
-
-    def test_deleted_vm_clears_cluster_and_uses_matched_site_placement(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        vm = make_vm("refresh-deleted-vm")
-        validation = _validation(vm, import_as_vm=True)
-        delete_keeping_pk(vm)
-
-        _refresh_existing_device(validation, None, "default")
-
-        assert validation["existing_device"] is None
-        assert validation["cluster"]["cluster"] is None
-        assert validation["vm_placement"] == {"method": "site", "found": True, "host_device": None}
-        assert validation["issues"] == []
-        assert validation["can_import"] is True
-
-    def test_newly_imported_device_is_found_by_current_librenms_id(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        device = make_device("refresh-newly-imported")
-        seed_mapping(device, "default", own=121)
-        validation = _validation()
-
-        _refresh_existing_device(validation, _libre_device(121, "different-name"), "default")
-
-        assert validation["existing_device"] == device
-        assert validation["existing_match_type"] == "librenms_id"
-        assert validation["can_import"] is False
-
-
-class TestRefreshStateHelpers:
-    def test_clear_match_fields_removes_every_derived_action(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _clear_existing_match_derived_fields
-
-        validation = {
-            "serial_action": "merge_netbox_devices",
-            "oob_candidate": object(),
-            "merge_candidates": [object()],
-            "promote_to_host": object(),
-            "librenms_id_needs_migration": True,
-            "device_type_mismatch": True,
-        }
-
-        _clear_existing_match_derived_fields(validation)
-
-        assert validation["serial_action"] is None
-        assert validation["oob_candidate"] is None
-        assert validation["merge_candidates"] is None
-        assert "promote_to_host" not in validation
-        assert validation["librenms_id_needs_migration"] is False
-        assert validation["device_type_mismatch"] is False
-
+class TestValidationResetHelpers:
     def test_role_and_cluster_resets_preserve_available_choices(self):
         from netbox_librenms_plugin.import_validation_helpers import reset_cluster, reset_device_role
 
@@ -611,27 +456,6 @@ class TestRefreshStateHelpers:
             "cluster": None,
             "available_clusters": ["cluster"],
         }
-
-    @pytest.mark.parametrize(
-        ("import_as_vm", "selection_key", "message"),
-        [
-            (False, "device_role", "Device role must be manually selected before import"),
-            (True, "vm_placement", "VM placement requires a matching site, selected cluster, or selected host device"),
-        ],
-    )
-    def test_new_import_blocker_matches_the_import_mode(self, import_as_vm, selection_key, message):
-        from netbox_librenms_plugin.import_utils.bulk_import import _reassert_new_import_blockers
-
-        validation = {
-            "import_as_vm": import_as_vm,
-            "issues": [],
-            selection_key: {"found": False},
-        }
-
-        _reassert_new_import_blockers(validation)
-        _reassert_new_import_blockers(validation)
-
-        assert validation["issues"] == [message]
 
 
 class TestProcessDeviceFilters:
@@ -969,7 +793,7 @@ def test_bulk_confirmation_reuses_serial_rules_and_refreshes_them_next_request(c
     entries, batch_reads = confirm(list(rows))
     assert all(entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)
     assert batch_reads == one_key_reads > 0
-    rule.replacement = r"changed-\1"
+    rule.match_pattern = r"^SN:\s+(.+)$"
     rule.save()
     entries, batch_reads = confirm(list(rows))
     assert all(not entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)

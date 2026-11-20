@@ -227,6 +227,13 @@ def _mutate_rule(device, entities, form, writer):
     return "Inventory rules or device identity changed. Refresh Modules and try again."
 
 
+def _mutate_numbering_rule(device, entities, form, writer):
+    from netbox_librenms_plugin.models import VCMemberNumberingRule
+
+    VCMemberNumberingRule.objects.create(device_type_pattern="NO-SUCH-MODEL", numbering_mode="one_based")
+    return "Inventory rules or device identity changed. Refresh Modules and try again."
+
+
 def _mutate_serial(device, entities, form, writer):
     from dcim.models import Device
 
@@ -248,6 +255,7 @@ def _mutate_old_token(device, entities, form, writer):
 
 MUTATIONS = {
     "rule-added": _mutate_rule,
+    "numbering-rule-added": _mutate_numbering_rule,
     "device-serial": _mutate_serial,
     "ancestor-row": _mutate_ancestor,
     "old-token": _mutate_old_token,
@@ -304,6 +312,23 @@ def test_each_writer_refuses_a_row_its_include_rule_no_longer_admits(ui, c8300, 
     assert written_state(device) == before
 
 
+def test_a_grant_signed_before_serial_extraction_refuses_the_write(ui, c8300, monkeypatch):
+    """Version 1 signed grants under substitution serial rules; their member attribution is not current."""
+    from netbox_librenms_plugin import inventory_policy
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
+    device, entities = c8300
+    with monkeypatch.context() as signing:
+        signing.setattr(inventory_policy, "INVENTORY_POLICY_VERSION", 1)
+        form = WRITERS["install"](ui, device, entities)
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.POLICY.message in messages_of(response)
+    assert written_state(device) == before
+
+
 # --- Rows the table does not render ----------------------------------------------------------------
 
 BUILT_IN_UNIT = 1000  # module 0: the seeded model rule makes it transparent, so the table hides it.
@@ -340,6 +365,27 @@ def test_replace_refuses_a_module_changed_after_its_preview(ui, c8300, change):
 
     assert GrantRefusal.STALE.message in messages_of(response)
     assert written_state(device) == before
+
+
+def test_replace_refuses_a_serial_conflict_that_appeared_after_its_preview(ui, c8300):
+    """The preview showed no conflict, so the replace must not delete a module that holds the serial since."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device, entities = c8300
+    form = _replace_form(ui, device, entities)
+    elsewhere_device = make_device_with_module_bays("c8300-grants-elsewhere", ["Slot 1"])
+    elsewhere = install_in_bay(elsewhere_device, "Slot 1", "GRANT-ELSEWHERE-CARD", serial=_nim(entities)[1])
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.STALE.message in messages_of(response)
+    assert written_state(device) == before
+    assert Module.objects.filter(pk=elsewhere.pk, device=elsewhere_device).exists()
 
 
 def _preview_serial_form(client, device, entities):
@@ -539,7 +585,7 @@ VC_LIBRENMS_ID = 4242
 CARRIER, OPTIC_1, OPTIC_2, CARD = 10, 21, 23, 30
 
 
-def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1"):
+def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1X1"):
     def module(index, parent, name, model, serial):
         return {
             "entPhysicalIndex": index,
@@ -560,26 +606,31 @@ def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1"):
             "entPhysicalSerialNum": "",
         }
 
+    from netbox_librenms_plugin.tests.conftest import STACK_ROOT_INDEX, stack_root_row
+
     return [
+        stack_root_row(),
         {
             "entPhysicalIndex": 1,
-            "entPhysicalContainedIn": 0,
+            "entPhysicalContainedIn": STACK_ROOT_INDEX,
             "entPhysicalClass": "chassis",
             "entPhysicalName": "Chassis A",
             "entPhysicalSerialNum": page_serial,
+            "entPhysicalParentRelPos": 1,
         },
         {
             "entPhysicalIndex": 5,
-            "entPhysicalContainedIn": 0,
+            "entPhysicalContainedIn": STACK_ROOT_INDEX,
             "entPhysicalClass": "chassis",
             "entPhysicalName": "Chassis B",
             "entPhysicalSerialNum": member_serial,
+            "entPhysicalParentRelPos": 2,
         },
         module(CARRIER, 1, "Carrier Slot", "GR-CARRIER", "SN-CARRIER"),
         container(20, CARRIER, "Cage 1"),
         module(OPTIC_1, 20, "Optic 1", "GR-OPTIC", optic_1_serial),
         container(22, CARRIER, "Cage 2"),
-        module(OPTIC_2, 22, "Optic 2", "GR-OPTIC", "SN-O2"),
+        module(OPTIC_2, 22, "Optic 2", "GR-OPTIC", "SN-O2X2"),
         module(CARD, 1, "Card Slot", "GR-CARD", "SN-CARD"),
     ]
 
@@ -600,13 +651,13 @@ def vc_grants(settings, recording_server):
     def build(*, optic_1_on_member=False):
         member_vendor = Manufacturer.objects.create(name="Grants Member Vendor", slug="grants-member-vendor")
         bays = ["Carrier Slot", "Cage 1", "Cage 2", "Card Slot"]
-        page = make_device_with_module_bays("vc-grants-page", bays, serial="VC-A")
-        member = make_device_with_module_bays("vc-grants-member", bays, manufacturer=member_vendor, serial="VC-B")
+        page = make_device_with_module_bays("vc-grants-page", bays, serial="VCA-0001")
+        member = make_device_with_module_bays("vc-grants-member", bays, manufacturer=member_vendor, serial="VCB-0001")
         make_virtual_chassis("vc-grants", page, member)
         make_module_type_with_bays("GR-CARRIER", bay_names=["Cage 1", "Cage 2"])
         make_module_type_with_bays("GR-OPTIC")
         make_module_type_with_bays("GR-CARD")
-        rows = _vc_rows(page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1")
+        rows = _vc_rows(page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1X1")
         recording = {
             "device_id": VC_LIBRENMS_ID,
             "responses": {

@@ -19,6 +19,7 @@ router.register("location-mappings", views.LocationMappingViewSet)
 router.register("carrier-auto-install-rules", views.CarrierAutoInstallRuleViewSet)
 router.register("port-stack-lag-patterns", views.PortStackLagPatternViewSet)
 router.register("serial-sensor-type-patterns", views.SerialSensorTypePatternViewSet)
+router.register("vc-member-numbering-rules", views.VCMemberNumberingRuleViewSet)
 
 urlpatterns = [
     path("jobs/<int:job_pk>/sync-status/", views.sync_job_status, name="sync_job_status"),

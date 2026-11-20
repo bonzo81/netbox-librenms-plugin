@@ -501,6 +501,21 @@ def test_capture_view_reports_an_unanonymizable_recording(recording_server, monk
 
 
 @pytest.mark.django_db
+def test_capture_view_reports_a_malformed_database_id(recording_server):
+    recording = deepcopy(load_recording("iosxe-c8300"))
+    recording["responses"][f"GET /api/v0/devices/{recording['device_id']}"]["devices"][0]["poller_group"] = ["7"]
+    server, api = recording_server(recording)
+    device = make_device("capture-malformed-id", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = response.content.decode()
+    assert response.status_code == 200
+    assert "Capture failed" in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
 def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server, monkeypatch):
     """A broken packaged manifest must render an error instead of a false novelty verdict."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
@@ -645,6 +660,270 @@ def test_capture_view_rejects_an_invalid_linked_controller(recording_server, oob
     html = response.content.decode()
     assert "invalid LibreNMS id" in html
     assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
+def test_capture_detects_a_stack_before_reading_an_unrelated_invalid_serial_context(recording_server):
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    maker = Manufacturer.objects.create(name="Unrelated capture maker", slug="unrelated-capture-maker")
+    rule = NormalizationRule.objects.create(
+        scope="serial", manufacturer=maker, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("capture-valid-context", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert "Anonymized recording" in response.content.decode()
+    stack = compute_shape_signature(_captured_recording(response))["virtual_chassis"]
+    assert stack["present"] is True
+    assert stack["member_count"] == 3
+
+
+@pytest.mark.django_db
+def test_a_standalone_capture_does_not_read_an_unrelated_invalid_serial_context(recording_server):
+    """No inventory row can make a stack depend on a serial context, so only the device's own is read."""
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    maker = Manufacturer.objects.create(name="Unrelated standalone maker", slug="unrelated-standalone-maker")
+    rule = NormalizationRule.objects.create(
+        scope="serial", manufacturer=maker, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-standalone-context", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert _captured_recording(response)["responses"]
+
+
+@pytest.mark.django_db
+def test_a_capture_with_an_invalid_own_serial_context_renders_the_rule_error(recording_server):
+    from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
+
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-own-invalid-context", librenms_cf={"test": {"id": recording["device_id"]}})
+    rule = NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=device.device_type.manufacturer,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    rule.refresh_from_db()
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = unescape(response.content.decode())
+    assert response.status_code == 200
+    assert RuleConfigurationError(rule, "replacement").public_message in html
+    assert "Anonymized recording" not in html
+
+
+def _without_serials(recording):
+    """Return *recording* with every serial field blank, as a device that reports no serial gives it."""
+    from netbox_librenms_plugin.data_shapes.anonymize import SERIAL_KEYS
+
+    def blank(obj):
+        if isinstance(obj, dict):
+            return {key: "" if key in SERIAL_KEYS else blank(value) for key, value in obj.items()}
+        if isinstance(obj, list):
+            return [blank(item) for item in obj]
+        return obj
+
+    return {**recording, "responses": blank(recording["responses"])}
+
+
+@pytest.mark.django_db
+def test_a_capture_without_a_serial_does_not_need_its_serial_rules(recording_server):
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    recording = _without_serials(load_recording("iosxe-c8300"))
+    server, api = recording_server(recording)
+    device = make_device("capture-no-serial", librenms_cf={"test": {"id": recording["device_id"]}})
+    rule = NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=device.device_type.manufacturer,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement="")
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert _captured_recording(response)["responses"]
+
+
+@pytest.mark.django_db
+def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-outside-master", librenms_cf={"test": {"id": recording["device_id"]}})
+    chassis = VirtualChassis.objects.create(name="capture-outside-master-vc")
+    device.virtual_chassis = chassis
+    device.vc_position = 1
+    device.save()
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-outside-master-other"))
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = unescape(response.content.decode())
+    assert response.status_code == 200
+    assert UNAVAILABLE_MASTER_LINK in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
+def test_a_capture_never_reads_a_linked_master_outside_the_chassis(recording_server):
+    """No member holds a mapping, and the chassis names a linked master outside it: the owner stays a member."""
+    from dcim.models import Device, VirtualChassis
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-unlinked-member")
+    chassis = VirtualChassis.objects.create(name="capture-unlinked-member-vc")
+    device.virtual_chassis = chassis
+    device.vc_position = 1
+    device.save()
+    outsider = make_device("capture-linked-outsider", librenms_cf={"test": {"id": recording["device_id"]}})
+    address = IPAddress.objects.create(address="198.18.0.20/32")
+    Device.objects.filter(pk=outsider.pk).update(primary_ip4=address)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
+    device.refresh_from_db()
+    assert get_librenms_sync_device(device, server_key="test") == device
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert "Anonymized recording" not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
+    """Another serial context can explain the FPC stack, but the device's own context is Unavailable."""
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK, plain_context
+
+    recording = deepcopy(load_recording("juniper-ex4400-vc-2member"))
+    assert compute_shape_signature(recording, serial_context=plain_context())["virtual_chassis"]["present"]
+    # The stack recording holds no port routes, so the capture reads those of a standalone recording.
+    ports = load_recording("iosxe-c8300")
+    for route, body in ports["responses"].items():
+        if "/inventory/" not in route and route != f"GET /api/v0/devices/{ports['device_id']}":
+            recording["responses"].setdefault(route.replace(str(ports["device_id"]), str(recording["device_id"])), body)
+    server, api = recording_server(recording)
+    device = make_device("capture-junos-outside-master", librenms_cf={"test": {"id": recording["device_id"]}})
+    chassis = VirtualChassis.objects.create(name="capture-junos-outside-master-vc")
+    device.virtual_chassis = chassis
+    device.vc_position = 1
+    device.save()
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-junos-outside-master-other"))
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = unescape(response.content.decode())
+    assert response.status_code == 200
+    assert UNAVAILABLE_MASTER_LINK in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
+def test_a_capture_pseudonymizes_a_list_valued_serial(recording_server):
+    recording = deepcopy(load_recording("iosxe-c8300"))
+    route = next(key for key, body in recording["responses"].items() if "/inventory/" in key and body.get("inventory"))
+    recording["responses"][route]["inventory"][0]["entPhysicalSerialNum"] = ["ASSET123"]
+    server, api = recording_server(recording)
+    device = make_device("capture-list-serial", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert "ASSET123" not in json.dumps(_captured_recording(response))
+
+
+def _junos_fpc_recording(root_serial, fpc_serials):
+    from netbox_librenms_plugin.constants import JUNOS_FPC_DESCR_PREFIX, JUNOS_VC_ROOT_DESCR_MARKER
+
+    root = {
+        "entPhysicalIndex": 1,
+        "entPhysicalClass": "chassis",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalDescr": f"Juniper {JUNOS_VC_ROOT_DESCR_MARKER}",
+        "entPhysicalSerialNum": root_serial,
+    }
+    fpcs = [
+        {
+            "entPhysicalIndex": 10 + slot,
+            "entPhysicalClass": "container",
+            "entPhysicalContainedIn": 1,
+            "entPhysicalDescr": f"{JUNOS_FPC_DESCR_PREFIX}: EX4300 @ {slot}/*/*",
+            "entPhysicalParentRelPos": slot,
+            "entPhysicalSerialNum": serial,
+        }
+        for slot, serial in enumerate(fpc_serials)
+    ]
+    return {
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/inventory/1?entPhysicalContainedIn=0": {"status": "ok", "inventory": [root]},
+            "GET /api/v0/inventory/1?entPhysicalContainedIn=1": {"status": "ok", "inventory": fpcs},
+        },
+    }
+
+
+@pytest.mark.django_db
+def test_stack_detection_reads_another_serial_context_only_for_junos_fpc_inventory():
+    """Junos FPC members depend on the serial rules, so another context can explain them; other rows cannot."""
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.data_shapes.signature import vc_detecting_context
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    maker = Manufacturer.objects.create(name="FPC context maker", slug="fpc-context-maker")
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=maker, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    rules = SerialRules.load()
+    own, alternate = rules.context(None), rules.context(maker.pk)
+    read = []
+
+    def contexts():
+        for context in (own, alternate):
+            read.append(context)
+            yield context
+
+    # Only the maker's rule makes the root serial the serial of exactly one FPC.
+    fpc_stack = _junos_fpc_recording("FPCROOT1", ["S/N FPCROOT1", "FPCMEMBER2"])
+    assert vc_detecting_context(fpc_stack, contexts()) is alternate
+
+    read.clear()
+    standalone = load_recording("iosxe-c8300")
+    assert vc_detecting_context(standalone, contexts()) is own
+    assert read == [own]
 
 
 def test_recording_issue_field_accepts_downloaded_attachments():

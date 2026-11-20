@@ -9,7 +9,7 @@
 class A:
     def probe(self, result, serial):
         from dcim.models import Device
-        owner = Device.objects.filter(serial=serial).first()
+        owner = Device.objects.filter(name=serial).first()
         # ruleid: import-disclosure
         result["warnings"].append(f"owner {owner.name}")
 
@@ -119,7 +119,7 @@ def probe_exact08(result):
 # --- [flag] identity passed into a pruned local helper
 def probe_flag00(result, serial):
     from dcim.models import Device
-    device = Device.objects.filter(serial=serial).first()
+    device = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"].append(_describe_flag00(device.name))
 
@@ -131,7 +131,7 @@ def _describe_flag00(value):
 # --- [flag] identity passed through a variadic positional helper
 def probe_flag01(result, serial):
     from dcim.models import Device
-    device = Device.objects.filter(serial=serial).first()
+    device = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"].append(_describe_flag01(device))
 
@@ -148,7 +148,7 @@ def probe_flag03(result):
 
 def _device_flag03():
     from dcim.models import Device
-    return Device.objects.filter(serial="x").first()
+    return Device.objects.filter(name="x").first()
 
 
 # --- [flag] an object-returning helper bound to a local first
@@ -160,7 +160,7 @@ def probe_flag04(result):
 
 def _device_flag04():
     from dcim.models import Device
-    return Device.objects.filter(serial="x").first()
+    return Device.objects.filter(name="x").first()
 
 
 # --- [flag] a scoped nested filter does not clear the unrestricted outer query
@@ -175,7 +175,7 @@ def probe_flag05(result, user):
 def probe_flag06(result, serial):
     from dcim.models import Device
     # ruleid: import-disclosure
-    result["warnings"].append(f"owner {Device.objects.filter(serial=serial).first().name}")
+    result["warnings"].append(f"owner {Device.objects.filter(name=serial).first().name}")
 
 
 # --- [flag] identity returned by a no-argument local helper
@@ -186,13 +186,13 @@ def probe_flag07(result):
 
 def _owner_name_flag07():
     from dcim.models import Device
-    return Device.objects.filter(serial="x").first().name
+    return Device.objects.filter(name="x").first().name
 
 
 # --- [flag] f-string
 def probe_flag08(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
 
@@ -200,7 +200,7 @@ def probe_flag08(result, serial):
 # --- [flag] concatenation
 def probe_flag09(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["issues"].append("owner " + owner.name)
 
@@ -208,7 +208,7 @@ def probe_flag09(result, serial):
 # --- [flag] whole-list assignment
 def probe_flag10(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"] = [f"{owner.pk}"]
 
@@ -222,10 +222,32 @@ def probe_flag11(result, ip):
 
 # --- [flag] ternary rebind
 def probe_flag12(result, serial):
-    matches = find_devices_by_serial(serial)
+    matches = resolve_device(serial).matches
     owner = matches[0] if matches else None
     # ruleid: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
+
+
+# --- [flag] the write-side lookup names the holder in a warning
+def probe_flag12_write(result, serial, context, rules):
+    other = resolve_device_write(serial, context, rules=rules)
+    # ruleid: import-disclosure
+    result["warnings"].append(f"serial held by {other.object.name}")
+
+
+# --- [flag] the batch write-side lookup names the holder in an issue
+def probe_flag12_writes(result, serials, context, rules):
+    found = resolve_devices_write(serials, context, rules=rules)
+    # ruleid: import-disclosure
+    result["issues"].append(f"serial held by {found[serials[0]].object.name}")
+
+
+# --- [exact] the write-side match stays structured for the disclosure gate
+def probe_exact12_write(result, serial, context, rules):
+    other = resolve_device_write(serial, context, rules=rules)
+    result["serial_conflict"] = {"pk": other.object.pk, "serial": serial}
+    # ok: import-disclosure
+    result["warnings"].append("The serial belongs to another device.")
 
 
 # --- [flag] read straight out of the validation dict
@@ -237,7 +259,7 @@ def probe_flag13(result):
 # --- [flag] built inside a module-private helper
 def probe_flag14(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"].extend(_describe_flag14(owner))
 
@@ -252,7 +274,7 @@ def _describe_flag14(matched):
 # --- [flag] a scoped sibling branch does not clear the unrestricted one
 def probe_flag15(result, serial, user):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first() or Device.objects.restrict(user).first()
+    owner = Device.objects.filter(name=serial).first() or Device.objects.restrict(user).first()
     # ruleid: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
 
@@ -260,7 +282,7 @@ def probe_flag15(result, serial, user):
 # --- [flag] a scoped ternary branch does not clear the unrestricted one
 def probe_flag16(result, serial, user, any_match):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first() if any_match else Device.objects.restrict(user).first()
+    owner = Device.objects.filter(name=serial).first() if any_match else Device.objects.restrict(user).first()
     # ruleid: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
 
@@ -292,7 +314,7 @@ def probe_exact_sanitizer_object(result):
 # --- [flag] a local message list built by its initializer
 def probe_flag17(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     notes = [f"owner {owner.name}"]
     # ruleid: import-disclosure
     return {"warnings": notes}
@@ -301,7 +323,7 @@ def probe_flag17(result, serial):
 # --- [flag] an annotated local message list initializer
 def probe_flag18(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     notes: list = [f"owner {owner.name}"]
     # ruleid: import-disclosure
     return {"warnings": notes}
@@ -310,7 +332,7 @@ def probe_flag18(result, serial):
 # --- [flag] identity handed back by a local helper
 def probe_flag19(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"].append(_label_flag19(owner))
 
@@ -322,7 +344,7 @@ def _label_flag19(device):
 # --- [flag] transformed on the way in
 def probe_flag20(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"].append(f"{normalize_serial(owner.serial)}")
 
@@ -330,7 +352,7 @@ def probe_flag20(result, serial):
 # --- [quiet] an aggregate passed into a pruned local helper
 def probe_quiet00(result, serial):
     from dcim.models import Device
-    devices = Device.objects.filter(serial=serial)
+    devices = Device.objects.filter(name=serial)
     # ok: import-disclosure
     result["warnings"].append(_describe_quiet00(devices.count()))
 
@@ -342,7 +364,7 @@ def _describe_quiet00(value):
 # --- [quiet] a queryset wrapper passed into an aggregate helper
 def probe_quiet01(result, serial):
     from dcim.models import Device
-    devices = Device.objects.filter(serial=serial)
+    devices = Device.objects.filter(name=serial)
     # ok: import-disclosure
     result["warnings"].append(_count_quiet01(devices.all()))
 
@@ -354,7 +376,7 @@ def _count_quiet01(values):
 # --- [quiet] a list wrapper passed into an aggregate helper
 def probe_quiet02(result, serial):
     from dcim.models import Device
-    devices = Device.objects.filter(serial=serial)
+    devices = Device.objects.filter(name=serial)
     # ok: import-disclosure
     result["warnings"].append(_count_quiet02(list(devices)))
 
@@ -371,7 +393,7 @@ def probe_quiet03(result, user):
 
 def _allowed_quiet03(user):
     from dcim.models import Device
-    return Device.objects.restrict(user, "view").filter(serial="x").first()
+    return Device.objects.restrict(user, "view").filter(name="x").first()
 
 
 # --- [flag] an inline scoped query outside the disclosure gate is not a sanitizer
@@ -379,14 +401,14 @@ def probe_quiet04(result, user, serial):
     from dcim.models import Device
     # ruleid: import-disclosure
     result["warnings"].append(
-        f"in scope {Device.objects.restrict(user, 'view').filter(serial=serial).first().name}"
+        f"in scope {Device.objects.restrict(user, 'view').filter(name=serial).first().name}"
     )
 
 
 # --- [quiet] a scoped lookup
 def probe_quiet05(result, view, serial):
     from dcim.models import Device
-    allowed = view.restricted_queryset(Device, "view").filter(serial=serial).first()
+    allowed = view.restricted_queryset(Device, "view").filter(name=serial).first()
     # ok: import-disclosure
     result["warnings"].append(f"in scope: {allowed.name}")
 
@@ -394,7 +416,7 @@ def probe_quiet05(result, view, serial):
 # --- [flag] a scoped manager call outside the disclosure gate is not a sanitizer
 def probe_quiet06(result, user, serial):
     from dcim.models import Device
-    allowed = Device.objects.restrict(user, "view").filter(serial=serial).first()
+    allowed = Device.objects.restrict(user, "view").filter(name=serial).first()
     # ruleid: import-disclosure
     result["warnings"].append(f"in scope: {allowed.name}")
 
@@ -575,7 +597,7 @@ def probe_spoofed_link_note_wording(result):
 # --- [quiet] an aggregate rather than an identity
 def probe_quiet07(result, serial):
     from dcim.models import Device
-    rows = Device.objects.filter(serial=serial)
+    rows = Device.objects.filter(name=serial)
     # ok: import-disclosure
     result["warnings"].append(f"{rows.count()} conflicts, {len(rows)} rows")
 
@@ -583,7 +605,7 @@ def probe_quiet07(result, serial):
 # --- [quiet] a helper that only aggregates stays pruned at its call site
 def probe_quiet08(result, serial):
     from dcim.models import Device
-    rows = Device.objects.filter(serial=serial)
+    rows = Device.objects.filter(name=serial)
     # ok: import-disclosure
     result["warnings"].append(f"{_summarise_quiet08(rows)} conflicts")
 
@@ -595,7 +617,7 @@ def _summarise_quiet08(matches):
 # --- [quiet] a message that names nothing
 def probe_quiet09(result, serial):
     from dcim.models import Device
-    owner = Device.objects.filter(serial=serial).first()
+    owner = Device.objects.filter(name=serial).first()
     if owner:
         # ok: import-disclosure
         result["warnings"].append(f"serial {serial} is already assigned in NetBox")
@@ -629,7 +651,7 @@ def _warn_kw(result, **devices):
 
 # --- [ok] the built-in all() reduces a queryset to a bool, so nothing identifying survives
 def probe_cr01_all_builtin(result):
-    devices = Device.objects.filter(serial="x")
+    devices = Device.objects.filter(name="x")
     flag = all(devices)
     # ok: import-disclosure
     result["warnings"].append(f"flag {flag}")
@@ -644,7 +666,7 @@ def probe_cr02_all_queryset(result):
 
 # --- [flag] min() selects an element out of a tainted collection
 def probe_cr03_min(result):
-    devices = Device.objects.filter(serial="x")
+    devices = Device.objects.filter(name="x")
     owner = min(devices)
     # ruleid: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
@@ -652,7 +674,7 @@ def probe_cr03_min(result):
 
 # --- [flag] max() likewise
 def probe_cr04_max(result):
-    devices = Device.objects.filter(serial="x")
+    devices = Device.objects.filter(name="x")
     owner = max(devices)
     # ruleid: import-disclosure
     result["warnings"].append(f"owner {owner.name}")
@@ -671,7 +693,7 @@ class ProbeCr05:
 
 # --- [flag] a for-loop target
 def probe_cr06_for(result):
-    for device in Device.objects.filter(serial="x"):
+    for device in Device.objects.filter(name="x"):
         # ruleid: import-disclosure
         result["warnings"].append(f"owner {device.name}")
 
@@ -679,12 +701,12 @@ def probe_cr06_for(result):
 # --- [flag] a comprehension target
 def probe_cr07_comprehension(result):
     # ruleid: import-disclosure
-    result["warnings"] = [f"owner {device.name}" for device in Device.objects.filter(serial="x")]
+    result["warnings"] = [f"owner {device.name}" for device in Device.objects.filter(name="x")]
 
 
 # --- [flag] tuple unpacking of a loop target
 def probe_cr08_unpack(result):
-    for device, _score in [(d, 1) for d in Device.objects.filter(serial="x")]:
+    for device, _score in [(d, 1) for d in Device.objects.filter(name="x")]:
         # ruleid: import-disclosure
         result["warnings"].append(f"owner {device.name}")
 
@@ -714,7 +736,7 @@ def probe_cr11_sum_singleton(result):
 # --- [flag] A boolean count carries no identity. The rule reports this false positive
 #     because sum() is no longer sanitized.
 def probe_cr12_sum_boolean_count(result):
-    devices = Device.objects.filter(serial="x")
+    devices = Device.objects.filter(name="x")
     total = sum(d.status == "active" for d in devices)
     # ruleid: import-disclosure
     result["warnings"].append(f"total {total}")

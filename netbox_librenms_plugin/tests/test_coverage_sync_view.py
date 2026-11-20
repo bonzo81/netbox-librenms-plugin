@@ -264,6 +264,22 @@ class TestSyncPageRouting:
         assert response.context["librenms_id_is_legacy"] is True
         assert response.context["librenms_id_serial_confirmed"] is True
 
+    @pytest.mark.parametrize("librenms_serial", [["LEGACY-SERIAL"], {"serial": "LEGACY-SERIAL"}, True])
+    def test_a_malformed_librenms_serial_offers_no_legacy_conversion(
+        self, logged_in_client, settings, librenms_server, librenms_serial
+    ):
+        """A list or an object is no serial: the page renders, and it offers no conversion and no serial sync."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-legacy-malformed", serial="LEGACY-SERIAL", librenms_cf=6616)
+        _register_device(librenms_server, 6616, device.name, serial=librenms_serial)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.status_code == 200
+        assert response.context["librenms_id_is_legacy"] is True
+        assert response.context["librenms_id_serial_confirmed"] is False
+        assert response.context["serial_admitted"] is False
+
     @pytest.mark.parametrize(("librenms_serial", "matches"), [("S/N ABC-SYNC", True), ("XYZ-SYNC", False)])
     def test_the_serial_row_keys_both_serials_with_the_serial_rules(
         self, logged_in_client, settings, librenms_server, librenms_serial, matches
@@ -283,18 +299,24 @@ class TestSyncPageRouting:
 
         assert response.context["serial_matches"] is matches
         assert response.context["librenms_id_serial_confirmed"] is matches
+        # A match keeps the legacy stored form "ABC-SYNC", so the page offers to store the LibreNMS text.
+        assert response.context["serial_stored_form_differs"] is matches
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
-        assert (sync_serial_url in response.content.decode()) == (not matches)
+        assert sync_serial_url in response.content.decode()
 
-    def test_a_numeric_zero_serial_matches_a_stored_zero(self, logged_in_client, settings, librenms_server):
+    @pytest.mark.parametrize(("stored", "reported", "matches"), [("100200", 100200, True), ("0", 0, False)])
+    def test_a_numeric_serial_matches_its_stored_text_when_it_has_an_identity(
+        self, logged_in_client, settings, librenms_server, stored, reported, matches
+    ):
+        """A key needs three letters or digits in a row, so a one-digit serial confirms nothing."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device("sync-zero-serial", serial="0", librenms_cf=6614)
-        _register_device(librenms_server, 6614, device.name, serial=0)
+        device = make_device(f"sync-numeric-serial-{stored}", serial=stored, librenms_cf=6614)
+        _register_device(librenms_server, 6614, device.name, serial=reported)
 
         response = logged_in_client.get(_sync_url(device))
 
-        assert response.context["serial_matches"] is True
-        assert response.context["librenms_id_serial_confirmed"] is True
+        assert response.context["serial_matches"] is matches
+        assert response.context["librenms_id_serial_confirmed"] is matches
 
     def test_a_member_page_gates_the_legacy_id_on_the_mapping_owner_serial(
         self, logged_in_client, settings, librenms_server
@@ -315,6 +337,113 @@ class TestSyncPageRouting:
         assert response.context["lookup_device_pk"] == owner.pk
         assert response.context["librenms_id_serial_confirmed"] is True
         assert response.context["serial_matches"] is False
+
+    def test_a_serial_that_cannot_be_compared_shows_the_reason_and_no_sync(
+        self, logged_in_client, settings, librenms_server
+    ):
+        from html import unescape
+
+        from dcim.models import Device, VirtualChassis
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        chassis, (viewed,) = make_virtual_chassis_members("sync-stray-master", count=1)
+        viewed.serial = "STRAY-NETBOX"
+        viewed.save()
+        seed_stored_mapping(viewed, 6616, save=True)
+        master = make_device("sync-stray-master-elsewhere")
+        other = VirtualChassis.objects.create(name="sync-stray-other")
+        # The master link names a device of another chassis, so no member serial can be compared.
+        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+        _register_device(librenms_server, 6616, viewed.name, serial="STRAY-LIBRENMS")
+
+        response = logged_in_client.get(_sync_url(viewed))
+
+        content = response.content.decode()
+        assert "does not match NetBox serial" not in content
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": viewed.pk})
+        assert sync_serial_url not in content
+        assert escape(UNAVAILABLE_MASTER_LINK) in content
+        # The reason is page text, not only a tooltip: a keyboard user cannot hover the icon.
+        assert UNAVAILABLE_MASTER_LINK in unescape(re.sub(r"<[^>]*>", " ", content))
+
+    def test_a_device_that_shares_the_legacy_id_serial_gets_no_convert_offer(
+        self, logged_in_client, settings, librenms_server
+    ):
+        """The conversion needs the sole holder of the serial; the badge still compares the pair."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-legacy-shared", serial="SHARED-LEGACY", librenms_cf=6617)
+        make_device("sync-legacy-shared-peer", serial="SHARED-LEGACY")
+        _register_device(librenms_server, 6617, device.name, serial="SHARED-LEGACY")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["serial_matches"] is True
+        assert response.context["librenms_id_is_legacy"] is True
+        assert response.context["librenms_id_serial_confirmed"] is False
+
+    @pytest.mark.parametrize(("reported", "offered"), [("12", False), ("NEW-SERIAL-12", True)])
+    def test_a_librenms_serial_without_an_identity_offers_no_serial_sync(
+        self, logged_in_client, settings, librenms_server, reported, offered
+    ):
+        """The writer refuses a serial without an identity, so the page shows the text and offers no sync."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device(f"sync-no-identity-{offered}", serial="STORED-SERIAL", librenms_cf={SERVER_KEY: 6618})
+        _register_device(librenms_server, 6618, device.name, serial=reported)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        content = response.content.decode()
+        assert response.context["librenms_device_serial"] == reported
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
+        assert (sync_serial_url in content) is offered
+
+    @pytest.mark.parametrize(("stored", "reported", "mismatch"), [("12", "12", False), ("STORED-12", "OTHER-12", True)])
+    def test_only_an_admitted_librenms_serial_is_marked_as_a_mismatch(
+        self, logged_in_client, settings, librenms_server, stored, reported, mismatch
+    ):
+        """A serial without an identity matches nothing, but the page must not call two equal texts a mismatch."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device(f"sync-mismatch-{mismatch}", serial=stored, librenms_cf={SERVER_KEY: 6620})
+        _register_device(librenms_server, 6620, device.name, serial=reported)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["serial_matches"] is False
+        assert ("data-serial-mismatch" in response.content.decode()) is mismatch
+
+    def test_a_broken_serial_rule_of_the_device_keeps_the_sync_page(self, logged_in_client, settings, librenms_server):
+        """The serial decisions are unavailable and name the rule; the other tabs still render."""
+        from html import unescape
+
+        from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
+
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-broken-serial-rule", serial="BROKEN-RULE", librenms_cf={SERVER_KEY: 6619})
+        rule = NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^S/N\s+(.+)$",
+            replacement=r"\1",
+            manufacturer=device.device_type.manufacturer,
+        )
+        # A stored legacy rule that no longer meets the extraction format.
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+        rule.refresh_from_db()
+        _register_device(librenms_server, 6619, device.name, serial="BROKEN-RULE-LIBRENMS")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.status_code == 200
+        assert response.context["interface_sync"] is not None
+        assert response.context["serial_matches"] is False
+        reason = RuleConfigurationError(rule, "replacement").public_message
+        assert response.context["serial_unavailable"] == reason
+        assert reason in unescape(re.sub(r"<[^>]*>", " ", response.content.decode()))
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
+        assert sync_serial_url not in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -391,6 +520,32 @@ class TestLibreNMSDeviceInfo:
         assert result["mismatched_device"] is False
         assert result["librenms_device_details"]["librenms_device_hardware"] == "-"
 
+    def test_an_answer_for_another_device_id_is_unavailable_not_absent(self, librenms_server):
+        """LibreNMS answers the request for 6633 with device 6634, so 6633's existence is unknown: no Add Device."""
+        device = make_device("info-other-device-id")
+        librenms_server.register(
+            "/api/v0/devices/6633", {"status": "ok", "devices": [{"device_id": 6634, "hostname": device.name}]}
+        )
+        view = _device_view()
+        view.librenms_id = 6633
+
+        result = view.get_librenms_device_info(device)
+
+        assert result["found_in_librenms"] is False
+        assert result["device_info_unavailable"] is True
+
+    def test_a_cached_row_for_another_device_id_is_read_again(self, librenms_server):
+        """An older worker cached device 6636 under 6635; the client reads 6635 again instead of serving it."""
+        from django.core.cache import cache
+
+        _register_device(librenms_server, 6635, "info-cached-other-id")
+        view = _device_view()
+        cache.set(f"librenms_device_info_{SERVER_KEY}_6635", (True, {"device_id": 6636, "hostname": "other"}), 60)
+
+        found, row = view.librenms_api.get_device_info(6635)
+
+        assert (found, row["device_id"]) == (True, 6635)
+
     def test_real_live_info_populates_details_and_matches_short_hostname(self, librenms_server):
         device = make_device("info-matched")
         _register_device(
@@ -449,6 +604,11 @@ class TestLibreNMSDeviceInfo:
 
         assert result["mismatched_device"] is False
         assert result["librenms_device_details"]["netbox_dns_name"] == "dns-identity.example.test"
+
+
+def _all_members(device):
+    """Return every member of the chassis of *device*: a viewer who may view them all."""
+    return list(device.virtual_chassis.members.all())
 
 
 def _stack_inventory(*members, extra=()):
@@ -542,7 +702,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6648
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
 
@@ -568,7 +728,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6641
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert len(result) == 2
         assert result[0]["assigned_member"] == members[0]
@@ -580,7 +740,7 @@ class TestVirtualChassisInventory:
         Juniper reports the chassis serial as "S/N BCFB9793"; NetBox stores it without.
 
         Compared raw the two never match, so an already-assigned member is offered for
-        assignment again and the modal shows the decorated serial.
+        assignment again. The modal shows the LibreNMS text.
         """
         _vc, members = make_virtual_chassis_members("inventory-marker", count=1)
         members[0].serial = "BCFB9793"
@@ -593,10 +753,10 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6644
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert len(result) == 2
-        assert result[0]["serial"] == "BCFB9793"
+        assert result[0]["serial"] == "S/N BCFB9793"
         assert result[0]["assigned_member"] == members[0]
 
     @pytest.mark.parametrize("has_master", [True, False])
@@ -611,9 +771,8 @@ class TestVirtualChassisInventory:
         member.device_type = DeviceType.objects.create(manufacturer=other, model="Other member", slug="other-member")
         member.serial = "MEMBER-SERIAL"
         member.save()
-        if has_master:
-            vc.master = master
-            vc.save()
+        vc.master = master if has_master else None
+        vc.save()
         NormalizationRule.objects.create(
             scope="serial",
             manufacturer=master.device_type.manufacturer if has_master else other,
@@ -631,21 +790,116 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6646
 
-        result = view._get_vc_inventory_serials(member)
+        result = view._get_vc_inventory_serials(member, _all_members(member))
 
-        assert result[0]["serial"] == member.serial
+        assert result[0]["serial"] == "VENDOR:MEMBER-SERIAL"
         assert result[0]["assigned_member"] == member
 
-    def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
-        """normalize_inventory_serial re-queries NormalizationRule per call unless rules are preloaded.
+    def test_a_masterless_member_serial_is_compared_under_its_own_rules(self, librenms_server):
+        """Only the page maker strips "TAG ", so "TAG ABC" assigns no member of another maker that stores "ABC"."""
+        from dcim.models import DeviceType, Manufacturer
 
-        create_virtual_chassis_with_members() already preloads once before its own member loop;
-        this loop must not pay a query per chassis component.
-        """
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        chassis, (page, member) = make_virtual_chassis_members("inventory-masterless", count=2)
+        chassis.master = None
+        chassis.save()
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG (.+)$", replacement=r"\1"
+        )
+        other = Manufacturer.objects.create(name="Masterless dialog vendor", slug="masterless-dialog-vendor")
+        member.device_type = DeviceType.objects.create(
+            manufacturer=other, model="Masterless dialog", slug="masterless-dialog"
+        )
+        member.serial = "ABC-DIALOG"
+        member.save()
+        _register_device(
+            librenms_server,
+            6650,
+            page.name,
+            inventory=_stack_inventory(
+                {"entPhysicalSerialNum": "TAG ABC-DIALOG"}, {"entPhysicalSerialNum": "VC-OTHER-2"}
+            ),
+        )
+        view = _device_view()
+        view.librenms_id = 6650
+
+        result = view._get_vc_inventory_serials(page, _all_members(page))
+
+        assert result[0]["serial"] == "TAG ABC-DIALOG"
+        assert result[0]["assigned_member"] is None
+
+    def test_a_masterless_dialog_keeps_a_row_that_only_a_member_rule_admits(self, librenms_server):
+        """The page maker strips "TAG-" to a short value, but the member that stores "TAG-AB" keeps it whole."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        chassis, (page, member) = make_virtual_chassis_members("inventory-admits", count=2)
+        chassis.master = None
+        chassis.save()
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG-(.+)$", replacement=r"\1"
+        )
+        other = Manufacturer.objects.create(name="Admitting member vendor", slug="admitting-member-vendor")
+        member.device_type = DeviceType.objects.create(
+            manufacturer=other, model="Admitting member", slug="admitting-member"
+        )
+        member.serial = "TAG-AB"
+        member.save()
+        _register_device(
+            librenms_server,
+            6651,
+            page.name,
+            inventory=_stack_inventory({"entPhysicalSerialNum": "TAG-AB"}, {"entPhysicalSerialNum": "VC-OTHER-3"}),
+        )
+        view = _device_view()
+        view.librenms_id = 6651
+
+        result = view._get_vc_inventory_serials(page, _all_members(page))
+
+        assert [(item["serial"], item["assigned_member"]) for item in result][0] == ("TAG-AB", member)
+
+    def test_a_masterless_junos_stack_keeps_an_fpc_that_only_a_member_rule_admits(self, librenms_server):
+        """The page maker strips "TAG-" to a short value, so only the member's rules give the second FPC a serial."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        chassis, (page, member) = make_virtual_chassis_members("inventory-junos-admits", count=2)
+        chassis.master = None
+        chassis.save()
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG-(.+)$", replacement=r"\1"
+        )
+        other = Manufacturer.objects.create(name="Junos admitting vendor", slug="junos-admitting-vendor")
+        member.device_type = DeviceType.objects.create(
+            manufacturer=other, model="Junos admitting member", slug="junos-admitting-member"
+        )
+        member.serial = "TAG-AB"
+        member.save()
+        inventory = [
+            {**row, "entPhysicalSerialNum": {"12345": "ROOT123", "12350": "TAG-AB"}[row["entPhysicalSerialNum"]]}
+            for row in _JUNOS_VC_INVENTORY
+            if row["entPhysicalSerialNum"] in ("12345", "12350")
+        ]
+        _register_device(librenms_server, 6652, page.name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6652
+
+        result = view._get_vc_inventory_serials(page, _all_members(page))
+
+        assert [(item["serial"], item["assigned_member"]) for item in result] == [("ROOT123", None), ("TAG-AB", member)]
+
+    def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
+        """The view reads its serial rules once, so the chassis loop pays no query per chassis component."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        _vc, members = make_virtual_chassis_members("inventory-preload", count=1)
+        # Two members of a masterless chassis: each member reads the context of its own type.
+        chassis, members = make_virtual_chassis_members("inventory-preload", count=2)
+        chassis.master = None
+        chassis.save()
         inventory = _stack_inventory(
             *(
                 {
@@ -659,15 +913,22 @@ class TestVirtualChassisInventory:
         _register_device(librenms_server, 6645, members[0].name, inventory=inventory)
         view = _device_view()
         view.librenms_id = 6645
+        viewable = _all_members(members[0])
 
         with CaptureQueriesContext(connection) as captured:
-            result = view._get_vc_inventory_serials(members[0])
+            result = view._get_vc_inventory_serials(members[0], viewable)
 
         assert len(result) == 5
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
-        # One preload reads the scoped and unscoped rows; per-call lookups would scale with the
-        # five components instead.
-        assert 0 < len(rule_queries) <= 2, f"expected one preload for the loop, saw {len(rule_queries)} queries"
+        # One read of the serial rules; per-call lookups would scale with the five components instead.
+        assert len(rule_queries) == 1, f"expected one rule read for the loop, saw {len(rule_queries)} queries"
+        # The members come with their types and chassis, so no member reads its own row of either table.
+        per_member = [
+            q["sql"]
+            for q in captured.captured_queries
+            if re.search(r'FROM "dcim_(devicetype|virtualchassis)"', q["sql"])
+        ]
+        assert per_member == []
 
     def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-failure", count=1)
@@ -675,10 +936,22 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6642
 
-        assert view._get_vc_inventory_serials(members[0]) == []
+        assert view._get_vc_inventory_serials(members[0], _all_members(members[0])) == []
+
+    def test_the_dialog_offers_no_row_for_a_serial_that_is_not_text_or_a_number(self, librenms_server):
+        """The dialog posts text, so a JSON `true` would reach Sync All as the serial "True"."""
+        _vc, members = make_virtual_chassis_members("inventory-boolean", count=2)
+        inventory = _stack_inventory({"entPhysicalSerialNum": True}, {"entPhysicalSerialNum": "VC-REAL-SERIAL"})
+        _register_device(librenms_server, 6649, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6649
+
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
+
+        assert [item["librenms_serial"] for item in result] == ["VC-REAL-SERIAL"]
 
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
-        """The dialog posts the LibreNMS serial, shows its serial key, and finds the member on the next render."""
+        """The dialog posts and shows the LibreNMS serial, and finds the member on the next render."""
         from netbox_librenms_plugin.models import NormalizationRule
 
         NormalizationRule.objects.get_or_create(
@@ -709,7 +982,35 @@ class TestVirtualChassisInventory:
         assert member.serial == "S/N MEMBER-RAW"
         response = logged_in_client.get(_sync_url(owner))
         shown = {item["serial"]: item["assigned_member"] for item in response.context["vc_inventory_serials"]}
-        assert shown == {"OWNER-RAW": owner, "MEMBER-RAW": member}
+        assert shown == {"S/N OWNER-RAW": owner, "S/N MEMBER-RAW": member}
+
+    def test_the_dialog_names_and_offers_only_the_members_the_viewer_may_view(self, client, librenms_server):
+        """A hidden member holds a reported serial: the dialog shows the row, but no name, link or choice of it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        _vc, (page, visible, hidden) = make_virtual_chassis_members("inventory-scope", count=3)
+        hidden.serial = "VC-HIDDEN-SERIAL"
+        hidden.save()
+        seed_mapping(page, SERVER_KEY, own=6653)
+        inventory = _stack_inventory(
+            {"entPhysicalSerialNum": "VC-PAGE-SERIAL"}, {"entPhysicalSerialNum": "VC-HIDDEN-SERIAL"}
+        )
+        _register_device(librenms_server, 6653, page.name, inventory=inventory)
+        user = make_user_with_perms("inventory-scope-viewer", [])
+        client.force_login(grant(user, "view", Device, constraints={"pk__in": [page.pk, visible.pk]}))
+
+        response = client.get(_sync_url(page))
+
+        html = response.content.decode()
+        start = html.index('id="vc-serials-form"')
+        form = html[start : html.index("</form>", start)]
+        assert "VC-HIDDEN-SERIAL" in form
+        assert hidden.name not in form
+        assert hidden.get_absolute_url() not in form
+        assert f'value="{hidden.pk}"' not in form
+        assert f'value="{visible.pk}"' in form
 
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""

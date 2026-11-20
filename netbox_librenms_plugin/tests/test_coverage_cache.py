@@ -13,7 +13,15 @@ def server_key():
     return f"cache-test-{uuid4().hex}"
 
 
+def _no_serial_rules():
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    return SerialRules(())
+
+
 def _metadata(server_key, cached_at, filters, **overrides):
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+
     metadata = {
         "server_key": server_key,
         "cache_timeout": 300,
@@ -23,6 +31,7 @@ def _metadata(server_key, cached_at, filters, **overrides):
         "use_sysname": True,
         "strip_domain": False,
         "device_count": 1,
+        "serial_rules": serial_rules_version(_no_serial_rules()),
     }
     metadata.update(overrides)
     return metadata
@@ -117,17 +126,6 @@ class TestCacheKeyContracts:
         assert with_zero != without_optional
         assert with_false != without_optional
 
-    def test_validated_device_key_tracks_device_and_virtual_chassis_mode(self):
-        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
-
-        baseline = get_validated_device_cache_key("default", {"type": "network"}, 42, False)
-        same = get_validated_device_cache_key("default", {"type": "network"}, 42, False)
-
-        assert baseline == same
-        assert baseline != get_validated_device_cache_key("default", {"type": "network"}, 43, False)
-        assert baseline != get_validated_device_cache_key("default", {"type": "network"}, 42, True)
-        assert baseline.endswith("_42_novc_sysname=True_strip=False")
-
     def test_import_device_key_includes_the_server_and_device(self):
         from netbox_librenms_plugin.import_utils.cache import (
             get_import_device_cache_key,
@@ -144,11 +142,11 @@ class TestGetActiveCachedSearches:
     def test_missing_or_empty_index_returns_no_searches(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
 
-        assert get_active_cached_searches(server_key) == []
+        assert get_active_cached_searches(server_key, _no_serial_rules()) == []
 
         cache.set(get_cache_index_key(server_key), [], timeout=3600)
 
-        assert get_active_cached_searches(server_key) == []
+        assert get_active_cached_searches(server_key, _no_serial_rules()) == []
 
     def test_active_entry_returns_remaining_time_and_an_independent_display_copy(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
@@ -160,7 +158,7 @@ class TestGetActiveCachedSearches:
             _metadata(server_key, stored_timestamp, filters),
         )
 
-        result = get_active_cached_searches(server_key)
+        result = get_active_cached_searches(server_key, _no_serial_rules())
 
         assert len(result) == 1
         assert result[0]["cache_key"] == cache_key
@@ -189,7 +187,7 @@ class TestGetActiveCachedSearches:
             ),
         )
 
-        result = get_active_cached_searches(server_key)
+        result = get_active_cached_searches(server_key, _no_serial_rules())
 
         assert result[0]["display_filters"] == {"location": "Amsterdam DC", "type": "Network"}
 
@@ -201,7 +199,7 @@ class TestGetActiveCachedSearches:
             _metadata(server_key, datetime.fromtimestamp(0, timezone.utc).isoformat(), {"hostname": "edge"}),
         )
 
-        assert get_active_cached_searches(server_key) == []
+        assert get_active_cached_searches(server_key, _no_serial_rules()) == []
         assert cache.get(get_cache_index_key(server_key)) == []
 
     @pytest.mark.parametrize(
@@ -224,7 +222,7 @@ class TestGetActiveCachedSearches:
             cache.set(cache_key, invalid_metadata, timeout=3600)
         cache.set(get_cache_index_key(server_key), [cache_key], timeout=3600)
 
-        assert get_active_cached_searches(server_key) == []
+        assert get_active_cached_searches(server_key, _no_serial_rules()) == []
         assert cache.get(get_cache_index_key(server_key)) == []
 
     def test_complete_metadata_without_filters_stays_in_the_index(self, server_key):
@@ -236,11 +234,26 @@ class TestGetActiveCachedSearches:
             _metadata(server_key, datetime.now(timezone.utc).isoformat(), {}),
         )
 
-        result = get_active_cached_searches(server_key)
+        result = get_active_cached_searches(server_key, _no_serial_rules())
 
         assert [search["cache_key"] for search in result] == [cache_key]
         assert result[0]["display_filters"] == {}
         assert cache.get(get_cache_index_key(server_key)) == [cache_key]
+
+    def test_a_search_of_other_serial_rules_is_hidden_but_stays_in_the_index(self, server_key):
+        """A rebuild under the current rules reuses the key, so a listing must not drop it from the index."""
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
+
+        now = datetime.now(timezone.utc).isoformat()
+        cache_key = _store_indexed_search(server_key, _metadata(server_key, now, {"hostname": "x"}, serial_rules="old"))
+
+        assert get_active_cached_searches(server_key, _no_serial_rules()) == []
+        assert cache.get(get_cache_index_key(server_key)) == [cache_key]
+
+        cache.set(cache_key, _metadata(server_key, now, {"hostname": "x"}), timeout=3600)
+        assert [search["cache_key"] for search in get_active_cached_searches(server_key, _no_serial_rules())] == [
+            cache_key
+        ]
 
     def test_naive_future_timestamp_is_treated_as_utc(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
@@ -255,7 +268,7 @@ class TestGetActiveCachedSearches:
             ),
         )
 
-        result = get_active_cached_searches(server_key)
+        result = get_active_cached_searches(server_key, _no_serial_rules())
 
         assert len(result) == 1
         assert result[0]["remaining_seconds"] > 0
@@ -269,7 +282,7 @@ class TestGetActiveCachedSearches:
             _metadata(server_key, stored_datetime, {"hostname": "datetime-edge"}),
         )
 
-        result = get_active_cached_searches(server_key)
+        result = get_active_cached_searches(server_key, _no_serial_rules())
 
         assert result[0]["cached_at"] == stored_datetime.isoformat()
         assert result[0]["display_filters"] == {"hostname": "datetime-edge"}
@@ -286,7 +299,7 @@ class TestGetActiveCachedSearches:
             _metadata(server_key, stored_datetime, {"hostname": "datetime-edge"}),
         )
 
-        cached_searches = get_active_cached_searches_for_servers({server_key: "Primary"})
+        cached_searches = get_active_cached_searches_for_servers({server_key: "Primary"}, _no_serial_rules())
         output = render_to_string(
             "netbox_librenms_plugin/inc/_cached_search_links.html",
             {"cached_searches": cached_searches},
@@ -303,7 +316,7 @@ class TestGetActiveCachedSearches:
             _metadata(server_key, cached_at, {"hostname": "edge"}),
         )
 
-        assert get_active_cached_searches(server_key) == []
+        assert get_active_cached_searches(server_key, _no_serial_rules()) == []
 
     def test_results_are_sorted_most_recent_first(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
@@ -323,7 +336,7 @@ class TestGetActiveCachedSearches:
         )
         cache.set(get_cache_index_key(server_key), [older_key, newer_key], timeout=3600)
 
-        result = get_active_cached_searches(server_key)
+        result = get_active_cached_searches(server_key, _no_serial_rules())
 
         assert [search["display_filters"]["hostname"] for search in result] == ["newer-edge", "older-edge"]
 
@@ -349,7 +362,7 @@ class TestGetActiveCachedSearches:
             cache.set(get_cache_index_key(key), [cache_key], timeout=3600)
 
         result = get_active_cached_searches_for_servers(
-            {first_server: "Primary LibreNMS", second_server: "Secondary LibreNMS"}
+            {first_server: "Primary LibreNMS", second_server: "Secondary LibreNMS"}, _no_serial_rules()
         )
 
         assert [(search["server_display_name"], search["display_filters"]["hostname"]) for search in result] == [

@@ -433,6 +433,7 @@ class TestInstallSingleResolutionPaths:
     def _install(device, item, index_map=None, **overrides):
         from dcim.models import Interface, ModuleBay
 
+        from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
 
         module_types = {mt.model: mt for mt in overrides.pop("module_types", [])}
@@ -444,6 +445,10 @@ class TestInstallSingleResolutionPaths:
             "deletable_interfaces": Interface.objects.all(),
             "manufacturer_id": device.device_type.manufacturer_id,
         }
+        scope = lock_module_write(
+            observe_module_write(device_ids=[device.pk]), incoming=[item.get("entPhysicalSerialNum")]
+        ).lock_module_types(mt.pk for mt in module_types.values())
+        kwargs["write_scope"] = scope
         kwargs.update(overrides)
         index_map = index_map if index_map is not None else {item["entPhysicalIndex"]: item}
         return InstallBranchView._install_single(
