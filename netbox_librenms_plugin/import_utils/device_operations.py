@@ -1015,10 +1015,10 @@ def validate_device_for_import(  # noqa: C901
                         try:
                             holders = resolve_device(incoming_serial, rules=serial_rules)
                         except RuleConfigurationError as exc:
-                            # Another maker's broken rule leaves only the holder Unavailable; the type check still runs.
+                            # The legacy ID names the Device, so another maker's broken rule hides only the other holders.
                             result["legacy_id_serial_unavailable"] = True
                             detail = exception_text_for(exc, Device, None)
-                            result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {detail}")
+                            result["warnings"].append(f"The other holders of the serial cannot be checked: {detail}")
                         else:
                             holder = holders.object
                             result["legacy_id_serial_confirmed"] = (

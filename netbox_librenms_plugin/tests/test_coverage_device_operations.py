@@ -1506,7 +1506,8 @@ class TestValidateDeviceForImport:
         assert result["librenms_id_needs_migration"] is True
         assert (result["legacy_id_serial_confirmed"], result["legacy_id_serial_unavailable"]) == (False, True)
         assert result["device_type_mismatch"] is True
-        assert [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+        # The legacy ID names the Device, so the result is complete and the bulk precheck keeps the row.
+        assert not [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
 
 
 @pytest.mark.django_db

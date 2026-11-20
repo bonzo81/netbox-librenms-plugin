@@ -213,6 +213,24 @@ class TestCollisionDetection:
         assert collisions == []
         assert unresolved == []
 
+    def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(self, live_librenms):
+        """The legacy ID names the Device, so another maker's broken rule must not drop the row from the grouping."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
+
+        target = make_device("collision-legacy-target", serial="LEGACY-COLLIDE", librenms_cf=53)
+        _broken_serial_rule("collision-legacy")
+        legacy = _libre_device(53, "collision-legacy-other-name", serial="LEGACY-COLLIDE")
+        by_name = _libre_device(54, target.name)
+        _register_device(live_librenms, legacy)
+        _register_device(live_librenms, by_name)
+
+        collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
+
+        assert unresolved == []
+        assert [collision["nb_device_pk"] for collision in collisions] == [target.pk]
+        assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {53, 54}
+
     def test_missing_live_device_is_unresolved(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 
