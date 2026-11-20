@@ -394,6 +394,62 @@ def test_a_lock_conflict_in_the_chassis_create_fails_the_stack_row_and_a_retry_i
 
 
 @pytest.mark.django_db
+def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_imports_the_stack(live_librenms):
+    """The master, the chassis and the first member are saved before the last member fails, so all of them roll back."""
+    from dcim.models import Device, Interface, VirtualChassis
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    serials = ["SN-ROLLBACK-A", "SN-ROLLBACK-B", "SN-ROLLBACK-C"]
+    members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
+    prerequisites, row = _importable_row(live_librenms, 96312, "stack-member-rollback", members=members)
+    written = (Device, VirtualChassis, Interface, IPAddress)
+    before = {model: model.objects.count() for model in written}
+
+    def run():
+        return bulk_import_devices_shared(
+            [96312],
+            server_key="default",
+            manual_mappings_per_device={96312: prerequisites},
+            libre_devices_cache={96312: row},
+            user=make_superuser("stack-member-rollback-user"),
+        )
+
+    def last_member_insert(sql, params):
+        return sql.startswith('INSERT INTO "dcim_device"') and serials[-1] in str(params)
+
+    with CaptureQueriesContext(connection) as queries, failing_statement(last_member_insert, "40P01") as failed:
+        result = run()
+
+    assert failed, "the last member INSERT never ran"
+    # The master (serial A), the chassis and the second member (serial B) were written before the failed INSERT.
+    inserts = [query["sql"] for query in queries if query["sql"].startswith("INSERT INTO")]
+    device_inserts = [sql for sql in inserts if sql.startswith('INSERT INTO "dcim_device"')]
+    # The failed INSERT raised before it ran, so the capture holds only the two saved Devices.
+    assert [[serial for serial in serials if serial in sql] for sql in device_inserts] == [
+        [serial] for serial in serials[:-1]
+    ]
+    assert inserts.index(device_inserts[0]) < next(
+        index for index, sql in enumerate(inserts) if sql.startswith('INSERT INTO "dcim_virtualchassis"')
+    )
+    assert result["success"] == []
+    assert [entry["device_id"] for entry in result["failed"]] == [96312]
+    assert {model: model.objects.count() for model in written} == before
+    assert not Device.objects.filter(serial__in=serials).exists()
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+    assert not VirtualChassis.objects.filter(domain="librenms-default-96312").exists()
+
+    retry = run()
+
+    assert [entry["device_id"] for entry in retry["success"]] == [96312]
+    assert retry["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain="librenms-default-96312")
+    assert set(chassis.members.values_list("serial", flat=True)) == set(serials)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client, live_librenms, htmx):
     """The failed chassis rolls the device back, so the answer reports a failed row and no import."""
