@@ -41,8 +41,6 @@ from .cache import (
     get_chassis_inventory_cache_key,
     get_cache_metadata_key,
     get_import_device_cache_key,
-    get_validated_device_cache_key,
-    import_configuration_generation,
     search_metadata_is_current,
     serial_rules_version,
 )
@@ -1552,8 +1550,6 @@ def process_device_filters(  # noqa: C901
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
-    # Read before the configuration, so a row validated after an edit is stored under the old generation.
-    generation = import_configuration_generation()
     serial_rules = SerialRules.load()
     numbering_rules = load_numbering_rules()
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
@@ -1577,16 +1573,6 @@ def process_device_filters(  # noqa: C901
         device.pop("_validation", None)
 
         device_id = device["device_id"]
-        cache_key = get_validated_device_cache_key(
-            server_key=api.server_key,
-            filters=filters,
-            device_id=device_id,
-            vc_enabled=vc_detection_enabled,
-            use_sysname=use_sysname,
-            strip_domain=strip_domain,
-            serial_rules=serial_rules,
-            generation=generation,
-        )
         validation = validate_search_row(
             api,
             device,
@@ -1604,7 +1590,6 @@ def process_device_filters(  # noqa: C901
 
         device["_validation"] = validation
         validated_devices.append(device)
-        cache.set(cache_key, device, timeout=api.cache_timeout)
 
     # Store cache metadata (timestamp) for all filter operations
     # This enables countdown display regardless of background job vs synchronous execution

@@ -113,11 +113,13 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             user: User who requested the result page
 
         Returns:
-            List[dict]: Validated devices from job cache, or [] if cache expired
+            List[dict]: The job's rows, validated again, or [] if their cache expired
 
         """
         from core.models import Job
 
+        # True once a raw row of the job is read, so a job whose rows all match NetBox now is not expired.
+        self._job_rows_read = False
         try:
             job = Job.objects.get(pk=job_id, user=user)
         except Job.DoesNotExist:
@@ -128,17 +130,14 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             logger.warning(f"Job {job_id} status is {job.status}, not completed")
             return []
 
-        # Load cached devices from job using shared cache keys
-        from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
-        from netbox_librenms_plugin.import_utils.bulk_import import (
-            _refresh_existing_device,
-            _stopped_at_unavailable_serial,
-        )
+        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.bulk_import import validate_search_row
+        from netbox_librenms_plugin.import_utils.virtual_chassis import load_numbering_rules
         from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.utils import row_identity_matches
 
         job_data = job.data or {}
         device_ids = job_data.get("device_ids", [])
-        filters = job_data.get("filters", {})
         parsed_server = parse_configured_server_key(job_data)
         resolved_server_key = (
             self.rebind_api_for_server(parsed_server.server_key) if parsed_server.server_key is not None else None
@@ -157,6 +156,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         vc_enabled = job_data.get("vc_detection_enabled", False)
         use_sysname = job_data.get("use_sysname", True)
         strip_domain = job_data.get("strip_domain", False)
+        exclude_existing = job_data.get("exclude_existing", False)
 
         # Extract cache metadata for frontend warnings
         self._cache_timestamp = job_data.get("cached_at")
@@ -168,32 +168,31 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             logger.warning(f"Job {job_id} missing device_ids")
             return []
 
-        # Fetch devices from cache using shared keys; a serial rule edit since the job makes them a miss.
+        # The job cached the raw LibreNMS rows; each row is validated again as a search validates it.
         validated_devices = []
         serial_rules = SerialRules.load()
+        numbering_rules = load_numbering_rules()
         for device_id in device_ids:
-            cache_key = get_validated_device_cache_key(
-                server_key=server_key,
-                filters=filters,
-                device_id=device_id,
-                vc_enabled=vc_enabled,
+            device = cache.get(get_import_device_cache_key(device_id, server_key))
+            if not row_identity_matches(device, device_id):
+                logger.warning(f"Device {device_id} from job {job_id} not in cache (may have expired)")
+                continue
+            validation = validate_search_row(
+                self._librenms_api,
+                device,
+                vc_detection_enabled=vc_enabled,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
                 serial_rules=serial_rules,
+                numbering_rules=numbering_rules,
             )
-            device = cache.get(cache_key)
-            if isinstance(device, dict) and isinstance(device.get("_validation"), dict):
-                # The rows may have changed since the job: refresh the match as a cached search does.
-                # A partial row keeps its blocker: only a new search validates it again.
-                if not _stopped_at_unavailable_serial(device["_validation"]):
-                    _refresh_existing_device(
-                        device["_validation"], libre_device=device, server_key=server_key, serial_rules=serial_rules
-                    )
-                validated_devices.append(device)
-            else:
-                logger.warning(f"Device {device_id} from job {job_id} not in cache (may have expired)")
+            self._job_rows_read = True
+            if exclude_existing and validation["existing_device"]:
+                continue
+            device["_validation"] = validation
+            validated_devices.append(device)
 
-        if not validated_devices and device_ids:
+        if not self._job_rows_read:
             logger.error(f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache.")
         else:
             # Mirror the job's naming settings so toggle state matches the cached results
@@ -268,7 +267,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 job_id = int(job_id)
                 logger.info(f"Loading results from job {job_id}")
                 validated_devices = self._load_job_results(job_id, request.user)
-                if validated_devices:
+                if self._job_rows_read:
                     self._import_data = validated_devices
                     self._job_results_loaded = True
                     # Job results are cached data, so mark as from_cache
