@@ -1,0 +1,16 @@
+<!-- ruleid: sync-tab-url-through-sync-query -->
+<a href="?tab={{ table.tab }}{% if server_key %}&server_key={{ server_key|urlencode }}{% endif %}&{{ page_param }}={{ p }}" class="page-link">{{ p }}</a>
+<!-- ruleid: sync-tab-url-through-sync-query -->
+<a href="?tab=interfaces{% if interface_sync.server_key %}&server_key={{ interface_sync.server_key|urlencode }}{% endif %}&interfaces_show_ignored=1">Show ignored</a>
+<!-- ruleid: sync-tab-url-through-sync-query -->
+<a class="dropdown-item" href="{{ request.path }}?{% if active_sync_tab %}tab={{ active_sync_tab|urlencode }}&amp;{% endif %}server_key={{ mapping.server_key|urlencode }}">Server</a>
+<!-- ruleid: sync-tab-url-through-sync-query -->
+<a href="{{ sync_url }}?server_key={{ server_key|urlencode }}&amp;tab=cables">Cables</a>
+<!-- ok: sync-tab-url-through-sync-query -->
+<a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=p %}" class="page-link">{{ p }}</a>
+<!-- ok: sync-tab-url-through-sync-query -->
+<a class="nav-link" data-tab="cables" data-bs-toggle="tab" href="{{ tab_url }}">Cables</a>
+<!-- ok: sync-tab-url-through-sync-query -->
+<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}"></div>
+<!-- ok: sync-tab-url-through-sync-query -->
+{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=cable_sync.filters prefix="cables_" tab="cables" %}

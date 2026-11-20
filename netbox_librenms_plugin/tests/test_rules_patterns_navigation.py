@@ -31,6 +31,7 @@ RULE_LIST_ROUTES = [
     "carrierautoinstallrule_list",
     "portstacklagpattern_list",
     "serialsensortypepattern_list",
+    "vcmembernumberingrule_list",
 ]
 
 

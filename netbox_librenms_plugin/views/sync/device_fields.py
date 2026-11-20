@@ -13,7 +13,8 @@ from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, chassis_serial_key, serials_match
+from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
+from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name
 from netbox_librenms_plugin.platform_versions import (
     FactsSource,
     NewOSPlatform,
@@ -36,13 +37,29 @@ from netbox_librenms_plugin.server_mappings import (
     require_server_key,
     set_preference,
 )
+from netbox_librenms_plugin.serial_identity import (
+    RETYPE_HELD,
+    SerialRules,
+    assignment_lock,
+    device_assignment,
+    display,
+    is_sole_holder,
+    lock_chassis_of,
+    retype_conflict,
+    retype_lock,
+    retype_scope,
+    serial_refusal,
+)
 from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncTab
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
+from netbox_librenms_plugin.transactions import (
+    atomic_with_events,
+    classify_conflict,
+    run_transaction,
+    update_existing_row,
+)
 from netbox_librenms_plugin.utils import (
     match_librenms_hardware_to_device_type,
-    normalize_serial,
-    normalize_stack_serial,
     resolve_naming_preferences,
     exception_text_for,
     validation_error_detail,
@@ -143,9 +160,11 @@ class _WriteRefused(Exception):
         self.level = level
 
 
-def _write_device_field(view, request, pk, server_key, field, value, action):
+def _write_device_field(view, request, pk, server_key, field, value, action, *, check=None):
     """
     Write *value* to *field* of the locked device, and report a failure to *request*.
+
+    *check*, when given, reads the changed locked row and raises ``_WriteRefused`` to stop the write.
 
     Returns:
         tuple: ``(old_value, None)`` after the write, or ``(None, redirect)`` when the write failed.
@@ -156,16 +175,67 @@ def _write_device_field(view, request, pk, server_key, field, value, action):
     def apply(row):
         old_values.append(getattr(row, field))
         setattr(row, field, value)
+        if check is not None:
+            check(row)
 
     try:
         update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
     except Device.DoesNotExist:
         messages.error(request, "Device no longer exists.")
         return None, _device_sync_redirect(request, pk, server_key)
+    except _WriteRefused as exc:
+        messages.add_message(request, exc.level, str(exc))
+        return None, _device_sync_redirect(request, pk, server_key)
     except (ValidationError, IntegrityError) as e:
         if classify_conflict(e):
             raise
         messages.error(request, write_failure_message(e, action, field, Device, request.user))
+        return None, _device_sync_redirect(request, pk, server_key)
+    return old_values[0], None
+
+
+def _write_device_serial(view, request, pk, server_key, incoming):
+    """
+    Write the LibreNMS serial *incoming* to the locked device, and report a refusal or failure to *request*.
+
+    The serial identity locks come before the row lock, then the conflict check reads the locked row.
+
+    Returns:
+        tuple: ``(old serial, None)`` after the write, or ``(None, redirect)`` when nothing was written.
+
+    """
+    serial = display(incoming)
+    old_values = []
+
+    def apply(row):
+        assignment = device_assignment(row, incoming, rules=serial_rules)
+        if assignment.conflict is not None:
+            raise _WriteRefused(serial_conflict_text(assignment.conflict, serial, request.user))
+        if assignment.absent:
+            raise _WriteRefused("No serial number available in LibreNMS", messages.WARNING)
+        if assignment.value is None:
+            raise _WriteRefused("The NetBox serial already matches LibreNMS.", messages.INFO)
+        old_values.append(row.serial)
+        row.serial = assignment.value
+
+    try:
+        with atomic_with_events():
+            serial_rules = SerialRules.load()
+            assignment_lock([incoming], model=Device, rules=serial_rules)
+            lock_chassis_of(pk)
+            update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
+    except Device.DoesNotExist:
+        messages.error(request, "Device no longer exists.")
+        return None, _device_sync_redirect(request, pk, server_key)
+    except _WriteRefused as exc:
+        messages.add_message(request, exc.level, str(exc))
+        return None, _device_sync_redirect(request, pk, server_key)
+    except (ValidationError, IntegrityError) as e:
+        if classify_conflict(e):
+            raise
+        messages.error(
+            request, write_failure_message(e, f"update serial to '{serial}'", "serial", Device, request.user)
+        )
         return None, _device_sync_redirect(request, pk, server_key)
     return old_values[0], None
 
@@ -271,7 +341,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             and device.vc_position is not None
         ):
             resolved_name = _member_name(
-                resolved_name, device.vc_position, device.serial, None, chassis_serial_key(device)
+                resolved_name, device.vc_position, device.serial, None, SerialRules.load().for_device(device)
             )
 
         if not resolved_name:
@@ -329,15 +399,13 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Failed to retrieve device info from LibreNMS")
             return _device_sync_redirect(request, pk, server_key)
 
-        serial = normalize_serial(device_info.get("serial"))
-
-        if not normalize_stack_serial(serial):
-            messages.warning(request, "No serial number available in LibreNMS")
+        incoming = device_info.get("serial")
+        # A value that is not a serial, or that the database cannot hold, is refused before it locks or resolves.
+        if refusal := serial_refusal(incoming, Device):
+            messages.error(request, refusal)
             return _device_sync_redirect(request, pk, server_key)
-
-        old_serial, failed = _write_device_field(
-            self, request, pk, server_key, "serial", serial, f"update serial to '{serial}'"
-        )
+        serial = display(incoming)
+        old_serial, failed = _write_device_serial(self, request, pk, server_key, incoming)
         if failed is not None:
             return failed
 
@@ -415,9 +483,27 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return _device_sync_redirect(request, pk, server_key)
 
         device_type = match_result["device_type"]
-        old_device_type, failed = _write_device_field(
-            self, request, pk, server_key, "device_type", device_type, f"update device type to '{device_type}'"
-        )
+        # The type decides the identity of the stored serials: their identity locks come before the row lock.
+        serial_rules = SerialRules.load()
+        scope = retype_scope(device)
+
+        def no_new_holder(row):
+            if retype_conflict(row, device_type, rules=serial_rules, scope=scope):
+                raise _WriteRefused(RETYPE_HELD)
+
+        with atomic_with_events():
+            retype_lock(scope, rules=serial_rules)
+            lock_chassis_of(pk)
+            old_device_type, failed = _write_device_field(
+                self,
+                request,
+                pk,
+                server_key,
+                "device_type",
+                device_type,
+                f"update device type to '{device_type}'",
+                check=no_new_holder,
+            )
         if failed is not None:
             return failed
 
@@ -660,9 +746,13 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         """Run one attempt: write each posted member serial; return the count of writes and the error texts."""
         assignments_made = 0
         errors = []
+        serial_rules = SerialRules.load()
+        # One set of serial identity locks for every row of the attempt, before any member row lock.
+        assignment_lock([raw_serial for raw_serial, member_id in rows if member_id], model=Device, rules=serial_rules)
+        # Every member that the attempt writes must be in this chassis, so one chassis lock covers them.
+        lock_chassis_of(device.pk)
         for raw_serial, member_id in rows:
-            serial = normalize_serial(raw_serial)
-            if not member_id or not normalize_stack_serial(serial):
+            if not member_id or not display(raw_serial):
                 continue
             try:
                 member_pk = int(member_id)
@@ -670,35 +760,56 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                 errors.append(f"Device with ID {member_id} not found")
                 continue
             try:
-                error = self._assign_member_serial(device, member_pk, serial)
+                if self._assign_member_serial(device, member_pk, raw_serial, serial_rules):
+                    assignments_made += 1
             except Device.DoesNotExist:
                 errors.append(f"Device with ID {member_id} not found")
-                continue
-            if error:
-                errors.append(error)
-            else:
-                assignments_made += 1
+            except _WriteRefused as exc:
+                errors.append(str(exc))
         return assignments_made, errors
 
-    def _assign_member_serial(self, device, member_id, serial):
-        """Write *serial* to the locked member *member_id* of the chassis of *device*; return the error text, or None."""
+    def _assign_member_serial(self, device, member_id, raw_serial, serial_rules):
+        """Write *raw_serial* to the locked member *member_id* of the chassis of *device*; return whether it saved one.
+
+        Raises:
+            _WriteRefused: The member refuses the serial; the message is for the user.
+
+        """
         locked = []
+        saved = []
 
         def apply(member):
             locked.append(member)
             if member.virtual_chassis_id != device.virtual_chassis_id:
                 raise _WriteRefused(f"{member.name} is not part of the same virtual chassis")
-            member.serial = serial
+            assignment = device_assignment(member, raw_serial, rules=serial_rules)
+            if assignment.conflict is not None:
+                raise _WriteRefused(
+                    f"{member.name}: {serial_conflict_text(assignment.conflict, display(raw_serial), self.request.user)}"
+                )
+            if assignment.absent:
+                raise _WriteRefused(f"{member.name}: the LibreNMS serial identifies no hardware")
+            if assignment.value is None:
+                return False
+            member.serial = assignment.value
+            saved.append(member)
+            return None
 
         try:
             # Scoped like the page device: the member's pk comes from the POST, so the same-VC
             # check alone would let a constrained grant write a serial onto a member it does not cover.
             update_existing_row(self.restricted_queryset(Device, "change").filter(pk=member_id), apply)
-        except _WriteRefused as exc:
-            return str(exc)
         except (ValidationError, IntegrityError) as e:
-            return write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
-        return None
+            raise _WriteRefused(
+                write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
+            ) from e
+        return bool(saved)
+
+
+_SERIAL_MISMATCH_MESSAGE = (
+    "Serial number not confirmed: the device does not hold the LibreNMS serial, or another device holds it too. "
+    "Cannot convert the legacy ID."
+)
 
 
 def _posted_vc_serial_rows(data):
@@ -989,14 +1100,12 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
             return self._sync_url(object_type, pk)
 
-        netbox_serial = (getattr(obj, "serial", None) or "").strip()
         # VMs have no serial field in NetBox; skip the serial gate for them.
         is_vm = object_type == "vm"
-        if not is_vm and not serials_match(netbox_serial, device_info.get("serial"), chassis_serial_key(obj)):
-            messages.error(
-                request,
-                "Serial number mismatch — cannot convert legacy ID without serial confirmation.",
-            )
+        serial_rules = SerialRules.load()
+        incoming_serial = device_info.get("serial")
+        if not is_vm and not is_sole_holder(obj, incoming_serial, rules=serial_rules):
+            messages.error(request, _SERIAL_MISMATCH_MESSAGE)
             return self._sync_url(object_type, pk)
 
         def convert(locked):
@@ -1008,9 +1117,11 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             if not locked_mapping.legacy.is_legacy:
                 raise _WriteRefused("librenms_id changed before lock was acquired; aborting.")
             locked_id = locked_mapping.legacy.readable_id
-            locked_serial = (getattr(locked, "serial", None) or "").strip()
-            if locked_id != librenms_id or locked_serial != netbox_serial:
+            if locked_id != librenms_id:
                 raise _WriteRefused("Device data changed before lock was acquired; aborting conversion.")
+            # The serial gate again under the identity lock, with the chassis that the locked row reads now.
+            if not is_vm and not is_sole_holder(locked, incoming_serial, rules=serial_rules):
+                raise _WriteRefused(_SERIAL_MISMATCH_MESSAGE)
             change = convert_legacy(locked, server_key)
             if not change.changed:
                 raise _WriteRefused("librenms_id is already in the server-scoped JSON format.", messages.WARNING)
@@ -1018,7 +1129,11 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return change
 
         try:
-            update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
+            with atomic_with_events():
+                if not is_vm:
+                    # The serial identity locks come before the row lock.
+                    assignment_lock([incoming_serial], model=model, rules=serial_rules)
+                update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
         except model.DoesNotExist:
             messages.error(request, f"{model.__name__} no longer exists.")
             return self._sync_url(object_type, pk)

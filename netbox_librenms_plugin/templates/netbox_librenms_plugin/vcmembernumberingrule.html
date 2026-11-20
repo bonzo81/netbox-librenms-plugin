@@ -1,0 +1,34 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">VC Member Numbering Rule</h2>
+      <table class="table table-hover attr-table">
+        <tr>
+          <th scope="row">ID</th>
+          <td>{{ object.pk }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Manufacturer</th>
+          <td>{{ object.manufacturer|linkify|placeholder }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Device Type Pattern</th>
+          <td>{% if object.device_type_pattern %}<code>{{ object.device_type_pattern }}</code>{% else %}{{ ""|placeholder }}{% endif %}</td>
+        </tr>
+        <tr>
+          <th scope="row">Numbering Mode</th>
+          <td>{{ object.get_numbering_mode_display }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Description</th>
+          <td>{{ object.description|placeholder }}</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

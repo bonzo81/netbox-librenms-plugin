@@ -1,0 +1,23 @@
+{% load helpers librenms_sync_query %}
+{% if has_librenms_id or sync_partial_response %}
+<form method="post" class="sync-tab-refresh-toolbar">
+    {% csrf_token %}
+    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+    {% with model_name=object|meta:"model_name" %}
+        {% if model_name == "device" %}
+            {% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk as refresh_path %}
+        {% elif model_name == "virtualmachine" %}
+            {% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk as refresh_path %}
+        {% endif %}
+        {% if refresh_path %}
+            <button type="button" {% if server_key %}hx-post="{% sync_tab_url refresh_path %}"{% else %}disabled{% endif %}
+                    hx-target="#ipaddress-sync-content" hx-sync="#ipaddress-sync-content:drop"
+                    hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
+                    class="btn btn-outline-primary">
+                Refresh IP Addresses
+            </button>
+        {% endif %}
+    {% endwith %}
+    {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=ip_sync.cache_expiry cache_container_id="ip-cache-countdown" cache_countdown_id="ip-countdown-timer" cache_server_key=server_key %}
+</form>
+{% endif %}

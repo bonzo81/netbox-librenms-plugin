@@ -508,14 +508,14 @@ class TestStackImportPermission:
             device_id,
             f"stack-noperm-{device_id}",
             hardware=prerequisites["hardware"],
-            serial="SN-NP-A",
+            serial="SN-NP-A01",
             location=prerequisites["location"],
         )
         _register_stack(
             live_librenms,
             device_id,
             row,
-            [_chassis(100, "SN-NP-A", position=1), _chassis(200, "SN-NP-B", position=2)],
+            [_chassis(100, "SN-NP-A01", position=1), _chassis(200, "SN-NP-B01", position=2)],
         )
         user = make_user_with_perms(
             f"stack-noperm-user-{device_id}",
@@ -598,7 +598,7 @@ class TestStackImportCreatesTheVirtualChassis:
     def test_member_serials_key_the_chassis_and_the_members_are_created(self, live_librenms, caplog):
         from dcim.models import Device, VirtualChassis
 
-        members = [_chassis(100, "SN-VC-A", position=1), _chassis(200, "SN-VC-B", position=2)]
+        members = [_chassis(100, "SN-VC-A01", position=1), _chassis(200, "SN-VC-B01", position=2)]
 
         with caplog.at_level("INFO", logger=_MODULE_LOGGER):
             result = self._import(live_librenms, {411: members}, tag="stack-ok")
@@ -609,7 +609,7 @@ class TestStackImportCreatesTheVirtualChassis:
         chassis = VirtualChassis.objects.get(domain="librenms-default-411")
         members_in_netbox = Device.objects.filter(virtual_chassis=chassis)
         # The imported device is member A, so only member B is created beside it.
-        assert sorted(members_in_netbox.values_list("serial", flat=True)) == ["SN-VC-A", "SN-VC-B"]
+        assert sorted(members_in_netbox.values_list("serial", flat=True)) == ["SN-VC-A01", "SN-VC-B01"]
 
     def test_one_serial_set_under_two_different_member_labels_creates_one_chassis(self, live_librenms):
         """The dedup key is the member SERIAL set, not the member names, models or positions."""

@@ -393,21 +393,16 @@ class TestLibreNMSAPIErrorResponses:
         assert success is False
         assert isinstance(data, str) and data, "expected a non-empty error string describing the malformed inventory"
 
-    def test_null_devices_field_get_device_info(self, librenms_server):
-        """{"devices": null} in get_device_info must return (False, None) not crash."""
-        api = _make_api(librenms_server.url)
-        librenms_server.register("/api/v0/devices/42", {"devices": None})
-        success, data = api.get_device_info(42)
-        assert success is False
-        assert data is None
+    @pytest.mark.parametrize("devices", [None, []], ids=["null", "empty"])
+    def test_a_device_list_without_a_row_is_unavailable(self, librenms_server, devices):
+        """A 200 without the device row says nothing about the device: a 404 is the only absent answer."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
-    def test_empty_devices_list_get_device_info(self, librenms_server):
-        """{"devices": []} in get_device_info must return (False, None)."""
         api = _make_api(librenms_server.url)
-        librenms_server.register("/api/v0/devices/42", {"devices": []})
+        librenms_server.register("/api/v0/devices/42", {"devices": devices})
         success, data = api.get_device_info(42)
         assert success is False
-        assert data is None
+        assert isinstance(data, LibreNMSLookupError)
 
     def test_404_get_device_info(self, librenms_server):
         """404 on device endpoint must return (False, None)."""

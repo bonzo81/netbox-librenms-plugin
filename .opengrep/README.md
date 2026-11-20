@@ -70,12 +70,19 @@ unchecked until that review.
 | `no-monkeypatch-on-django-proxy` | error | A test calls a monkeypatch `setattr` or `delattr` on the Django cache, settings or connection proxy, or on a `cache` attribute of a module, also as a dotted-string target. |
 | `assert-is-not-parametrized-flag` | error | A test asserts `value is not flag`, where `flag` is a `pytest.mark.parametrize` argument with `True` or `False` values. That identity check also passes for `None`. |
 | `vc-member-name-through-helper` | error | A `_generate_vc_member_name()` call outside `_member_name()`. Such a name skips the serial rules, so it can differ from the name that import creates. Tests are excluded, and an import alias of the function is not followed. |
-| `device-serial-compare-through-serials-match` | error | A `==` or `!=` comparison with a `.serial` attribute in `views/` or `import_utils/`, outside tests. `Device.serial` holds the raw LibreNMS serial, so a comparison calls `serials_match()`, which applies the serial rules to both sides. `views/sync/modules.py` is excluded because Module serials are normalized at write, so a Device comparison added there is not checked. A serial copied into a local first is not followed. |
+| `serial-identity-through-owner` | error | Outside `serial_identity.py`, tests and migrations: a `==` or `!=` comparison of a serial value (a `.serial` attribute, a name that ends in `serial`, or a `serial` or `entPhysicalSerialNum` field read, also lowercased or trimmed); a `setdefault()`, a subscript assignment or an `add()` keyed by such a value; a `sorted()` of serials; a `filter`, `exclude`, `get` or `Q` on `serial` or `serial__*`, also across a relation such as `device__serial` and through a `**{...}` dict literal; the serial NormalizationRules applied directly; or an import or call of a helper that `serial_identity` replaced. Limits: a serial copied into a local whose name does not end in `serial` is not followed, a comparison through a helper function is not followed, and a dict or set that a literal or a comprehension builds is not checked. |
+| `batch-validation-shares-serial-rules` | error | A `validate_device_for_import()` call inside a `for` or `while` loop without `serial_rules=`, with `serial_rules=None`, or with a `SerialRules.load()` in the call, so each device reads the serial rules again. Tests are excluded. A loop in a called helper is not followed. |
 | `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
 | `regex-error-must-raise` | error | A handler that catches `re.error`, `re.PatternError` or `REGEX_COMPILE_ERRORS` and does not end with a top-level `raise`. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
 | `rule-error-message-needs-projection` | error | A `str()`, `repr()`, f-string or `format()` conversion, or an `args` read, of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
+| `sync-tab-url-through-sync-query` | error | A hand-built `?tab=`, `&tab=` or `&amp;tab=` query string, or a `?{% ... %}tab=` one, in package Python or a template, outside `sync_query.py`. |
 | `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
 | `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
+| `oob-controller-flag-has-one-writer` | error | A write of `row_is_oob_controller` outside `classify_oob_controller()`. Only a subscript assignment of the key is checked. |
+
+The `sync-tab-attributes-through-parser` rule rejects a sync container regex that closes the tag
+immediately after `data-active-tab`. It checks direct `re.search` calls in tests. Other attribute
+orders and regex API aliases are outside this narrow check.
 
 ## Scope
 
@@ -97,6 +104,9 @@ through its helpers. The template rule applies to `.html` files.
 own conflict after the last attempt.
 `post-write-scope-through-helper` excludes tests and migrations.
 `titled-icon-needs-accessible-name` applies to `.py`, `.html` and `.js` files and excludes tests.
+`sync-tab-url-through-sync-query` applies to `.py` and `.html` files. It excludes tests,
+`sync_query.py`, which builds the sync page URLs, and `views/sync/modules.py`: the Modules tab
+redirect keeps its own query and is outside the filter work.
 The remaining rules apply to Python files in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
@@ -252,6 +262,12 @@ local or module string constant. A key built at run time is outside the check. T
 It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`
 subclass, add its name to the rule and a fixture line.
 
+`sync-tab-url-through-sync-query` reads the source text, so it also reports a comment that
+writes such a query. It does not see a query that code builds from parts, such as `"?" + "tab="`,
+a key in a variable, or a URL that a script builds. The navigation contract tests
+(`tests/test_sync_filter_navigation_contract.py`) render each sync tab and check every link, form
+and `hx-*` URL; they cover those cases, and a missing page key in a URL that `sync_query` builds.
+
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.
 
@@ -347,3 +363,8 @@ aliases and consumers in other modules are outside this check.
 `mapping-create-recovers-validation-races` rejects an IntegrityError-only recovery
 in `_map_os_platform`. The creator must also recover uniqueness errors from
 `full_clean()`. Other creators and exception aliases are outside this check.
+
+The `module-writer-claims-released-identities` rule rejects incoming-only claims in the serial
+update and replacement views, and moved-only claims in the move view. Installation can claim one
+incoming serial. The rule covers these concrete omissions. It cannot infer which identities an
+arbitrary write set needs. Real PostgreSQL concurrency tests cover the writer protocol.

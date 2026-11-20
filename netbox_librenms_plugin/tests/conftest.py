@@ -559,7 +559,44 @@ def make_virtual_chassis_members(tag, count=2):
         member.vc_position = position
         member.save()
         members.append(member)
+    # Module sync reads the member numbering rule of the master's DeviceType.
+    virtual_chassis.master = members[0]
+    virtual_chassis.save()
     return virtual_chassis, members
+
+
+def prepared_stack(master, members, *, master_index=0):
+    """
+    Return ``(prepared, master entry)``: *members* prepared for *master*'s DeviceType, as import prepares a stack.
+
+    Each member dict's ``position`` is its reported number, so no numbering rule keeps it.
+    """
+    from netbox_librenms_plugin.import_utils.virtual_chassis import prepare_virtual_chassis
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    detected = {
+        "is_stack": True,
+        "member_count": len(members),
+        "members": [{**member, "inventory_position": member.get("position")} for member in members],
+    }
+    prepared = prepare_virtual_chassis(
+        detected,
+        device_type=master.device_type,
+        master_name=master.name,
+        device_serial=members[master_index].get("serial"),
+        serial_rules=SerialRules.load(),
+    )
+    return prepared, prepared["members"][master_index]
+
+
+def create_prepared_stack(master, members, libre_device, *args, master_index=0, **kwargs):
+    """Create the Virtual Chassis of *master* from *members*, prepared as import prepares them."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+    prepared, master_member = prepared_stack(master, members, master_index=master_index)
+    return create_virtual_chassis_with_members(
+        master, prepared, libre_device, *args, master_member=master_member, **kwargs
+    )
 
 
 def junos_vc_inventory():
@@ -661,7 +698,72 @@ def make_virtual_chassis(name, *devices):
         dev.virtual_chassis = vc
         dev.vc_position = position
         dev.save()
+    if devices:
+        vc.master = devices[0]
+        vc.save()
     return vc
+
+
+# The root of a stack inventory: module sync gives a row a member only below a member row of a stack.
+STACK_ROOT_INDEX = 9000
+
+
+def stack_root_row():
+    """Return the ``stack`` root row that holds the member chassis rows of a stack inventory."""
+    return {
+        "entPhysicalIndex": STACK_ROOT_INDEX,
+        "entPhysicalContainedIn": 0,
+        "entPhysicalClass": "stack",
+        "entPhysicalName": "Stack",
+        "entPhysicalSerialNum": "",
+    }
+
+
+def stack_inventory(rows, members, *, on_member=None):
+    """
+    Return *rows* as the stack inventory of the Virtual Chassis *members*.
+
+    Each root ``chassis`` row moves under a stack root at the position of the member whose serial
+    it carries, else of the next member without a row. Each member without a row gets a
+    serial-less chassis row, so the stack names every member. *on_member* maps a row index to a
+    member position: that row moves under the member's chassis row.
+    """
+    rows = [dict(row) for row in rows]
+    free = list(members)
+    chassis = [
+        row for row in rows if row.get("entPhysicalContainedIn") == 0 and row.get("entPhysicalClass") == "chassis"
+    ]
+    for row in chassis:
+        owner = next(
+            (member for member in free if member.serial and member.serial == row.get("entPhysicalSerialNum")), None
+        )
+        owner = owner or next(member for member in free if member.serial != row.get("entPhysicalSerialNum"))
+        free.remove(owner)
+        row.update(entPhysicalContainedIn=STACK_ROOT_INDEX, entPhysicalParentRelPos=owner.vc_position)
+    used = {row.get("entPhysicalIndex") for row in rows}
+    extra = []
+    for member in free:
+        index = STACK_ROOT_INDEX + 1 + member.vc_position
+        assert index not in used, f"stack_inventory needs a free index for member {member.vc_position}"
+        extra.append(
+            {
+                "entPhysicalIndex": index,
+                "entPhysicalContainedIn": STACK_ROOT_INDEX,
+                "entPhysicalClass": "chassis",
+                "entPhysicalName": f"Member {member.vc_position}",
+                "entPhysicalSerialNum": "",
+                "entPhysicalParentRelPos": member.vc_position,
+            }
+        )
+    member_rows = {
+        row["entPhysicalParentRelPos"]: row["entPhysicalIndex"]
+        for row in [*rows, *extra]
+        if row.get("entPhysicalContainedIn") == STACK_ROOT_INDEX
+    }
+    for row in rows:
+        if row.get("entPhysicalIndex") in (on_member or {}):
+            row["entPhysicalContainedIn"] = member_rows[on_member[row["entPhysicalIndex"]]]
+    return [stack_root_row(), *rows, *extra]
 
 
 def cable_together(term_a, term_b):

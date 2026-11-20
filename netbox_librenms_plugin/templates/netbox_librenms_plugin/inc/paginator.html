@@ -1,16 +1,16 @@
 {% load i18n %}
-
+{% load librenms_sync_query %}
+{# Every link keeps the page query (server, name field, sort, filters) and states only its tab, page and size. #}
 
 {% if table.page %}
-  {% with page_param=table.prefix|stringformat:"s"|add:"page" %}
   <div class="d-flex justify-content-between align-items-center border-{% if placement == 'top' %}bottom{% else %}top{% endif %} p-2">
     {% if table.paginator.num_pages > 1 %}
       <nav aria-label="{% trans "Page selection" %}">
         <ul class="pagination mb-0">
           {% if table.page.has_previous %}
             <li class="page-item">
-              <a href="?tab={{ table.tab }}{% if server_key %}&server_key={{ server_key|urlencode }}{% endif %}&{{ page_param }}={{ table.page.previous_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}{% if show_ignored %}&{{ table.prefix }}show_ignored=1{% endif %}" class="page-link">
-                <i class="mdi mdi-chevron-left"></i>
+              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=table.page.previous_page_number per_page=table.paginator.per_page %}" class="page-link" aria-label="{% trans "Previous page" %}">
+                <i class="mdi mdi-chevron-left" aria-hidden="true"></i>
               </a>
             </li>
           {% endif %}
@@ -18,7 +18,7 @@
           {% for p in table.page.smart_pages %}
             <li class="page-item{% if table.page.number == p %} active{% endif %}">
               {% if p %}
-              <a href="?tab={{ table.tab }}{% if server_key %}&server_key={{ server_key|urlencode }}{% endif %}&{{ page_param }}={{ p }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}{% if show_ignored %}&{{ table.prefix }}show_ignored=1{% endif %}" class="page-link">{{ p }}</a>
+              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=p per_page=table.paginator.per_page %}" class="page-link">{{ p }}</a>
               {% else %}
                 <span class="page-link" disabled>&hellip;</span>
               {% endif %}
@@ -27,8 +27,8 @@
 
           {% if table.page.has_next %}
             <li class="page-item">
-              <a href="?tab={{ table.tab }}{% if server_key %}&server_key={{ server_key|urlencode }}{% endif %}&{{ page_param }}={{ table.page.next_page_number }}&{{ table.prefix }}per_page={{ table.paginator.per_page }}&interface_name_field={{ interface_name_field }}{% if show_ignored %}&{{ table.prefix }}show_ignored=1{% endif %}" class="page-link">
-                <i class="mdi mdi-chevron-right"></i>
+              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=table.page.next_page_number per_page=table.paginator.per_page %}" class="page-link" aria-label="{% trans "Next page" %}">
+                <i class="mdi mdi-chevron-right" aria-hidden="true"></i>
               </a>
             </li>
           {% endif %}
@@ -36,10 +36,13 @@
       </nav>
     {% endif %}
 
-    <small class="text-end text-muted">
+    <small class="text-end text-muted"{% if placement == 'top' %} role="status" aria-live="polite"{% endif %}>
       {% blocktrans trimmed with start=table.page.start_index end=table.page.end_index total=table.paginator.count %}
         Showing {{ start }}-{{ end }} of {{ total }}
       {% endblocktrans %}
+      {% if filtered_from %}
+        {% blocktrans trimmed with total=filtered_from %}(filtered from {{ total }}){% endblocktrans %}
+      {% endif %}
     </small>
 
     <nav class="text-end" aria-label="{% trans "Pagination options" %}">
@@ -49,11 +52,10 @@
         </button>
         <div class="dropdown-menu">
           {% for n in table.paginator.get_page_lengths %}
-          <a href="?tab={{ table.tab }}{% if server_key %}&server_key={{ server_key|urlencode }}{% endif %}&{{ table.prefix }}per_page={{ n }}&{{ page_param }}={{ table.page.number }}&interface_name_field={{ interface_name_field }}{% if show_ignored %}&{{ table.prefix }}show_ignored=1{% endif %}" class="dropdown-item">{{ n }}</a>
+          <a href="{% sync_tab_url prefix=table.prefix tab=table.tab per_page=n page=table.page.number %}" class="dropdown-item">{{ n }}</a>
           {% endfor %}
         </div>
       </div>
     </nav>
   </div>
-  {% endwith %}
 {% endif %}

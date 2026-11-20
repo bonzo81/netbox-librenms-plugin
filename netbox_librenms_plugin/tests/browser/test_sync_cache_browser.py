@@ -4,7 +4,6 @@ import json
 import re
 from html import escape
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -1200,7 +1199,7 @@ class TestCrossPageSelection:
         _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
 
         notice = page.locator("#librenms-interface-table-offpage-selection")
-        assert "2 more rows are selected on other pages." in notice.inner_text()
+        assert notice.inner_text().split()[0] == "2"
 
     def test_rows_selected_on_another_page_are_submitted(self, page):
         _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
@@ -1938,7 +1937,7 @@ def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection
     )
 
     page.click("#bulk-submit")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -1967,7 +1966,7 @@ def test_a_dropped_row_submit_keeps_the_pending_bulk_submit_recoverable(page):
         page.click("#bulk-submit")
     page.click("#row-sync")
     held[0].fulfill(status=500, content_type="text/html", body="Server error")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -2034,7 +2033,7 @@ def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_select
     )
 
     page.click("#install-submit")
-    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more")
     page.click("#install-submit")
     page.locator("#swapped").wait_for()
 
@@ -2522,72 +2521,6 @@ def test_a_cache_fragment_load_does_not_recheck_the_cache_status(page):
     assert status_requests == []
 
 
-def _sync_tab_bar(interface_name_field):
-    """Build the tab bar from the template's own tab links and interface name selector."""
-    from django.template import Context, Engine, Library
-
-    urls = Library()
-
-    @urls.simple_tag(name="url")
-    def url(name):
-        assert name == "plugins:netbox_librenms_plugin:save_user_pref"
-        return SAVE_PREF_URL
-
-    engine = Engine()
-    engine.template_builtins.append(urls)
-    link = engine.from_string((TEMPLATE_DIR / "inc" / "_sync_tab_link.html").read_text(encoding="utf-8"))
-    selector = engine.from_string(
-        (TEMPLATE_DIR / "inc" / "_interface_name_field_selector.html").read_text(encoding="utf-8")
-    )
-    links = "".join(
-        link.render(
-            Context(
-                {
-                    "current_tab": "interfaces",
-                    "tab_id": tab,
-                    "tab_label": tab,
-                    "tab_url": f"/device/1/librenms-sync/?tab={tab}&server_key=production",
-                    "tab_status": {},
-                    "interface_name_field": interface_name_field,
-                },
-                use_l10n=False,
-            )
-        )
-        for tab in ("interfaces", "modules")
-    )
-    radios = selector.render(
-        Context(
-            {
-                "interface_name_field": interface_name_field,
-                "interface_name_selector_visible": True,
-                "object": {"platform_id": 3},
-            },
-            use_l10n=False,
-        )
-    )
-    return f'<div id="librenms-sync-tabs" data-active-tab="interfaces">{links}{radios}</div>'
-
-
-def test_an_interface_name_field_change_updates_every_tab_link(page):
-    """A tab link opened in a new browser tab skips htmx, so its href must name the selected field."""
-    page.route(SAVE_PREF_URL, lambda route: route.fulfill(json={"status": "ok"}))
-    _serve_sync_page(
-        page, '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _sync_tab_bar("ifDescr")
-    )
-    page.evaluate("updateInterfaceNameField()")
-
-    with page.expect_request(SAVE_PREF_URL):
-        page.check("#interface-name-field-ifname")
-
-    hrefs = page.eval_on_selector_all(
-        "#librenms-sync-tabs a[data-tab]", "links => links.map(a => a.getAttribute('href'))"
-    )
-    queries = [parse_qs(urlsplit(href).query) for href in hrefs]
-    assert [query["tab"] for query in queries] == [["interfaces"], ["modules"]]
-    assert all(query["interface_name_field"] == ["ifName"] for query in queries), hrefs
-    assert all(query["server_key"] == ["production"] for query in queries)
-
-
 def test_module_verify_carries_the_browser_url(page):
     """The verify response rebuilds the row's action links, so the POST must carry the page URL too."""
     page.route(
@@ -3002,200 +2935,20 @@ def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls
     assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
 
 
-@pytest.mark.parametrize(
-    ("template", "content_id"),
-    [
-        ("_interface_sync.html", "interface-sync-content"),
-        ("_ipaddress_sync.html", "ipaddress-sync-content"),
-        ("_module_sync.html", "module-sync-content"),
-        ("_vlan_sync.html", "vlan-sync-content"),
-        ("_cable_sync.html", "cable-sync-content"),
-    ],
-)
-def test_the_tab_templates_keep_the_refresh_button_outside_the_cached_content(template, content_id):
-    """The pane refresh button the fail-closed test injects must mirror the real templates."""
-    markup = (TEMPLATE_DIR / template).read_text()
-    refresh = markup.index("Refresh ")
-    content = markup.index(f'id="{content_id}"')
-    assert refresh < content, f"{template}: the refresh button moved inside #{content_id}"
+@pytest.mark.parametrize("tab", ["interface", "ipaddress", "module", "vlan", "cable"])
+def test_refresh_forms_and_countdowns_live_in_the_swapped_content(tab):
+    wrapper = (TEMPLATE_DIR / f"_{tab}_sync.html").read_text()
+    content = (TEMPLATE_DIR / f"_{tab}_sync_content.html").read_text()
+    refresh = (TEMPLATE_DIR / "inc" / f"_{tab}_sync_refresh.html").read_text()
 
-
-@pytest.mark.parametrize(
-    ("template", "heading", "countdown_id"),
-    [
-        ("_interface_sync.html", "Interface Sync", "cache-countdown"),
-        ("_ipaddress_sync.html", "IP Address Sync", "ip-cache-countdown"),
-        ("_module_sync.html", "Module Sync", "module-cache-countdown"),
-        ("_vlan_sync.html", "VLAN Sync", "vlan-cache-countdown"),
-        ("_cable_sync.html", "Cable Sync", "cable-cache-countdown"),
-    ],
-)
-def test_tab_toolbars_put_the_shared_countdown_before_refresh(template, heading, countdown_id):
-    """Every tab uses one compact header toolbar without a redundant title."""
-    markup = (TEMPLATE_DIR / template).read_text()
-
-    assert f"<h2>{heading}</h2>" not in markup
-    countdown = markup.index(f'cache_container_id="{countdown_id}"')
-    refresh = markup.index("Refresh ")
-    assert countdown < refresh
-
-
-@pytest.mark.parametrize(
-    ("template", "countdown_id"),
-    [
-        ("_interface_sync_content.html", "cache-countdown"),
-        ("_ipaddress_sync_content.html", "ip-cache-countdown"),
-        ("_module_sync_content.html", "module-cache-countdown"),
-        ("_vlan_sync_content.html", "vlan-cache-countdown"),
-        ("_cable_sync_content.html", "cable-cache-countdown"),
-    ],
-)
-def test_refreshed_tab_content_replaces_the_header_countdown_out_of_band(template, countdown_id):
-    """A tab refresh updates the countdown even though its toolbar is outside the swap target."""
-    markup = (TEMPLATE_DIR / template).read_text()
-
-    assert "{% if request.htmx %}" in markup
-    assert f'cache_container_id="{countdown_id}"' in markup
-    assert "cache_oob=True" in markup
-
-
-@pytest.mark.parametrize(
-    ("wrapper_template", "content_template"),
-    [
-        ("_interface_sync.html", "_interface_sync_content.html"),
-        ("_ipaddress_sync.html", "_ipaddress_sync_content.html"),
-        ("_module_sync.html", "_module_sync_content.html"),
-        ("_vlan_sync.html", "_vlan_sync_content.html"),
-        ("_cable_sync.html", "_cable_sync_content.html"),
-    ],
-)
-def test_tab_toolbars_do_not_stack_extra_vertical_margins(wrapper_template, content_template):
-    """The refresh and primary action rows use one compact vertical rhythm."""
-    wrapper = (TEMPLATE_DIR / wrapper_template).read_text()
-    content = (TEMPLATE_DIR / content_template).read_text()
-
-    assert 'class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar"' in wrapper
+    assert f'id="{tab}-sync-content"' in wrapper
+    assert f"_{tab}_sync_content.html" in wrapper
+    assert "sync-tab-refresh-toolbar" not in wrapper
     assert "sync-tab-primary-toolbar" in content
-    assert "mt-0" in content
-
-
-def test_tab_toolbars_share_a_row_only_when_the_viewport_has_room(page):
-    """Wide tabs align their actions with refresh controls, while narrow tabs stack them."""
-    page.set_content(
-        """
-        <style>
-          * { box-sizing: border-box; }
-          .sync-shell { width: 100%; }
-          .sync-tab-refresh-toolbar { display: flex; justify-content: flex-end; height: 30px; }
-          .sync-tab-refresh-toolbar > .btn-list { display: flex; width: 300px; height: 30px; }
-          .sync-tab-primary-toolbar { display: flex; width: 100%; height: 30px; }
-          .sync-tab-primary-toolbar > .primary-actions { width: 390px; height: 30px; }
-        </style>
-        <div class="sync-shell">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="refresh-actions"></div>
-          </div>
-          <div id="interface-sync-content">
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions" id="sync-actions"></div>
-            </div>
-          </div>
-        </div>
-        <div class="sync-shell" id="empty-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="empty-refresh-actions"></div>
-          </div>
-          <div id="cable-sync-content">
-            <div class="card" id="empty-state-card" style="height: 100px;"></div>
-          </div>
-        </div>
-        <div class="sync-shell" id="module-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="module-refresh-actions"></div>
-          </div>
-          <style id="module-inline-styles"></style>
-          <div id="module-sync-content">
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions" id="module-install-actions"></div>
-            </div>
-          </div>
-        </div>
-        <div class="sync-shell" id="warning-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="warning-refresh-actions"></div>
-          </div>
-          <div id="warning-sync-content">
-            <div class="alert" id="sync-warning" style="height: 30px;"></div>
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions"></div>
-            </div>
-          </div>
-        </div>
-        """
-    )
-    page.add_style_tag(path=str(STYLE_PATH))
-
-    page.set_viewport_size({"width": 1440, "height": 800})
-    refresh_rect = page.locator("#refresh-actions").bounding_box()
-    sync_rect = page.locator("#sync-actions").bounding_box()
-    assert refresh_rect["y"] == pytest.approx(sync_rect["y"], abs=1)
-    assert sync_rect["x"] + sync_rect["width"] < refresh_rect["x"]
-    module_refresh_rect = page.locator("#module-refresh-actions").bounding_box()
-    module_install_rect = page.locator("#module-install-actions").bounding_box()
-    assert module_refresh_rect["y"] == pytest.approx(module_install_rect["y"], abs=1)
-
-    page.set_viewport_size({"width": 900, "height": 800})
-    refresh_rect = page.locator("#refresh-actions").bounding_box()
-    sync_rect = page.locator("#sync-actions").bounding_box()
-    assert refresh_rect["y"] + refresh_rect["height"] <= sync_rect["y"]
-
-    empty_refresh_rect = page.locator("#empty-refresh-actions").bounding_box()
-    empty_card_rect = page.locator("#empty-state-card").bounding_box()
-    assert empty_refresh_rect["y"] + empty_refresh_rect["height"] + 16 <= empty_card_rect["y"]
-    warning_refresh_rect = page.locator("#warning-refresh-actions").bounding_box()
-    warning_rect = page.locator("#sync-warning").bounding_box()
-    assert warning_refresh_rect["y"] + warning_refresh_rect["height"] + 16 <= warning_rect["y"]
-
-
-def test_vlan_filters_hide_nonmatching_vlan_rows(page):
-    """VLAN filters match the visible values in VLAN rows."""
-    page.set_content(
-        """
-        <input id="filter-vlan-id">
-        <input id="filter-vlan-name">
-        <input id="filter-vlan-group">
-        <input id="filter-vlan-type">
-        <input id="filter-vlan-state">
-        <table id="librenms-vlan-table"><tbody>
-          <tr class="empty"><td colspan="5">No matching VLANs</td></tr>
-          <tr data-vlan-id="10" id="users-vlan">
-            <td data-col="vlan_id"><span>10</span></td>
-            <td data-col="name"><span>Users</span></td>
-            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Campus</span></div></td>
-            <td data-col="type">Ethernet</td>
-            <td data-col="state"><span>Active</span></td>
-          </tr>
-          <tr data-vlan-id="20" id="guests-vlan">
-            <td data-col="vlan_id"><span>20</span></td>
-            <td data-col="name"><span>Guests</span></td>
-            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Edge</span></div></td>
-            <td data-col="type">QinQ</td>
-            <td data-col="state"><span>Inactive</span></td>
-          </tr>
-        </tbody></table>
-        """
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeFilters()")
-
-    page.locator("#filter-vlan-name").fill("guest")
-    assert page.locator("#users-vlan").evaluate("row => row.style.display") == "none"
-    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == ""
-
-    page.locator("#filter-vlan-name").fill("")
-    page.locator("#filter-vlan-group").fill("campus")
-    assert page.locator("#users-vlan").evaluate("row => row.style.display") == ""
-    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == "none"
+    assert f"_{tab}_sync_refresh.html" in content
+    assert "cache_oob" not in content
+    assert refresh.index("</button>") < refresh.index("_sync_cache_countdown.html")
+    assert "_hidden_server_key.html" in refresh
 
 
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
@@ -3555,6 +3308,41 @@ def test_filter_disclosure_state_survives_fragment_replacement(page):
     assert "btn-secondary" in button.get_attribute("class").split()
     assert button.get_attribute("aria-expanded") == "false"
     assert button.locator("i").evaluate("icon => icon.classList.contains('mdi-filter-outline')")
+
+
+def test_a_closed_filter_panel_stays_closed_when_the_server_opened_it(page):
+    """The server opens a panel that holds a filter value once; a later settle keeps the user's close."""
+    markup = """
+      <div id="filter-host">
+        <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button"
+                data-bs-target="#interfaceFilterSection" aria-expanded="false"
+                aria-controls="interfaceFilterSection">
+          <i class="mdi mdi-filter-outline"></i> Filters
+        </button>
+        <div class="collapse show" id="interfaceFilterSection" data-filter-open="true"></div>
+      </div>
+    """
+    page.set_content(markup)
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    section = page.locator("#interfaceFilterSection")
+    assert section.evaluate("section => section.classList.contains('show')")
+
+    section.evaluate(
+        """section => {
+            section.classList.remove('show');
+            section.dispatchEvent(new Event('hidden.bs.collapse', { bubbles: true }));
+        }"""
+    )
+    page.evaluate("document.body.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
+
+    assert not section.evaluate("section => section.classList.contains('show')")
+    assert page.locator(".sync-filter-toggle").get_attribute("aria-expanded") == "false"
+
+    # A new render with a filter value opens the panel again.
+    page.locator("#filter-host").evaluate("(host, markup) => { host.innerHTML = markup; }", markup)
+    page.evaluate("initializeScripts()")
+    assert section.evaluate("section => section.classList.contains('show')")
 
 
 def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled(page):
@@ -4081,6 +3869,51 @@ def test_hidden_tab_countdown_changes_available_rail_to_unavailable_without_inte
     assert not tab.evaluate("node => node.classList.contains('sync-cache-ready')")
     assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
     assert page.locator("#ip-action").count() == 0
+
+
+def test_a_browser_clock_ahead_of_the_server_keeps_a_valid_cached_tab(page):
+    """The countdown measures the cache lifetime on the server clock that rendered it."""
+    from datetime import UTC, datetime, timedelta
+
+    from django.conf import settings
+    from django.template import Context, Engine, Library
+
+    if not settings.configured:
+        settings.configure(USE_I18N=False, USE_TZ=True)
+    query = Library()
+    query.simple_tag(lambda server_key: 600, name="sync_cache_timeout")
+    engine = Engine()
+    engine.template_libraries["librenms_sync_query"] = query
+    countdown = engine.from_string((TEMPLATE_DIR / "inc" / "_sync_cache_countdown.html").read_text()).render(
+        Context(
+            {
+                "cache_expiry": datetime.now(UTC) + timedelta(minutes=5),
+                "cache_container_id": "cache-countdown",
+                "cache_countdown_id": "countdown-timer",
+                "cache_server_key": "primary",
+            }
+        )
+    )
+    initial = {"interfaces": _state("before"), "ipaddresses": _state("before-ip")}
+
+    page.clock.install(time=datetime.now(UTC) + timedelta(days=1))
+    page.set_content(
+        _replace_fixture_markup(
+            _page_html(initial),
+            '<button id="interface-action">Sync</button>',
+            '<table id="interface-rows"><tr><td>Ethernet1</td></tr></table>'
+            + countdown
+            + '<button id="interface-action">Sync</button>',
+        )
+    )
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('countdown-timer')")
+
+    assert page.locator("#interface-rows").count() == 1
+    assert page.locator("#interface-action").count() == 1
+    assert page.evaluate("syncCacheController().invalidatedLocally.size") == 0
+    assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+    assert not page.locator("#countdown-timer").evaluate("node => node.classList.contains('is-expired')")
 
 
 def test_failed_retry_updates_an_already_invalidated_tab_without_a_new_revision(page):

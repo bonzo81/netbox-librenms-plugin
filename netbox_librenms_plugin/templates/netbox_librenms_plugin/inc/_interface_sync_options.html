@@ -9,7 +9,7 @@
     <div class="dropdown-menu p-3 interface-sync-options-menu">
         <div class="form-check form-switch mb-2"
             title="Select interface rows that are required by LAG, parent, or bridge relationships">
-            <input class="form-check-input interface-sync-option" type="checkbox"
+            <input {% if sync_form_id %}form="{{ sync_form_id }}" {% endif %}class="form-check-input interface-sync-option" type="checkbox"
                 id="autoSelectLagMembers" name="auto_select_lag_members" value="1"
                 data-default-checked="{{ sync_options.auto_select_lag_members_default|yesno:'true,false' }}"{% if sync_options.auto_select_lag_members %} checked{% endif %}>
             <label class="form-check-label small" for="autoSelectLagMembers">
@@ -22,7 +22,7 @@
             {% for column in sync_options.exclude_columns %}
             <div class="col">
                 <div class="form-check">
-                    <input class="form-check-input interface-sync-option" type="checkbox"
+                    <input {% if sync_form_id %}form="{{ sync_form_id }}" {% endif %}class="form-check-input interface-sync-option" type="checkbox"
                         name="exclude_columns" value="{{ column.value }}" id="exclude-{{ column.value }}"
                         data-default-checked="{{ column.default_checked|yesno:'true,false' }}"{% if column.checked %} checked{% endif %}>
                     <label class="form-check-label small" for="exclude-{{ column.value }}">{{ column.label }}</label>

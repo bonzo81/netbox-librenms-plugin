@@ -60,11 +60,17 @@ def _render_sync_page(model_name):
     def meta(obj, attr):
         return obj._meta[attr]
 
+    # The real tag reads the request's page query, which this request-less render has none of.
+    sync_query = Library()
+    sync_query.simple_tag(lambda *args, **kwargs: "?", name="sync_tab_url")
+    sync_query.simple_tag(lambda *args, **kwargs: [], name="sync_tab_query_items")
+
     base = ("django.template.loaders.locmem.Loader", {"generic/object.html": "{% block content %}{% endblock %}"})
     engine = Engine(dirs=[str(TEMPLATES_DIR)], loaders=[base, "django.template.loaders.filesystem.Loader"])
     engine.template_builtins.append(stubs)
     engine.template_libraries.update({name: Library() for name in ("buttons", "helpers", "plugins", "static", "i18n")})
     engine.template_libraries["django_tables2"] = stubs
+    engine.template_libraries["librenms_sync_query"] = sync_query
 
     # The widest values seen live: a long FQDN name, an unmatched hardware string, and a missing OS platform.
     assessment = SimpleNamespace(

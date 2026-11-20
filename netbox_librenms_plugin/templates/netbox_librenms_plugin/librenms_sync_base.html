@@ -386,8 +386,13 @@
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">
                                 Serial
-                                {% if object.serial and not serial_matches %}
-                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
+                                {% if serial_unavailable %}
+                                <span class="text-warning ms-1" title="{{ serial_unavailable }}" data-serial-unavailable>
+                                    <i class="mdi mdi-help-circle-outline"></i>
+                                </span>
+                                <span class="text-muted small">{{ serial_unavailable }}</span>
+                                {% elif object.serial and serial_admitted and not serial_matches %}
+                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'" data-serial-mismatch>
                                     <i class="mdi mdi-alert"></i>
                                 </span>
                                 {% endif %}
@@ -398,6 +403,9 @@
                                 <span class="text-success ms-1" title="Serial matches NetBox">
                                     <i class="mdi mdi-check-circle"></i>
                                 </span>
+                                {% if serial_stored_form_differs %}
+                                <span class="badge text-bg-info ms-1" title="NetBox stores '{{ object.serial }}', which names the same hardware. Sync to store the LibreNMS text.">stored form differs</span>
+                                {% endif %}
                                 {% endif %}
                             </td>
                         </tr>
@@ -615,8 +623,8 @@
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
                                         {% else %}
-                                            {% if librenms_device_serial != "-" %}
-                                                {% if not serial_matches %}
+                                            {% if serial_admitted and not serial_unavailable %}
+                                                {% if not serial_matches or serial_stored_form_differs %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">
@@ -1194,6 +1202,8 @@ that may well be correct.
                                         <span class="text-success ms-1" title="Already assigned">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
+                                    {% elif item.assigned_hidden %}
+                                        <span class="text-muted">A member you cannot view</span>
                                     {% else %}
                                         <span class="text-muted">-</span>
                                     {% endif %}
@@ -1202,7 +1212,7 @@ that may well be correct.
                                     <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
-                                        {% for member in object.virtual_chassis.members.all %}
+                                        {% for member in vc_serial_members %}
                                         <option value="{{ member.pk }}" {% if item.assigned_member and item.assigned_member.pk == member.pk %}selected{% endif %}>
                                             {{ member.name }}
                                         </option>

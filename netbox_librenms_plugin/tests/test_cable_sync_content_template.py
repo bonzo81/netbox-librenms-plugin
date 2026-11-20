@@ -19,6 +19,7 @@ class TestCableSyncContentTemplateMigratedMode:
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
+        from netbox_librenms_plugin.sync_filters import parse_sync_filters
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -30,6 +31,7 @@ class TestCableSyncContentTemplateMigratedMode:
         cable_sync = {
             "object": device,
             "table": table,
+            "filters": parse_sync_filters(request.GET, table.filter_spec()),
             "server_key": server_key,
             "cache_expiry": None,
         }
@@ -46,14 +48,15 @@ class TestCableSyncContentTemplateMigratedMode:
             migrated={"server_key": "prod", "device_id": 1, "at": "now"},
             server_key="prod",
         )
-        # The live POST form must be gone in migrated mode (a donor must not POST a sync).
-        assert "<form" not in html
+        # The live POST form must be gone in migrated mode (a donor must not POST a sync). The
+        # filter form is a GET form, so it cannot submit a sync.
+        assert '<form method="post"' not in html
         # ...but the CSRF token must remain so the JS-driven verify-cable fetch (handleCableChange) authenticates.
         assert "csrfmiddlewaretoken" in html
 
     def test_normal_mode_emits_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None)
-        assert "<form" in html
+        assert '<form method="post"' in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
 

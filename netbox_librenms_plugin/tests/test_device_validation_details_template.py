@@ -212,7 +212,7 @@ class TestDeviceValidationDetailsMergeBadge:
 class TestSerialActionBadges:
     """The serial-match section must render a dedicated badge for each serial_action."""
 
-    def _render(self, serial_action):
+    def _render(self, serial_action, *, row_is_oob_controller=False):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -247,12 +247,14 @@ class TestSerialActionBadges:
             "existing_id_servers": [],
             "use_sysname": True,
             "strip_domain": False,
+            "row_is_oob_controller": row_is_oob_controller,
         }
         return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
 
-    def test_oob_already_linked_shows_dedicated_badge(self):
-        html = self._render("oob_already_linked")
-        assert "OOB Already Linked" in html
+    def test_oob_already_linked_shows_the_no_offer_controller_badge(self):
+        # Validation always classifies an oob_already_linked row as the controller.
+        html = self._render("oob_already_linked", row_is_oob_controller=True)
+        assert "data-oob-controller-no-offer" in html
         # It must not fall through to the generic serial-match badge.
         assert "Serial match" not in html
 
@@ -261,7 +263,7 @@ class TestSerialActionBadges:
         # the new branch didn't displace the default.
         html = self._render("some_other_action")
         assert "Serial match" in html
-        assert "OOB Already Linked" not in html
+        assert "data-oob-controller-no-offer" not in html
 
 
 @pytest.mark.django_db
@@ -381,7 +383,7 @@ class TestSerialMatchFormServerKey:
 class TestAddAsOOBFormPanes:
     """Both OOB-candidate panes (serial match and primary_ip match) must render the shared Add-as-OOB form."""
 
-    def _render(self, *, match_type, serial_action):
+    def _render(self, *, match_type, serial_action, row_is_oob_controller=False):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -396,7 +398,8 @@ class TestAddAsOOBFormPanes:
                 "existing_device": existing,
                 "existing_match_type": match_type,
                 "serial_action": serial_action,
-                "oob_candidate": {"type": "idrac", "ip": "10.9.9.9"},
+                # Validation always names the offer's OOB target.
+                "oob_candidate": {"device": existing, "type": "idrac", "ip": "10.9.9.9"},
                 "device_type_mismatch": False,
                 "warnings": [],
             },
@@ -408,6 +411,7 @@ class TestAddAsOOBFormPanes:
             "existing_id_servers": [],
             "use_sysname": True,
             "strip_domain": False,
+            "row_is_oob_controller": row_is_oob_controller,
         }
         return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
 
@@ -418,7 +422,8 @@ class TestAddAsOOBFormPanes:
         assert 'name="server_key" value="prod"' in html
 
     def test_primary_ip_match_pane_renders_add_as_oob_form(self):
-        html = self._render(match_type="primary_ip", serial_action="oob_candidate")
+        # Only the controller classification gives an IP match an attach offer.
+        html = self._render(match_type="primary_ip", serial_action="oob_candidate", row_is_oob_controller=True)
         assert "device-import/add-as-oob/7/" in html
         assert "Add as OOB to" in html
         assert 'name="server_key" value="prod"' in html

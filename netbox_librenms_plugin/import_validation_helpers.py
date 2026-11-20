@@ -291,11 +291,10 @@ def clear_match_derived_action_fields(validation: dict) -> None:
     """
     Reset the action/name fields derived from a hostname/serial match.
 
-    Shared by ``device_operations``' terminal-ambiguity teardown and
-    ``bulk_import._clear_existing_match_derived_fields`` so the two clearing
-    paths can't drift on the common field set. Context-specific state
-    (match-type demotion, linkage, migration/device-type flags) stays with
-    the callers.
+    Shared by ``device_operations``' terminal-ambiguity teardown and the
+    disclosure scope, so the clearing paths can't drift on the common field
+    set. Context-specific state (match-type demotion, linkage, migration and
+    device-type flags) stays with the callers.
 
     ``promote_to_host`` follows the "absent otherwise" contract (see
     :func:`apply_oob_detection_result`) and is popped; ``merge_candidates``

@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from ipaddress import ip_address, ip_network
+import json
 import re
 
 import pytest
@@ -78,7 +79,7 @@ def test_logic_bearing_fields_preserved():
 
     members = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1")["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
-    assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
+    assert [m["entPhysicalParentRelPos"] for m in members] == [0, 1, 2]
     assert [m["entPhysicalIndex"] for m in members] == [100, 200, 300]
     assert all(m["entPhysicalClass"] == "chassis" for m in members)
 
@@ -100,6 +101,21 @@ def test_serials_pseudonymized_and_deterministic():
     assert len(set(serials1)) == 3  # distinct originals stay distinct
 
 
+@pytest.mark.parametrize("serial", ["12", 12, "A-1"])
+def test_offline_anonymization_does_not_give_identity_to_an_unadmitted_serial(serial):
+    from netbox_librenms_plugin.serial_identity import display, is_identity, plain_context
+
+    recording = _ports({"entPhysicalSerialNum": serial})
+
+    anonymized = anonymize_recording(recording)
+
+    stored = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert not is_identity(serial, plain_context())
+    # The serial stays reported, so a reader still tells it apart from a blank one.
+    assert display(stored) and stored != str(serial)
+    assert not is_identity(stored, plain_context())
+
+
 def test_cross_reference_serial_preserved():
     """A device serial that equals a stack-member serial must map to the SAME pseudonym."""
     rec = load_recording("cisco-stackwise-3member")
@@ -117,6 +133,8 @@ def test_cross_reference_serial_preserved():
 
 
 def test_numeric_serials_are_masked_and_share_string_identity():
+    from netbox_librenms_plugin.serial_identity import display, is_identity, plain_context
+
     recording = {
         "schema_version": 1,
         "name": "numeric-serials",
@@ -137,7 +155,8 @@ def test_numeric_serials_are_masked_and_share_string_identity():
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert device_serial == inventory_serial == expected_serials[0] == expected_serials[1]
     assert transceiver_serial == expected_serials[2] == expected_serials[3]
-    assert device_serial.startswith("SN-") and transceiver_serial.startswith("SN-")
+    assert device_serial.startswith("SN-")
+    assert display(transceiver_serial) and not is_identity(transceiver_serial, plain_context())
     assert device_serial != transceiver_serial
     assert expected_serials[4:] == [None, "-"]
     assert find_pii(anon) == []
@@ -155,6 +174,57 @@ def test_expected_member_serials_follow_anonymized_inventory():
     assert expected_serials == inventory_serials
     assert expected_serials != original
     assert rec["expected"]["virtual_chassis"]["member_serials"] == original
+
+
+@pytest.mark.parametrize(
+    "serial",
+    [
+        ["ASSET123"],
+        [["ASSET123"]],
+        {"value": "ASSET123"},
+        [{"value": "ASSET123"}],
+        {"ASSET123": True},
+        [{"ASSET123": None}],
+        {"id": "ASSET123"},
+    ],
+)
+def test_a_malformed_serial_value_is_pseudonymized_and_reads_the_serial_context(serial):
+    from netbox_librenms_plugin.data_shapes.anonymize import has_serial_input
+
+    recording = _ports({"entPhysicalSerialNum": serial})
+    recording["expected"] = {"virtual_chassis": {"member_serials": [serial]}}
+
+    anonymized = anonymize_recording(recording)
+
+    assert has_serial_input(recording)
+    assert "ASSET123" not in json.dumps(anonymized)
+    stored = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert stored == anonymized["expected"]["virtual_chassis"]["member_serials"][0]
+    assert type(stored) is type(serial)
+
+
+def test_a_serial_object_keeps_every_entry_without_its_keys():
+    serial = {"A": 1, "B": 2, "ASSET123": 3, " ASSET123 ": 4}
+    recording = _ports({"entPhysicalSerialNum": serial})
+
+    first = anonymize_recording(recording, salt="keys")
+    second = anonymize_recording(recording, salt="keys")
+
+    stored = _response(first, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert len(stored) == len(serial)
+    assert not set(stored) & set(serial)
+    assert "ASSET123" not in json.dumps(first)
+    assert first["responses"] == second["responses"]
+
+
+def test_a_scalar_in_a_list_takes_the_rule_of_the_lists_field():
+    recording = _ports({"hostname": ["core-rtr01"]})
+
+    anonymized = anonymize_recording(recording, salt="s")
+
+    port = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]
+    assert "core-rtr01" not in json.dumps(anonymized)
+    assert port["hostname"][0].startswith("device-")
 
 
 def test_hostname_and_model_pseudonymized():
@@ -1031,7 +1101,8 @@ def test_entity_descr_keeps_a_leading_front_panel_as_typed_and_hashes_the_rest()
 
 def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
     """The locator is parsed first and the VC marker rule then reads the prefix, so "FPC 1 " survives."""
-    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
     inventory = junos_vc_inventory()
@@ -1043,8 +1114,8 @@ def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
         anonymized["entPhysicalSerialNum"] = raw["entPhysicalSerialNum"]
     master, member = make_junos_vc_members("vc-locator")
 
-    raw_owners = attribute_inventory(inventory, [master, member], chassis_serial_key(master))
-    anonymized_owners = attribute_inventory(rows, [master, member], chassis_serial_key(master))
+    raw_owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
+    anonymized_owners = attribute_inventory(rows, [master, member], SerialRules.load().for_device(master), "reported")
 
     assert re.fullmatch(r"FPC 1 entity-[0-9a-f]{6} @ 1/0/0", rows[-1]["entPhysicalDescr"])
     assert anonymized_owners == raw_owners
@@ -1219,7 +1290,7 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
 
     assert result is not None
     assert result["member_count"] == 3
-    assert [m["position"] for m in result["members"]] == [1, 2, 3]
+    assert [m["position"] for m in result["members"]] == [0, 1, 2]
     # The master is still identified by the (now pseudonymized) device serial matching a member:
     # compare member serials against the anonymized DEVICE endpoint's serial — comparing against
     # members[0] is a tautology (members[0] always equals itself), which would stay green even if
@@ -1320,9 +1391,10 @@ def test_numeric_model_fields_share_the_string_token(field, value):
 
 
 @pytest.mark.parametrize("field", ["entPhysicalModelName", "entPhysicalSerialNum"])
-@pytest.mark.parametrize("value", [0, 123456, 123456.25])
+@pytest.mark.parametrize("value", [100, 123456, 123456.25])
 @pytest.mark.parametrize("numeric_parent", [True, False])
 def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_server, field, value, numeric_parent):
+    from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
     parent = {
@@ -1353,8 +1425,9 @@ def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_serv
         assert ok
         replay_parent, replay_child = inventory
         index_map = {item["entPhysicalIndex"]: item for item in inventory}
-        assert BaseModuleTableView._find_integrating_ancestor(replay_child, index_map) is replay_parent
+        assert BaseModuleTableView._find_integrating_ancestor(replay_child, index_map, plain_context()) is replay_parent
         view = object.__new__(BaseModuleTableView)
+        view._serial_rules = SerialRules(())
         row = view._build_row(replay_child, index_map, {}, {})
         assert row["status"] == "Integrated"
         assert row["integrated_in_index"] == 100
@@ -2148,10 +2221,22 @@ def test_database_id_absence_sentinels_survive_anonymization(field, value):
     assert _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0][field] == value
 
 
-@pytest.mark.parametrize("value", [True, False, 1.5, "invalid", {}, []])
+@pytest.mark.parametrize("value", [True, False, 1.5, "invalid", {}, [], "9" * 5000])
 def test_anonymization_rejects_invalid_database_ids(value):
-    with pytest.raises(ValueError, match="Database IDs"):
+    from netbox_librenms_plugin.data_shapes.anonymize import MalformedRecordingError
+
+    with pytest.raises(MalformedRecordingError, match="Database IDs"):
         anonymize_recording(_ports({"port_id": value}), salt="invalid-id")
+
+
+def test_anonymization_rejects_an_oversized_device_id_in_a_route():
+    from netbox_librenms_plugin.data_shapes.anonymize import MalformedRecordingError
+
+    recording = _ports({"port_id": 1})
+    recording["responses"]["GET /api/v0/devices/" + "9" * 5000] = {"devices": []}
+
+    with pytest.raises(MalformedRecordingError, match="Database IDs"):
+        anonymize_recording(recording, salt="invalid-id")
 
 
 def test_bare_database_ids_share_their_containing_table_mapping():

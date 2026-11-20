@@ -1,10 +1,10 @@
 """Device validation, import, and fetch operations."""
 
 import logging
+from typing import NamedTuple
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
-from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from tenancy.models import Tenant
@@ -20,6 +20,23 @@ from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
 from ..models import RuleConfigurationError
+from ..serial_identity import (
+    REFUSING,
+    UNAVAILABLE_MASTER_LINK,
+    Comparison,
+    ResolutionKind,
+    SerialRules,
+    assignment_lock,
+    compare,
+    display,
+    is_identity,
+    resolve_device,
+    resolve_device_write,
+    serial_refusal,
+    stored_form,
+)
+from ..server_selection import librenms_link_owner
+from ..transactions import atomic_with_events
 from ..platform_versions import (
     HIDDEN_PLATFORM,
     PlatformFacts,
@@ -33,27 +50,27 @@ from ..platform_versions import (
 )
 from ..utils import (
     cached_row_matches,
+    row_identity_matches,
     exception_text_for,
     find_matching_location,
     find_matching_site,
     is_vc_position,
+    librenms_text,
     match_librenms_hardware_to_device_type,
-    normalize_serial,
-    normalize_stack_serial,
     parse_location_for_import,
     resolve_location_mapping,
 )
-from .cache import get_import_device_cache_key
+from .cache import get_chassis_inventory_cache_key, get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
+    VCNumberingError,
     _member_name,
-    chassis_serial_key,
-    devices_with_serial,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
-    serials_match,
-    update_vc_member_suggested_names,
-    vc_serial_key,
+    numbering_refusal_text,
+    prepare_virtual_chassis,
+    prepared_master,
+    unnumbered_virtual_chassis,
 )
 from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
@@ -75,6 +92,8 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
+# The fragment of the blocker of a row whose serial no lookup can read; the collision precheck keys on it.
+SERIAL_UNAVAILABLE_ISSUE_MARKER = "cannot be matched:"
 STACK_DETECTION_FAILED_MESSAGE = "Stack detection failed. Refresh LibreNMS data and try again."
 
 
@@ -186,6 +205,24 @@ def _describe_link_note(existing_link):
     return "not linked to LibreNMS"
 
 
+def _host_ip_rows(primary_ip):
+    """
+    Return every IPAddress row whose host address is *primary_ip*; duplicate net_host rows are possible.
+
+    Raises:
+        ValueError: When *primary_ip* is not a parseable host address.
+
+    """
+    from ipam.models import IPAddress
+
+    return IPAddress.objects.filter(address__net_host=str(parse_host_address(primary_ip)))
+
+
+def _answers_at_oob_ip(device, matching_ips) -> bool:
+    """Return whether the OOB IP of the Device *device* is one of *matching_ips*, the rows of the LibreNMS address."""
+    return device.oob_ip_id is not None and matching_ips.filter(pk=device.oob_ip_id).exists()
+
+
 def resolve_device_by_host_ip(primary_ip):
     """
     Resolve the unique NetBox Device or VirtualMachine that carries a host address.
@@ -196,18 +233,17 @@ def resolve_device_by_host_ip(primary_ip):
     whichever duplicate row sorts first. An IP can be a Device's ``oob_ip`` while assigned
     to no interface, so the assigned-object scan alone would miss an OOB-only link.
 
-    Shared by :func:`validate_device_for_import` and ``bulk_import._refresh_existing_device``
-    so the two paths can't drift on which device a management IP resolves to.
+    Shared by :func:`validate_device_for_import` and the import views, so they agree on which
+    device a management IP resolves to.
 
     Args:
         primary_ip: The management IP (host form) to resolve.
 
     Returns:
-        tuple: ``(object | None, ambiguous: bool, matching_ips: QuerySet)``.
+        tuple: ``(object | None, ambiguous: bool)``.
             ``object`` is the single matching Device or VirtualMachine, or ``None`` when none
             or more than one match. ``ambiguous`` is ``True`` only when more than one distinct
-            object shares the address. ``matching_ips`` is the net_host queryset so callers
-            can reuse it for the Device ``oob_ip`` membership check.
+            object shares the address.
 
     Raises:
         ValueError: When *primary_ip* is not a parseable host address. Callers catch it and
@@ -215,13 +251,10 @@ def resolve_device_by_host_ip(primary_ip):
 
     """
     from dcim.models import Device
-    from ipam.models import IPAddress
-
-    canonical_host = str(parse_host_address(primary_ip))
 
     # prefetch_related on the assigned_object GenericForeignKey resolves every duplicate net_host
     # row's interface in one bulk pass instead of a per-row content-type lookup (small N, but free).
-    matching_ips = IPAddress.objects.filter(address__net_host=canonical_host).prefetch_related("assigned_object")
+    matching_ips = _host_ip_rows(primary_ip).prefetch_related("assigned_object")
     candidates = {}
     matching_exists = False
     for existing_ip in matching_ips:
@@ -236,10 +269,22 @@ def resolve_device_by_host_ip(primary_ip):
         for oob_device in Device.objects.filter(oob_ip__in=matching_ips):
             candidates[(oob_device._meta.label_lower, oob_device.pk)] = oob_device
     if len(candidates) > 1:
-        return None, True, matching_ips
+        return None, True
     if candidates:
-        return next(iter(candidates.values())), False, matching_ips
-    return None, False, matching_ips
+        return next(iter(candidates.values())), False
+    return None, False
+
+
+def _chassis_inventory(api, device_id):
+    """Return ``(success, items)`` of the chassis-class inventory; a successful read is cached for the API timeout."""
+    cache_key = get_chassis_inventory_cache_key(device_id, api.server_key)
+    cached = cache.get(cache_key) if api.cache_timeout else None
+    if cached is not None:
+        return True, cached
+    success, inventory = api.get_inventory_filtered(device_id, ent_physical_class="chassis")
+    if success and api.cache_timeout:
+        cache.set(cache_key, inventory, timeout=api.cache_timeout)
+    return success, inventory
 
 
 def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: dict | None = None):
@@ -266,14 +311,14 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
 
     """
     try:
-        success, inventory = api.get_inventory_filtered(device_id, ent_physical_class="chassis")
+        success, inventory = _chassis_inventory(api, device_id)
         if not success or not inventory:
             return None
 
         for item in inventory:
             # Try entPhysicalName first (often the chassis part number like CHAS-BP-MX480-S)
             for field in ("entPhysicalName", "entPhysicalModelName"):
-                value = normalize_serial(item.get(field))
+                value = librenms_text(item.get(field))
                 if not is_librenms_placeholder(value):
                     chassis_match = match_librenms_hardware_to_device_type(
                         value, preloaded_rules=preloaded_device_type_rules
@@ -376,6 +421,58 @@ def _determine_device_name(
     ]
 
 
+def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules, phase) -> bool:
+    """
+    Flag the serial conflict of a matched device whose stored serial differs from the incoming one.
+
+    Returns:
+        bool: True when another Device holds the incoming serial, several do, or the lookup cannot tell.
+
+    """
+    other = resolve_device_write(
+        incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules, exclude_pks=[existing_device.pk]
+    )
+    if other.kind not in REFUSING:
+        return False
+    result["serial_action"] = "conflict"
+    result["serial_duplicate"] = True
+    # The lookup is unrestricted, so only the display gate may name the holder (see disclosure.py).
+    result["serial_conflict"] = {
+        "pk": other.object.pk if other.object is not None else None,
+        "serial": display(incoming_serial),
+        "phase": phase,
+        "ambiguous": other.kind is ResolutionKind.AMBIGUOUS,
+        "unavailable": other.reason,
+    }
+    return True
+
+
+def _member_serial_refusals(prepared) -> list:
+    """Return the blockers of the member serials that a chassis create refuses; it stores each non-master member."""
+    master = prepared_master(prepared)
+    if master is None:
+        return []
+    members = prepared["members"]
+    refusals = ((member, serial_refusal(member.get("serial"), Device)) for member in members if member is not master)
+    return [f"Stack member {member.get('position')}: {refusal}" for member, refusal in refusals if refusal]
+
+
+def serial_unavailable_issue(incoming_serial) -> str:
+    """Return the blocker of a row whose serial lookup is Unavailable."""
+    # The constant, not the lookup's reason: the issue text must carry nothing that an unscoped lookup returned.
+    return f"Serial '{display(incoming_serial)}' {SERIAL_UNAVAILABLE_ISSUE_MARKER} {UNAVAILABLE_MASTER_LINK}"
+
+
+def _serial_taken_message(device_id, incoming_serial, taken) -> str:
+    """Return why the import of *device_id* stops: a NetBox device already holds its serial, or the lookup cannot tell."""
+    if taken.kind is ResolutionKind.UNAVAILABLE:
+        return f"Cannot import device {device_id}: its serial cannot be matched. {taken.reason}"
+    return (
+        f"Cannot import device {device_id}: a NetBox device already has serial '{display(incoming_serial)}'. "
+        "Refresh the import list."
+    )
+
+
 def _flag_ambiguous_librenms_id(result, librenms_id, exc):
     """
     Block import when a librenms_id resolves to more than one NetBox object.
@@ -411,42 +508,266 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
         result["issues"].append(message)
 
 
-def _detect_serial_match_role(existing_by_serial, existing_link, hostname, serial, libre_device, server_key):
+# The match types of a match by a name: the resolved name, the LibreNMS hostname or the sysName.
+NAME_MATCH_TYPES = ("resolved_name", "hostname", "sysname")
+
+# The warning of a controller row whose host already has an OOB link.
+OOB_ALREADY_LINKED_WARNING = (
+    "The matched NetBox device already has an OOB controller linked, so no OOB action is offered."
+)
+
+
+def _reported_oob_type(libre_device) -> str | None:
+    """Return the OOB type that the row's OS or hardware text names; a value that is not text names none."""
+    os_text, hardware_text = (
+        value if isinstance(value, str) else "" for value in (libre_device.get("os"), libre_device.get("hardware"))
+    )
+    return normalize_oob_type(os_text, hardware_text)
+
+
+def _short_name(name: str) -> str:
+    """Return *name* in lower case without its domain; an IP address stays whole."""
+    try:
+        parse_host_address(name)
+    except ValueError:
+        return name.split(".")[0].lower()
+    return name.lower()
+
+
+def _row_name_oob_type(libre_device, device) -> str | None:
     """
-    Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
+    Return the OOB type that a name of the row names, when that name is not the NetBox *device*'s own name.
 
-    Pure decision step for the serial-match branch of :func:`validate_device_for_import`:
-    reads NetBox/LibreNMS state but does **not** mutate ``result``. Computes whether the
-    incoming device is an OOB-controller candidate, a host-promotion, a plain link, or a
-    hostname-differs case, and returns the keyword arguments for
-    :func:`apply_oob_detection_result` (``serial_action``, ``oob_candidate``,
-    ``promote_to_host``, ``serial_role_choice_available``, ``warnings``).
-
-    Args:
-        existing_by_serial (Device): The NetBox Device matched by serial.
-        existing_link (dict | None): The ``_describe_existing_librenms_link`` result for
-            *existing_by_serial*.
-        hostname (str): The incoming LibreNMS hostname (already resolved).
-        serial (str): The incoming serial (for warning text only). The matched device's own
-            identity never reaches a warning: the serial lookup is unrestricted, so only the
-            display gate may name it (see ``import_utils/disclosure.py``).
-        libre_device (dict): The raw LibreNMS device payload.
-        server_key (str): The active LibreNMS server key.
-
-    Returns:
-        dict: The keyword arguments for :func:`apply_oob_detection_result`.
-
+    The names are the current sysName and hostname of the row; a value that is not text is no name. A name
+    that is the device's own name tells nothing about the row: the same full name, or one full name that is the
+    short form, without the domain, of the other. Two FQDNs with one short name are two names.
     """
+    own_full = (device.name or "").lower()
+    own_short = _short_name(device.name or "")
+    for name in _name_candidates(libre_device):
+        if not name or own_full in (name.lower(), _short_name(name)) or name.lower() == own_short:
+            continue
+        if oob_type := _detect_oob_type_from_name(name):
+            return oob_type
+    return None
+
+
+def _oob_candidate(matched, libre_device, matched_by, server_key) -> dict:
+    """
+    Return the attach offer of the LibreNMS row as the OOB controller of the *matched* Device.
+
+    The offer's ``device`` is its OOB target: the owner of the LibreNMS links of *matched*, whose one OOB slot
+    Add as OOB writes. The type comes from the row's OS or hardware, then its name, then "oob". *matched_by*
+    ("oob_ip", "primary_ip", "serial" or "hostname") names the match that Add as OOB checks again under its locks.
+    """
+    target = librenms_link_owner(matched, server_key)
+    return {
+        "device": target,
+        # The host link of the target, which the dialog shows as the attach's unchanged host slot.
+        "target_host_id": read_mapping(target).own_id(server_key),
+        "type": _reported_oob_type(libre_device) or _row_name_oob_type(libre_device, matched) or "oob",
+        "version": libre_device.get("version") or None,
+        "ip": libre_device.get("ip") or None,
+        "matched_by": matched_by,
+    }
+
+
+def _device_type_mismatch_warning(librenms_device_type) -> str:
+    """Return the warning of a matched device whose type differs from the type that LibreNMS reports."""
+    return (
+        f"Device type mismatch: LibreNMS reports '{librenms_device_type}', which differs from the "
+        f"NetBox record. This may indicate the wrong device was matched."
+    )
+
+
+def _ip_assigned_warning(primary_ip, existing_link) -> str:
+    """Return the warning of a row whose IP address a NetBox Device already holds."""
+    return f"IP address {primary_ip} is already assigned to a device in NetBox ({_describe_link_note(existing_link)})"
+
+
+def _row_at_oob_ip(device, libre_device) -> bool:
+    """Return whether the LibreNMS row's address is the OOB IP of the Device *device*."""
+    row_ip = libre_device.get("ip")
+    if device.oob_ip_id is None or not row_ip:
+        return False
+    try:
+        return _answers_at_oob_ip(device, _host_ip_rows(row_ip))
+    except ValueError:
+        return False
+
+
+def row_at_oob_target_ip(matched, libre_device, server_key) -> bool:
+    """
+    Return whether the row's address is the OOB IP of the *matched* Device or of the offer's OOB target.
+
+    The OOB target is the owner of the LibreNMS links of *matched* (``librenms_link_owner``); either address is
+    controller evidence, and Add as OOB checks the same two addresses again under its locks.
+    """
+    owner = librenms_link_owner(matched, server_key)
+    return _row_at_oob_ip(matched, libre_device) or (owner.pk != matched.pk and _row_at_oob_ip(owner, libre_device))
+
+
+def _oob_controller_evidence(result, libre_device, server_key) -> bool:
+    """
+    Return whether the evidence shows that the LibreNMS row is the OOB controller of the matched object.
+
+    One rule for every match type: evidence is the row's OOB-ID link, or, on a name, serial or IP match of a
+    Device, the row at the Device's OOB IP or an OOB signal of the row itself (its OS or hardware, or a name
+    that is not the Device's own name). A cached action, an own-ID link, the serial role's ambiguous default
+    and a Device whose own name looks like a controller's are no evidence.
+    """
+    matched = result.get("existing_device")
+    match_type = result.get("existing_match_type")
+    if matched is None:
+        return False
+    if match_type == "librenms_oob":
+        return True
+    if not isinstance(matched, Device) or match_type not in (*NAME_MATCH_TYPES, "serial", "primary_ip"):
+        return False
+    if row_at_oob_target_ip(matched, libre_device, server_key):
+        return True
+    return bool(_reported_oob_type(libre_device) or _row_name_oob_type(libre_device, matched))
+
+
+def _current_resolved_name(result, libre_device) -> str:
+    """Return the name of the current row under the naming rules that the validation of *result* used."""
+    criteria = result.get("naming_criteria") or {}
+    name, _source = _resolve_device_name(
+        libre_device,
+        use_sysname=criteria.get("use_sysname", True),
+        strip_domain=criteria.get("strip_domain", False),
+        device_id=libre_device.get("device_id"),
+    )
+    return name
+
+
+def _withdraw_attach_offer(result) -> None:
+    """Remove the attach offer of the row and the action that names it."""
+    result["oob_candidate"] = None
+    if result.get("serial_action") == "oob_candidate":
+        result["serial_action"] = None
+
+
+def _withdraw_controller_state(result, libre_device, server_key) -> None:
+    """Remove the controller state of a row without controller evidence; a verified serial match gets its role again."""
+    matched = result.get("existing_device")
+    if (
+        result.get("existing_match_type") == "serial"
+        and result.get("match_verified", True)
+        and isinstance(matched, Device)
+        and result.get("serial_action") != "merge_netbox_devices"
+    ):
+        _apply_serial_role(result, matched, libre_device, server_key)
+    elif result.get("oob_candidate"):
+        _withdraw_attach_offer(result)
+    if result.get("serial_action") == "oob_already_linked":
+        result["serial_action"] = None
+    if OOB_ALREADY_LINKED_WARNING in result.get("warnings", []):
+        result["warnings"] = [warning for warning in result["warnings"] if warning != OOB_ALREADY_LINKED_WARNING]
+
+
+def _apply_serial_role(result, matched, libre_device, server_key) -> None:
+    """Decide the serial role of the row again from current facts, as a fresh validation does."""
+    decision = _detect_serial_match_role(
+        matched,
+        result.get("existing_librenms_link"),
+        _current_resolved_name(result, libre_device),
+        display(libre_device.get("serial")),
+        libre_device,
+        server_key,
+    )
+    # The role's warnings name no NetBox object; the ones that an earlier decision already gave are skipped.
+    known = set(result.setdefault("warnings", []))
+    role_messages = decision.pop("warnings")
+    apply_oob_detection_result(result, **decision, warnings=[text for text in role_messages if text not in known])
+
+
+def _set_attach_offer(result, matched, libre_device, server_key) -> None:
+    """Build the attach offer of a controller row from current facts, or withdraw it when the target has an OOB link."""
+    if read_mapping(librenms_link_owner(matched, server_key)).has_oob(server_key):
+        _withdraw_attach_offer(result)
+        if OOB_ALREADY_LINKED_WARNING not in result["warnings"]:
+            result["warnings"].append(OOB_ALREADY_LINKED_WARNING)
+        return
+    if row_at_oob_target_ip(matched, libre_device, server_key):
+        matched_by = "oob_ip"
+    elif result["existing_match_type"] == "primary_ip":
+        matched_by = "primary_ip"
+    elif result["existing_match_type"] in NAME_MATCH_TYPES:
+        matched_by = "hostname"
+    else:
+        matched_by = "serial"
+    result["serial_action"] = "oob_candidate"
+    result["oob_candidate"] = _oob_candidate(matched, libre_device, matched_by, server_key)
+
+
+def classify_oob_controller(result, libre_device, server_key) -> None:
+    """
+    Decide once whether the LibreNMS row is the OOB controller of the matched object, and set the state of that decision.
+
+    It sets ``row_is_oob_controller`` from the evidence alone. A controller row gets no host-side name sync,
+    serial update, host promotion, type mismatch or host warnings. A merge suggestion stays as it is. Else a
+    Device host gets the attach offer, built again from current facts, when the owner of its LibreNMS links has
+    no OOB link, and the already-linked warning when it has one. A match that the validation did not verify
+    (``match_verified`` False) gets no offer. Every return path of validation calls it, so the rule has one
+    definition.
+    """
+    libre_device = libre_device or {}
+    result["row_is_oob_controller"] = _oob_controller_evidence(result, libre_device, server_key)
+    if not result["row_is_oob_controller"]:
+        _withdraw_controller_state(result, libre_device, server_key)
+        return
+    matched = result["existing_device"]
+    result["name_sync_available"] = False
+    result["suggested_name"] = None
+    result.pop("promote_to_host", None)
+    result["serial_role_choice_available"] = False
+    result["device_type_mismatch"] = False
+    if result["serial_action"] in ("update_serial", "promote_to_host"):
+        result["serial_action"] = None
+    host_warnings = {
+        _serial_differs_warning(libre_device.get("serial")),
+        _ip_assigned_warning(libre_device.get("ip"), result["existing_librenms_link"]),
+        _device_type_mismatch_warning(result["device_type"].get("device_type")),
+    }
+    result["warnings"] = [warning for warning in result["warnings"] if warning not in host_warnings]
+    if result["serial_action"] == "merge_netbox_devices":
+        return
+    if result["existing_match_type"] == "librenms_oob" or not isinstance(matched, Device):
+        return
+    if not result.get("match_verified", True):
+        _withdraw_attach_offer(result)
+        return
+    _set_attach_offer(result, matched, libre_device, server_key)
+
+
+def _serial_differs_warning(incoming_serial) -> str:
+    """Return the warning of a hostname match whose LibreNMS serial differs from the stored one."""
+    return (
+        f"Hostname matches but the serial differs from the NetBox record "
+        f"(LibreNMS: '{display(incoming_serial)}'). Hardware may have been replaced."
+    )
+
+
+class _SerialRoleFacts(NamedTuple):
+    """The evidence of the serial role: what LibreNMS and NetBox report about a row and its serial match."""
+
+    oob_type_from_libre: str | None
+    existing_oob_recorded: bool
+    existing_oob_from_name: str | None
+    oob_possible: bool
+    host_possible: bool
+
+
+def _serial_role_facts(existing_by_serial, existing_link, hostname, libre_device, server_key) -> _SerialRoleFacts:
+    """Return the serial-role evidence of the row against *existing_by_serial*; see :func:`_detect_serial_match_role`."""
     # Compute both possible roles for the incoming LibreNMS device against
     # the existing NetBox device, then pick a heuristic default. The UI
     # offers a manual toggle whenever both roles are feasible so the user
     # can override the heuristic (e.g. mark a "linux"-OS device as OOB or
     # demote an apparent host into the OOB slot).
-    oob_type_from_libre = normalize_oob_type(
-        libre_device.get("os", ""),
-        libre_device.get("hardware", ""),
-    )
-    existing_oob_recorded = read_mapping(existing_by_serial).has_oob(server_key)
+    oob_type_from_libre = _reported_oob_type(libre_device)
+    existing_oob_recorded = read_mapping(librenms_link_owner(existing_by_serial, server_key)).has_oob(server_key)
 
     # Only treat this as a possible host/OOB chassis-pair situation when
     # there is a real ambiguity: either the existing NetBox device's name
@@ -477,10 +798,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     # signal (incoming os/hardware or hostname looks OOB, or the existing device's name looks OOB)
     # or an existing link to a DIFFERENT id before treating a name mismatch as a chassis pair.
     existing_oob_from_name = _detect_oob_type_from_name(existing_by_serial.name)
-    incoming_oob_signal = bool(
-        oob_type_from_libre
-        or _detect_oob_type_from_name(libre_device.get("hostname") or libre_device.get("sysName") or "")
-    )
+    incoming_oob_signal = bool(oob_type_from_libre or _row_name_oob_type(libre_device, existing_by_serial))
     has_oob_signal = incoming_oob_signal or bool(existing_oob_from_name)
     # A name match normally means "just link" — but not when LibreNMS itself reports the incoming
     # device as an OOB controller (os/hardware → oob_type_from_libre). An iDRAC/iLO/IPMI sharing the
@@ -495,21 +813,44 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
 
     oob_possible = chassis_pair_likely and not existing_oob_recorded
     host_possible = chassis_pair_likely and bool(linked_to_other_id and not existing_link.get("oob_id"))
+    return _SerialRoleFacts(
+        oob_type_from_libre, existing_oob_recorded, existing_oob_from_name, oob_possible, host_possible
+    )
+
+
+def _detect_serial_match_role(existing_by_serial, existing_link, hostname, serial, libre_device, server_key):
+    """
+    Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
+
+    Pure decision step for the serial-match branch of :func:`validate_device_for_import`:
+    reads NetBox/LibreNMS state but does **not** mutate ``result``. Computes whether the
+    incoming device is an OOB-controller candidate, a host-promotion, a plain link, or a
+    hostname-differs case, and returns the keyword arguments for
+    :func:`apply_oob_detection_result` (``serial_action``, ``oob_candidate``,
+    ``promote_to_host``, ``serial_role_choice_available``, ``warnings``).
+
+    Args:
+        existing_by_serial (Device): The NetBox Device matched by serial.
+        existing_link (dict | None): The ``_describe_existing_librenms_link`` result for
+            *existing_by_serial*.
+        hostname (str): The incoming LibreNMS hostname (already resolved).
+        serial (str): The incoming serial (for warning text only). The matched device's own
+            identity never reaches a warning: the serial lookup is unrestricted, so only the
+            display gate may name it (see ``import_utils/disclosure.py``).
+        libre_device (dict): The raw LibreNMS device payload.
+        server_key (str): The active LibreNMS server key.
+
+    Returns:
+        dict: The keyword arguments for :func:`apply_oob_detection_result`.
+
+    """
+    facts = _serial_role_facts(existing_by_serial, existing_link, hostname, libre_device, server_key)
+    oob_type_from_libre, existing_oob_recorded, existing_oob_from_name, oob_possible, host_possible = facts
 
     # --- Compute all values before mutating result ---
-    oob_candidate_data = None
-    if oob_possible:
-        inferred_oob_type = (
-            oob_type_from_libre
-            or _detect_oob_type_from_name(libre_device.get("hostname") or libre_device.get("sysName") or "")
-            or "oob"
-        )
-        oob_candidate_data = {
-            "device": existing_by_serial,
-            "type": inferred_oob_type,
-            "version": libre_device.get("version") or None,
-            "ip": libre_device.get("ip") or None,
-        }
+    oob_candidate_data = (
+        _oob_candidate(existing_by_serial, libre_device, "serial", server_key) if oob_possible else None
+    )
 
     promote_to_host_data = None
     if host_possible:
@@ -547,10 +888,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         # ("Link to LibreNMS" button) in device_validation_details.html, posting an
         # indistinguishable host-link request instead of leaving this branch informational.
         serial_action_value = "oob_already_linked"
-        block_warnings.append(
-            "The matched NetBox device already has an OOB controller linked. "
-            "Re-import will update the existing OOB entry."
-        )
+        block_warnings.append(OOB_ALREADY_LINKED_WARNING)
     elif not oob_possible and not host_possible:
         # Neither role is feasible -- fall back to legacy hostname/serial
         # warning behaviour so the user still sees a useful message.
@@ -576,7 +914,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
-def validate_device_for_import(  # noqa: C901
+def validate_device_for_import(
     libre_device: dict,
     import_as_vm: bool = False,
     api: "LibreNMSAPI" = None,
@@ -588,9 +926,8 @@ def validate_device_for_import(  # noqa: C901
     use_sysname: bool = True,
     strip_domain: bool = False,
     preloaded_device_type_rules: dict | None = None,
-    serial_key_for=vc_serial_key,
-    serial_lookup=devices_with_serial,
-    candidate_keys=None,
+    serial_rules: SerialRules | None = None,
+    numbering_rules: tuple | None = None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -615,9 +952,8 @@ def validate_device_for_import(  # noqa: C901
         use_sysname: If True, prefer sysName over hostname (matches import behavior).
         strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
-        serial_key_for: Returns the :func:`vc_serial_key` of a Manufacturer; a batch passes one memoized callable.
-        serial_lookup: Find serial holders with a batch-local rule snapshot.
-        candidate_keys: Returns :func:`candidate_vc_serial_keys` for VC detection; a batch passes one memoized callable.
+        serial_rules: The batch's :class:`SerialRules`; None reads them once for this device.
+        numbering_rules: The batch's VC member numbering rules; None reads them for a stack.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -637,9 +973,14 @@ def validate_device_for_import(  # noqa: C901
                 'serial_action': str or None,  # None, 'link', 'conflict', 'update_serial',
                     # 'hostname_differs', 'oob_candidate', 'promote_to_host', 'merge_netbox_devices'
                 'serial_confirmed': bool,  # librenms_id match and serial matches
+                'legacy_id_serial_confirmed': bool,  # Legacy-linked device is the one holder of the serial
+                'legacy_id_serial_unavailable': bool,  # The holder lookup of that serial cannot read every row
+                'legacy_id_serial_shared': bool,  # The holder lookup found another Device with that serial
                 'serial_duplicate': bool,  # Incoming serial already on a different device
                 'serial_role_choice_available': bool,  # Both oob_candidate and promote_to_host valid
-                'oob_candidate': dict or None,  # {device, type, version, ip} when detected (devices only)
+                'oob_candidate': dict or None,  # {device (the OOB target), target_host_id, type, version, ip, matched_by}
+                'row_is_oob_controller': bool,  # The evidence shows the row is the matched object's OOB controller
+                'match_verified': bool,  # False when an error stopped validation before it verified the match
                 # 'promote_to_host': dict — CONDITIONAL, present only when host promotion is available
                 'merge_candidates': dict or None,  # {host_named: {...}, oob_named: {...}} when two
                     # NetBox devices look like the same physical box (devices only)
@@ -649,7 +990,7 @@ def validate_device_for_import(  # noqa: C901
                 'suggested_name': str or None,  # Name to suggest when name_sync_available
                 'device_type_mismatch': bool,  # Existing device's type differs from LibreNMS (devices only)
                 'naming_criteria': dict or None,  # How resolved_name was derived (use_sysname/strip_domain)
-                'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
+                'virtual_chassis': dict,  # VC state, prepare_virtual_chassis() for the matched DeviceType
                 'issues': List[str],  # Blocking issues
                 'warnings': List[str],  # Non-blocking warnings
                 'site': {  # Device site or VM matched-site placement
@@ -714,6 +1055,43 @@ def validate_device_for_import(  # noqa: C901
         ...     import_single_device(libre_device['device_id'])
 
     """
+    # The matcher and the classifier read the mappings of the same server.
+    server_key = api.server_key if api is not None else server_key
+    result = _match_and_validate(
+        libre_device,
+        import_as_vm,
+        api,
+        server_key=server_key,
+        include_vc_detection=include_vc_detection,
+        collision_only=collision_only,
+        force_vc_refresh=force_vc_refresh,
+        use_sysname=use_sysname,
+        strip_domain=strip_domain,
+        preloaded_device_type_rules=preloaded_device_type_rules,
+        serial_rules=serial_rules,
+        numbering_rules=numbering_rules,
+    )
+    # Every return path of the matcher, an early return or an error, reaches this one decision.
+    classify_oob_controller(result, libre_device, server_key)
+    return result
+
+
+def _match_and_validate(  # noqa: C901
+    libre_device: dict,
+    import_as_vm: bool = False,
+    api: "LibreNMSAPI" = None,
+    *,
+    server_key: str = "default",
+    include_vc_detection: bool = True,
+    collision_only: bool = False,
+    force_vc_refresh: bool = False,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
+    preloaded_device_type_rules: dict | None = None,
+    serial_rules: SerialRules | None = None,
+    numbering_rules: tuple | None = None,
+) -> dict:
+    """Return the validation of :func:`validate_device_for_import` before the OOB-controller decision."""
     result = {
         "is_ready": False,
         "can_import": False,
@@ -724,6 +1102,9 @@ def validate_device_for_import(  # noqa: C901
         "ambiguous_librenms_id": False,  # True when the librenms_id matches >1 NetBox object (import blocked)
         "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs", "oob_candidate", "promote_to_host", "merge_netbox_devices"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
+        "legacy_id_serial_confirmed": False,  # True when the legacy-linked device is the one holder of the serial
+        "legacy_id_serial_unavailable": False,  # True when the holder lookup of that serial cannot read every row
+        "legacy_id_serial_shared": False,  # True when the holder lookup found another Device with that serial
         "serial_duplicate": False,  # True when incoming serial is already on a different device
         # {"pk", "serial", "phase"} for the device already holding the incoming serial. The
         # lookup is unrestricted, so only the display gate may name it (see disclosure.py).
@@ -731,6 +1112,9 @@ def validate_device_for_import(  # noqa: C901
         "serial_role_choice_available": False,  # True when both oob_candidate and promote_to_host are valid choices
         "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
         "oob_candidate": None,  # dict {device, type, version, ip} when oob_candidate detected
+        # True when the row is the OOB controller of the matched object: linked, detected or already linked.
+        "row_is_oob_controller": False,
+        "match_verified": True,  # False when an error stopped validation before it verified the match
         # promote_to_host is only set when the host-promotion path is available; absent otherwise.
         "existing_librenms_link": None,  # dict {host_id, oob_id, oob_type} describing existing device's current LibreNMS linkage
         "merge_candidates": None,  # dict {host_named: {pk,name,librenms_link}, oob_named: {pk,name,librenms_link}} when two NB devices look like the same physical box
@@ -795,6 +1179,8 @@ def validate_device_for_import(  # noqa: C901
     }
 
     try:
+        serial_rules = serial_rules or SerialRules.load()
+        incoming_serial = libre_device.get("serial")
         # 1. Check if device/VM already exists in NetBox
         # Always check both Devices AND VMs to properly detect existing objects
         librenms_id = libre_device.get("device_id")
@@ -818,8 +1204,6 @@ def validate_device_for_import(  # noqa: C901
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
             f"hostname={hostname}"
         )
-
-        server_key = api.server_key if api is not None else server_key
 
         # Check for existing VM first (by librenms_id custom field).
         # find_mapping() covers both the new per-server JSON format
@@ -872,6 +1256,11 @@ def validate_device_for_import(  # noqa: C901
             if read_mapping(existing_vm).legacy.is_legacy:
                 result["librenms_id_needs_migration"] = True
 
+            # A match via the OOB sub-key is labeled like the Device case.
+            existing_vm_oob_id = read_mapping(existing_vm).oob_id(server_key)
+            if existing_vm_oob_id is not None and existing_vm_oob_id == coerce_librenms_id(librenms_id):
+                result["existing_match_type"] = "librenms_oob"
+
             # Check if name matches resolved name (accounts for use_sysname/strip_domain)
             if hostname and existing_vm.name == hostname:
                 result["name_matches"] = True
@@ -919,18 +1308,14 @@ def validate_device_for_import(  # noqa: C901
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
-                if result["existing_match_type"] == "librenms_oob":
-                    # The row carries the controller's hostname and serial, so it never names the host.
-                    pass
-                elif hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
-                    serial_key = chassis_serial_key(existing_device)
-                    incoming_serial = libre_device.get("serial")
+                if hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
+                    context = serial_rules.for_device(existing_device)
                     vc_expected_name = _member_name(
                         hostname,
                         existing_device.vc_position,
-                        incoming_serial if serial_key(incoming_serial) else existing_device.serial,
+                        incoming_serial if is_identity(incoming_serial, context) else existing_device.serial,
                         None,
-                        serial_key,
+                        context,
                     )
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True
@@ -947,28 +1332,41 @@ def validate_device_for_import(  # noqa: C901
                 # OOB sub-key (existing_match_type == "librenms_oob"): the incoming payload is the
                 # OOB controller's, so comparing it against the host record's serial would surface
                 # bogus replacement/conflict warnings on a row that is already correctly linked.
-                incoming_serial = normalize_serial(libre_device.get("serial"))
-                if result["existing_match_type"] != "librenms_oob" and normalize_stack_serial(incoming_serial):
-                    if serials_match(existing_device.serial, incoming_serial, chassis_serial_key(existing_device)):
-                        result["serial_confirmed"] = True
-                    elif normalize_serial(existing_device.serial):
-                        serial_conflict = next(
-                            iter(serial_lookup(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
-                        )
-                        if serial_conflict:
-                            result["serial_action"] = "conflict"
-                            result["serial_duplicate"] = True
-                            result["serial_conflict"] = {
-                                "pk": serial_conflict.pk,
-                                "serial": incoming_serial,
-                                "phase": "updating",
-                            }
+                # No LibreNMS serial text, no comparison: the context reads the device type and chassis.
+                drift = None
+                if result["existing_match_type"] != "librenms_oob" and display(incoming_serial):
+                    context = serial_rules.for_device(existing_device)
+                    drift = compare(existing_device.serial, incoming_serial, context)
+                if drift is None:
+                    pass
+                elif drift is Comparison.SAME:
+                    result["serial_confirmed"] = True
+                    # The legacy ID converts on the serial only for its one holder; the POST checks it again under lock.
+                    if result["librenms_id_needs_migration"]:
+                        # Unavailable until the lookup returns, so a failed lookup never reads as a shared serial.
+                        result["legacy_id_serial_unavailable"] = True
+                        try:
+                            holders = resolve_device(incoming_serial, rules=serial_rules)
+                        except RuleConfigurationError as exc:
+                            # The legacy ID names the Device, so another maker's broken rule hides only the other holders.
+                            detail = exception_text_for(exc, Device, None)
+                            result["warnings"].append(f"The other holders of the serial cannot be checked: {detail}")
                         else:
-                            result["serial_action"] = "update_serial"
-                            result["warnings"].append(
-                                f"Serial number differs from the NetBox record "
-                                f"(LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
-                            )
+                            holder = holders.object
+                            confirmed = holder is not None and holder.pk == existing_device.pk
+                            unavailable = holders.kind is ResolutionKind.UNAVAILABLE
+                            result["legacy_id_serial_confirmed"] = confirmed
+                            result["legacy_id_serial_unavailable"] = unavailable
+                            result["legacy_id_serial_shared"] = not confirmed and not unavailable
+                elif drift is Comparison.UNAVAILABLE:
+                    result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
+                elif is_identity(incoming_serial, context) and display(existing_device.serial):
+                    if not _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules, "updating"):
+                        result["serial_action"] = "update_serial"
+                        result["warnings"].append(
+                            f"Serial number differs from the NetBox record "
+                            f"(LibreNMS: '{display(incoming_serial)}'). Hardware may have been replaced."
+                        )
 
         # Only check hostname/serial/IP if not already matched by librenms_id.
         # Skip when an ambiguous librenms_id was flagged — hostname/serial/IP matching
@@ -994,9 +1392,8 @@ def validate_device_for_import(  # noqa: C901
                 # existing_device) never sees them — without this, two Devices plus one VM on a
                 # hostname would sail through as a new import, i.e. the VM's presence would
                 # RELAX the terminal protection the 2-Devices-no-VM case gets. Mirrors that
-                # guard's terminal state (message keeps the "hostname/serial" substring the
-                # refresh-path blocker cleanup keys on), including its early return: a
-                # hostname-bound duplicate never falls through to serial/IP re-binding either.
+                # guard's terminal state, including its early return: a hostname-bound
+                # duplicate never falls through to serial/IP re-binding either.
                 _device_peers = list(Device.objects.filter(name__iexact=hostname)[:2])
                 _vm_peers = list(VirtualMachine.objects.filter(name__iexact=hostname)[:2])
                 if len(_device_peers) > 1 or len(_vm_peers) > 1:
@@ -1038,27 +1435,16 @@ def validate_device_for_import(  # noqa: C901
                 result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
                 # Check for serial conflict on hostname-matched device.
-                incoming_serial = normalize_serial(libre_device.get("serial"))
-                if normalize_stack_serial(incoming_serial) and not serials_match(
-                    existing_device.serial, incoming_serial, chassis_serial_key(existing_device)
-                ):
-                    serial_conflict = next(
-                        iter(serial_lookup(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
-                    )
-                    if serial_conflict:
-                        result["serial_action"] = "conflict"
-                        result["serial_duplicate"] = True
-                        result["serial_conflict"] = {
-                            "pk": serial_conflict.pk,
-                            "serial": incoming_serial,
-                            "phase": "importing",
-                        }
-                    else:
+                drift = None
+                if display(incoming_serial):
+                    context = serial_rules.for_device(existing_device)
+                    drift = compare(existing_device.serial, incoming_serial, context)
+                if drift is Comparison.UNAVAILABLE:
+                    result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
+                elif drift is not None and is_identity(incoming_serial, context) and drift is not Comparison.SAME:
+                    if not _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules, "importing"):
                         result["serial_action"] = "update_serial"
-                        result["warnings"].append(
-                            f"Hostname matches but the serial differs from the NetBox record "
-                            f"(LibreNMS: '{incoming_serial}'). Hardware may have been replaced."
-                        )
+                        result["warnings"].append(_serial_differs_warning(incoming_serial))
                 else:
                     link_note = _describe_link_note(result["existing_librenms_link"])
                     result["warnings"].append(f"A device with this hostname already exists in NetBox ({link_note})")
@@ -1066,17 +1452,26 @@ def validate_device_for_import(  # noqa: C901
                 result["can_import"] = False
 
             # Check by serial number (strong physical match - hardware identity)
+            serial = display(incoming_serial)
+            serial_matches = []
             if not result["existing_device"]:
-                # Normalize the incoming serial before the exact indexed lookup. Migration 0012
-                # canonicalizes legacy Device rows, and every plugin write path stores this same
-                # normalized form, so matching and persistence share one representation.
-                serial = normalize_serial(libre_device.get("serial"))
-                if normalize_stack_serial(serial) and not import_as_vm:
+                if not import_as_vm:
+                    if refusal := serial_refusal(incoming_serial, Device):
+                        # The create refuses this value in stored_form(), so the row is never ready.
+                        result["issues"].append(refusal)
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
-                    # merge-peer [:2] guard (issue #101).
-                    serial_matches = serial_lookup(serial)
+                    # merge-peer [:2] guard (issue #101). The owner counts equivalent rows under
+                    # the serial rules, also rows that the user cannot see.
+                    discovery = resolve_device(incoming_serial, rules=serial_rules)
+                    serial_matches = list(discovery.matches)
+                    if discovery.kind is ResolutionKind.UNAVAILABLE:
+                        # The row stays unresolved: a weaker IP match must not bind it.
+                        result["issues"].append(serial_unavailable_issue(incoming_serial))
+                        result["can_import"] = False
+                        result["is_ready"] = False
+                        return result
                     if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET
@@ -1091,7 +1486,7 @@ def validate_device_for_import(  # noqa: C901
                         )
                         existing_by_serial = None
                     else:
-                        existing_by_serial = serial_matches[0] if serial_matches else None
+                        existing_by_serial = discovery.object
                     if existing_by_serial:
                         logger.info(f"Found existing device by serial: {existing_by_serial.name} (serial={serial})")
                         result["existing_device"] = existing_by_serial
@@ -1129,7 +1524,6 @@ def validate_device_for_import(  # noqa: C901
             # the Stage-2 merge-candidate detection below both run the identical UNIQUE [:2] query
             # for the matched type, so share the result instead of issuing it twice per device.
             _match_type = result.get("existing_match_type")
-            _serial_now = normalize_serial(libre_device.get("serial"))
             _dup_eligible = result.get("existing_device") is not None and _match_type in ("hostname", "serial")
             # VM matches are just as vulnerable: NetBox only enforces VM-name uniqueness per
             # cluster, so the VM hostname match above binds .first() among cross-cluster
@@ -1149,25 +1543,22 @@ def validate_device_for_import(  # noqa: C901
                 # Reuse the Stage-1 serial [:2] result (issue #101 guard, computed above) instead of
                 # re-issuing the identical UNIQUE query — keeps the single-query invariant while the
                 # fail-closed guard stays in place. Only defined when existing_match_type == "serial".
-                serial_matches
-                if _dup_eligible and _match_type == "serial" and normalize_stack_serial(_serial_now)
-                else []
+                serial_matches if _dup_eligible and _match_type == "serial" else []
             )
             if _dup_eligible:
                 _dup_current = False
                 if _match_type == "hostname" and hostname:
                     _dup_current = len(_hostname_peers) > 1
                 elif _match_type == "serial":
-                    _dup_current = bool(normalize_stack_serial(_serial_now)) and len(_serial_peers) > 1
+                    _dup_current = len(_serial_peers) > 1
                 if _dup_current:
                     # Arbitrary .first() match among duplicates: block link/promote/import and
                     # surface a blocking issue. The match is left for display only.
                     # Drop the arbitrary existing_device and all match-derived linkage/name state:
                     # this is a terminal ambiguity, so retaining the .first() row would let
-                    # bulk_import treat it as a real existing match — `_refresh_existing_device`
-                    # short-circuits on a set existing_device (skipping the ambiguity re-check) and
-                    # the exclude_existing / collision paths key off it — pinning the row to the
-                    # wrong device. Only existing_match_type carries the ambiguity forward.
+                    # bulk_import treat it as a real existing match (the exclude_existing and
+                    # collision paths key off it), pinning the row to the wrong device. Only
+                    # existing_match_type carries the ambiguity forward.
                     result["existing_device"] = None
                     result["existing_librenms_link"] = None
                     clear_match_derived_action_fields(result)
@@ -1178,8 +1569,6 @@ def validate_device_for_import(  # noqa: C901
                     result["existing_match_type"] = "ambiguous_hostname_or_serial"
                     result["can_import"] = False
                     result["is_ready"] = False
-                    # Both wordings keep the "hostname/serial" substring the refresh-path
-                    # blocker cleanup keys on (_AMBIGUOUS_SERIAL_IP_MARKERS in bulk_import).
                     _dup_kind = "virtual machines" if _matched_is_vm else "devices"
                     _dup_msg = (
                         f"Multiple NetBox {_dup_kind} share this device's hostname/serial; resolve the "
@@ -1201,9 +1590,9 @@ def validate_device_for_import(  # noqa: C901
             # physical box (host + OOB) imported as separate entries. Surface
             # this as a merge action instead of silently picking one.
             try:
-                _serial_for_pair = normalize_serial(libre_device.get("serial"))
+                _serial_for_pair = serial
                 if (
-                    normalize_stack_serial(_serial_for_pair)
+                    _serial_for_pair
                     and not import_as_vm
                     and result.get("existing_device") is not None
                     and result.get("existing_match_type") in ("hostname", "serial")
@@ -1241,10 +1630,10 @@ def validate_device_for_import(  # noqa: C901
                     # surface the wrong merge target. Fetch up to 2; only pair on exactly one,
                     # otherwise skip the suggestion and warn.
                     if _hostname_match and not _serial_match:
-                        _serial_peers = serial_lookup(_serial_for_pair, exclude_pk=_hostname_match.pk)
-                        if len(_serial_peers) == 1:
-                            _serial_match = _serial_peers[0]
-                        elif len(_serial_peers) > 1:
+                        _peer = resolve_device(incoming_serial, rules=serial_rules, exclude_pks=[_hostname_match.pk])
+                        if _peer.kind is ResolutionKind.UNIQUE:
+                            _serial_match = _peer.object
+                        elif _peer.kind is ResolutionKind.AMBIGUOUS:
                             result["warnings"].append(
                                 f"Multiple NetBox devices share serial '{_serial_for_pair}'; merge suggestion skipped."
                             )
@@ -1300,19 +1689,13 @@ def validate_device_for_import(  # noqa: C901
                 primary_ip = libre_device.get("ip")
                 if primary_ip:
                     # Shared resolver: scans every net_host row across the interface-assignment and
-                    # oob_ip-FK paths and fails closed on >1 distinct device (mirrors
-                    # _refresh_existing_device in bulk_import.py via the same helper).
-                    matched_object, ip_ambiguous, matching_ips = resolve_device_by_host_ip(primary_ip)
+                    # oob_ip-FK paths and fails closed on >1 distinct device.
+                    matched_object, ip_ambiguous = resolve_device_by_host_ip(primary_ip)
                     if ip_ambiguous:
                         # Duplicate net_host rows point at >1 distinct NetBox device — binding to
                         # an arbitrary one could re-home the import to the wrong device, so fail
-                        # closed (mirrors the librenms_id cross-model ambiguity guard above).
-                        # Put this collision into the same terminal ambiguity state the
-                        # hostname/serial guard uses, so a cached primary-IP collision can be
-                        # cleared by _refresh_existing_device() once the duplicate IP assignment is
-                        # resolved. The message carries the shared "serial or management IP" marker
-                        # the refresh cleanup strips on; without the match_type + marker the stale
-                        # blocker would survive refresh and keep the row blocked until cache expiry.
+                        # closed (mirrors the librenms_id cross-model ambiguity guard above), in the
+                        # same terminal ambiguity state that the hostname/serial guard uses.
                         result["existing_match_type"] = "ambiguous_hostname_or_serial"
                         result["issues"].append(
                             f"Multiple NetBox devices match this device's serial or management IP "
@@ -1335,69 +1718,13 @@ def validate_device_for_import(  # noqa: C901
                         )
                         result["can_import"] = False
                     elif matched_object:
-                        device = matched_object
                         result["import_as_vm"] = False
-                        # Surface any existing host/OOB linkage so the import UI renders the
-                        # correct row state (the librenms_id / serial branches do the same;
-                        # without this an already-linked device shows as "not linked" here).
-                        result["existing_librenms_link"] = _describe_existing_librenms_link(device, server_key)
-                        # Check if this is an OOB candidate via the IP path.
-                        # The OOB controller's IP may already be the device's oob_ip, or the
-                        # LibreNMS device may identify itself as an OOB type (iDRAC/iLO/etc.).
-                        oob_type = normalize_oob_type(
-                            libre_device.get("os", ""),
-                            libre_device.get("hardware", ""),
-                        )
-                        # Check the device's oob_ip against EVERY row sharing this host address,
-                        # not just existing_ip (.first()): with duplicate net_host rows the device's
-                        # oob_ip may be a different matching row, and comparing only the first would
-                        # wrongly read is_oob_ip as False.
-                        is_oob_ip = device.oob_ip_id is not None and matching_ips.filter(pk=device.oob_ip_id).exists()
-                        has_primary_ip = bool(device.primary_ip4_id or device.primary_ip6_id)
-                        # When the incoming IP already IS the device's oob_ip this is an OOB
-                        # candidate regardless of whether the LibreNMS os/hardware tokens let us
-                        # classify a type. Requiring oob_type here silently downgrades such a row
-                        # to a plain primary-IP match and loses the OOB action flow, so infer a
-                        # type from the hostname (or a generic "oob" fallback), mirroring the
-                        # serial-match branch above.
-                        inferred_oob_type = (
-                            oob_type
-                            or _detect_oob_type_from_name(
-                                libre_device.get("hostname") or libre_device.get("sysName") or ""
-                            )
-                            or "oob"
-                        )
-                        if is_oob_ip or (oob_type and not has_primary_ip):
-                            if not read_mapping(device).has_oob(server_key):
-                                result["existing_device"] = device
-                                result["existing_match_type"] = "primary_ip"
-                                result["serial_action"] = "oob_candidate"
-                                result["oob_candidate"] = {
-                                    "device": device,
-                                    "type": inferred_oob_type,
-                                    "version": libre_device.get("version") or None,
-                                    "ip": libre_device.get("ip") or None,
-                                }
-                                result["can_import"] = False
-                            else:
-                                result["existing_device"] = device
-                                result["existing_match_type"] = "primary_ip"
-                                result["warnings"].append(
-                                    f"IP address {primary_ip} is already assigned to a device in NetBox "
-                                    "(OOB already linked)"
-                                )
-                                result["can_import"] = False
-                        else:
-                            result["existing_device"] = device
-                            result["existing_match_type"] = "primary_ip"
-                            # Line 728 may already have populated a host/OOB
-                            # linkage; describe it accurately instead of always
-                            # claiming "not linked to LibreNMS".
-                            link_note = _describe_link_note(result.get("existing_librenms_link"))
-                            result["warnings"].append(
-                                f"IP address {primary_ip} is already assigned to a device in NetBox ({link_note})"
-                            )
-                            result["can_import"] = False
+                        result["existing_device"] = matched_object
+                        result["existing_match_type"] = "primary_ip"
+                        # Surface any existing host/OOB linkage so the import UI renders the correct row state.
+                        result["existing_librenms_link"] = _describe_existing_librenms_link(matched_object, server_key)
+                        result["warnings"].append(_ip_assigned_warning(primary_ip, result["existing_librenms_link"]))
+                        result["can_import"] = False
 
         # Refresh local mode after ALL detection branches. The refresh at the top of the
         # unmatched-device block only runs when nothing matched by librenms_id; an existing
@@ -1611,7 +1938,7 @@ def validate_device_for_import(  # noqa: C901
                 try:
                     logger.debug(f"Calling get_virtual_chassis_data for device {device_id}")
                     vc_detection = get_virtual_chassis_data(
-                        api, device_id, force_refresh=force_vc_refresh, candidate_keys=candidate_keys
+                        api, device_id, force_refresh=force_vc_refresh, serial_rules=serial_rules
                     )
                     logger.debug(
                         f"VC detection result: is_stack={vc_detection.get('is_stack')}, "
@@ -1627,10 +1954,23 @@ def validate_device_for_import(  # noqa: C901
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
                             )
-                            device_type = effective_import_device_type(result["device_type"].get("device_type"))
-                            result["virtual_chassis"] = update_vc_member_suggested_names(
-                                vc_detection, hostname, serial_key_for(getattr(device_type, "manufacturer", None))
-                            )
+                            try:
+                                result["virtual_chassis"] = prepare_virtual_chassis(
+                                    vc_detection,
+                                    device_type=effective_import_device_type(result["device_type"].get("device_type")),
+                                    master_name=hostname,
+                                    device_serial=incoming_serial,
+                                    serial_rules=serial_rules,
+                                    numbering_rules=numbering_rules,
+                                )
+                                # The DeviceType sets only the member numbers, so the text names no NetBox object.
+                                # nosemgrep: import-disclosure
+                                result["issues"].extend(_member_serial_refusals(result["virtual_chassis"]))
+                            except (VCNumberingError, RuleConfigurationError) as exc:
+                                # The import numbers the stack again for its final DeviceType.
+                                refusal = numbering_refusal_text(exc)
+                                result["virtual_chassis"] = unnumbered_virtual_chassis(vc_detection, refusal)
+                                result["issues"].append(refusal)
                 except Exception as e:
                     logger.exception("Exception during VC detection for device %s: %s", hostname, e)
                     # The validation result has no viewer: it is cached and shown to any import user.
@@ -1650,22 +1990,12 @@ def validate_device_for_import(  # noqa: C901
                 result["device_role"]["found"] = True
                 result["device_role"]["role"] = existing.role
 
-            # Check for device type mismatch between existing device and LibreNMS. Skip for an
-            # OOB-sub-key match (existing_match_type == "librenms_oob"): the LibreNMS payload is
-            # the OOB controller's, so a host-vs-OOB device-type compare is a bogus "wrong device"
-            # warning on a correctly-linked row.
-            if (
-                result.get("existing_match_type") != "librenms_oob"
-                and hasattr(existing, "device_type")
-                and existing.device_type
-            ):
+            # Check for device type mismatch between existing device and LibreNMS.
+            if hasattr(existing, "device_type") and existing.device_type:
                 librenms_dt = result["device_type"].get("device_type")
                 if librenms_dt and existing.device_type.pk != librenms_dt.pk:
                     result["device_type_mismatch"] = True
-                    result["warnings"].append(
-                        f"Device type mismatch: LibreNMS reports '{librenms_dt}', which differs from the "
-                        f"NetBox record. This may indicate the wrong device was matched."
-                    )
+                    result["warnings"].append(_device_type_mismatch_warning(librenms_dt))
         else:
             result["can_import"] = len(result["issues"]) == 0
 
@@ -1693,6 +2023,9 @@ def validate_device_for_import(  # noqa: C901
         # The validation result has no viewer: it is cached and shown to any import user.
         detail = exception_text_for(e, VirtualMachine if import_as_vm else Device, None)
         result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {detail}")
+        # The error can stop validation after a provisional match; a LibreNMS ID link proves its match itself.
+        if result["existing_match_type"] not in ("librenms_id", "librenms_oob"):
+            result["match_verified"] = False
         return result
 
 
@@ -1737,6 +2070,7 @@ def import_single_device(  # noqa: C901
     libre_device: dict = None,
     user=None,
     text_viewer=None,
+    serial_rules: SerialRules | None = None,
 ) -> dict:
     """
     Import a single LibreNMS device to NetBox.
@@ -1759,6 +2093,7 @@ def import_single_device(  # noqa: C901
         user: User whose view scope authorizes explicit object selections.
         text_viewer: User who reads the ``error`` text. None (the default) for text that is saved,
             such as job output, so that only the hidden text of a NetBox refusal is kept.
+        serial_rules: The batch's :class:`SerialRules`; None reads them in the import transaction.
 
     Returns:
         dict: Import result with structure:
@@ -1915,7 +2250,24 @@ def import_single_device(  # noqa: C901
             }
 
         # Create device in NetBox
-        with transaction.atomic():
+        with atomic_with_events():
+            # The serial identity locks come first; then the lookup sees a concurrent import's committed device.
+            serial_rules = serial_rules or SerialRules.load()
+            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            # The insert writes the type row's device count anyway; lock it now, so the context is its manufacturer.
+            device_type = DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
+            taken = resolve_device_write(
+                libre_device.get("serial"), serial_rules.for_device_type(device_type), rules=serial_rules
+            )
+            if taken.kind in REFUSING:
+                return {
+                    "success": False,
+                    "device": None,
+                    "message": "",
+                    # No name: the lookup is unrestricted and this string reaches job data and logs.
+                    "error": _serial_taken_message(device_id, libre_device.get("serial"), taken),
+                    "synced": {},
+                }
             _locked_owner, conflict = lock_librenms_id_assignment(device_id, api.server_key)
             if conflict is not None:
                 return {
@@ -1963,9 +2315,9 @@ def import_single_device(  # noqa: C901
             if platform_plan.platform is not None:
                 device_data["platform"] = platform_plan.platform
 
-            # Persist the trimmed raw serial; the exact indexed match lookups read this form.
-            serial = normalize_serial(libre_device.get("serial"))
-            if normalize_stack_serial(serial):
+            # Persist the trimmed LibreNMS text; serial_identity keys it when it compares.
+            serial = stored_form(libre_device.get("serial"), Device)
+            if serial:
                 device_data["serial"] = serial
 
             location_name = libre_device.get("location", "")
@@ -2121,7 +2473,8 @@ def fetch_device_with_cache(
     cache_key = get_import_device_cache_key(device_id, server_key or api.server_key)
     libre_device = cache.get(cache_key)
 
-    if not libre_device:
+    # The live read checks the device ID of its row, so a cached row of another device counts as a miss.
+    if not row_identity_matches(libre_device, device_id):
         # Fallback to API fetch. Read LIVE: both this function's caches (the pre-fetched dict and the
         # import Django cache) have already missed, so the fallback must reflect current LibreNMS
         # state — not the separate 60s get_device_info snapshot a sync-tab render may have populated —

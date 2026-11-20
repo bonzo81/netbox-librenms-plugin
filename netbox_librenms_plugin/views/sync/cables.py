@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 from collections import defaultdict
-from urllib.parse import quote_plus
 
 from dcim.models import Cable, CableTermination, ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
@@ -51,6 +50,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.sync_query import SyncQuery, page_query_url
 from netbox_librenms_plugin.transactions import (
     FOLLOW_UP_FAILED_MESSAGE,
     TRY_AGAIN_MESSAGE,
@@ -73,6 +73,7 @@ from netbox_librenms_plugin.utils import (
     render_cable_trace,
 )
 from netbox_librenms_plugin.views.base.cables_view import (
+    CABLE_MODAL_QUERY_KEYS,
     cable_row_ports,
     port_owner_id,
     port_record,
@@ -83,7 +84,6 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
-    redirect_with_server_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -1311,24 +1311,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return error
 
         initial_device = self.restrict_object_or_404(Device, pk=pk)
+        page_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[initial_device.pk])
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return redirect(
-                f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
-            )
+            # The posted server is gone, so the tab comes back on the active server.
+            return redirect(page_query_url(request, page_path, {"tab": "cables", "server_key": None}))
+        # The action URL carries the page query, so the tab comes back with every tab's filters and page.
+        redirect_url = page_query_url(request, page_path, {"tab": "cables", "server_key": server_key})
         origin_device = initial_device
         raw_origin_device_id = request.POST.get("origin_device_id")
         if raw_origin_device_id is not None:
             origin_device_id = coerce_librenms_id(raw_origin_device_id)
             if origin_device_id is None:
                 messages.error(request, "A valid cable page device is required.")
-                return redirect_with_server_key(
-                    request,
-                    f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}"
-                    "?tab=cables",
-                    server_key,
-                )
+                return redirect(redirect_url)
             origin_device = self.restrict_object_or_404(Device, pk=origin_device_id)
             same_device = origin_device.pk == initial_device.pk
             same_chassis = (
@@ -1337,30 +1334,16 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             )
             if not same_device and not same_chassis:
                 messages.error(request, "The cable page and selected device do not match.")
-                return redirect_with_server_key(
-                    request,
-                    f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}"
-                    "?tab=cables",
-                    server_key,
-                )
+                return redirect(redirect_url)
         if read_mapping(origin_device).migrated_to(server_key) or read_mapping(initial_device).migrated_to(server_key):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
-            return redirect_with_server_key(
-                request,
-                f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}"
-                "?tab=cables",
-                server_key,
-            )
+            return redirect(redirect_url)
         self._post_server_key = server_key
         self._initial_device = initial_device
         self._origin_device = origin_device
         # The force-confirm modal re-submits with force=on to authorize replacement of the exact
         # current cable topology and desired endpoints. The checkbox is clear by default.
         force = request.POST.get("force") == "on"
-        redirect_url = (
-            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
-            + (f"&server_key={quote_plus(server_key)}" if server_key else "")
-        )
 
         selected_interfaces = self.get_selected_interfaces(request, initial_device)
         cached_links = self.get_cached_links_data(request, initial_device)
@@ -1434,15 +1417,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # Cache genuinely gone (e.g. TTL elapsed between refresh and sync): render an empty
             # table but keep the sync flash messages.
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}
-        elif context.get("table") is not None:
-            # _prepare_context derives the table's pagination/sort htmx_url from request.path, which
-            # here is the sync POST endpoint. Repoint it at the cable-table refresh endpoint (a GET
-            # there returns the same fragment) so paging/sorting still works after a sync swap —
-            # matching the URL the "Refresh Cables" action produces.
-            tab_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[obj.pk])
-            context["table"].htmx_url = f"{tab_url}?tab=cables" + (
-                f"&server_key={quote_plus(resolved_key)}" if resolved_key else ""
-            )
 
         # Overwrite-protected conflicts: surface them for the force-confirm modal, which the partial
         # injects into the shared #htmx-modal via an out-of-band swap (auto-shown by the page JS).
@@ -1591,8 +1565,10 @@ class CableRemoteCreateView(SyncCablesView):
             return self._sync_response(request, obj, getattr(self, "_post_server_key", None), "", close_modal=True)
         obj = context["object"]
         server_key = context["server_key"]
-        redirect_url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[obj.pk])}?tab=cables" + (
-            f"&server_key={quote_plus(server_key)}" if server_key else ""
+        redirect_url = page_query_url(
+            request,
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[obj.pk]),
+            {"tab": "cables", "server_key": server_key},
         )
         if any(
             read_mapping(device).migrated_to(server_key)
@@ -1740,7 +1716,12 @@ class CableRemoteCreateView(SyncCablesView):
             "type_is_unmapped": decision.kind is RuleDecisionKind.UNMAPPED,
             # Truthiness only: the template must not be handed an unscoped object to render.
             "existing_interface": Interface.objects.filter(device=remote_device, name=name).exists(),
-            "post_url": reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk]),
+            # The modal posts with the page query, so the re-rendered tab keeps every tab's filters and page.
+            "post_url": SyncQuery.from_request(request).url(
+                reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk]),
+                {"server_key": server_key},
+                reset=CABLE_MODAL_QUERY_KEYS,
+            ),
         }, None
 
     def _remote_port_record(self, row):

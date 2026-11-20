@@ -1,6 +1,7 @@
 """End-to-end tests for the module install actions and their inventory ignore rules."""
 
 import pytest
+from django.core.cache import cache
 
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
@@ -368,7 +369,6 @@ class TestInstallBranchView:
     def test_a_snapshot_cached_before_the_schema_version_is_a_missing_snapshot(self, live_librenms):
         """Rows from an older writer lack markers the readers rely on, so the branch install must not use them."""
         from dcim.models import Module
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
@@ -382,13 +382,15 @@ class TestInstallBranchView:
         seed_inventory(view, device, rows, librenms_id=72)
         request = make_request("post", _branch_post(device, 10), user=make_superuser(), path="/modules/")
         key = _seed_pre_version_snapshot(view, device, rows, 72)
+        cached = cache.get(key)
 
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 302
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
-        assert cache.get(key) is None
+        # A refresh can store a current snapshot under the key after the read, so the reader deletes nothing.
+        assert cache.get(key) == cached
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_row_below_a_skipped_holder_has_no_branch(self, live_librenms, holder_class, holder_model):
@@ -443,7 +445,6 @@ class TestInstallSelectedView:
 
     def test_a_snapshot_cached_before_the_schema_version_is_a_missing_snapshot(self, live_librenms):
         from dcim.models import Module
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
@@ -458,12 +459,14 @@ class TestInstallSelectedView:
         _action, fields = rendered_module_form(render_module_tab(device), "install-selected")
         request = make_request("post", {**fields, "select": ["10"]}, user=make_superuser(), path="/modules/")
         key = _seed_pre_version_snapshot(view, device, rows, 73)
+        cached = cache.get(key)
 
         view_post(view, request, pk=device.pk)
 
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
-        assert cache.get(key) is None
+        # A refresh can store a current snapshot under the key after the read, so the reader deletes nothing.
+        assert cache.get(key) == cached
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_selected_row_below_a_skipped_holder_installs_nothing(self, live_librenms, holder_class, holder_model):
@@ -498,8 +501,8 @@ class TestUpdateModuleSerialView:
         assert message_texts(request, "warning") == []
 
     @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
-    def test_a_placeholder_serial_updates_as_blank(self, live_librenms, placeholder):
-        """A grant signed for a placeholder row, e.g. by an older page, must store a blank serial."""
+    def test_a_placeholder_serial_keeps_the_stored_serial(self, live_librenms, placeholder):
+        """An update never clears a stored serial because LibreNMS reports none."""
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.module_grants import (
             ACTION_UPDATE_SERIAL,
@@ -508,7 +511,12 @@ class TestUpdateModuleSerialView:
             module_inventory_snapshot_digest,
             sign_module_grant,
         )
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView, _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import (
+            NO_INCOMING_SERIAL_MESSAGE,
+            UpdateModuleSerialView,
+            _get_cached_module_snapshot,
+        )
 
         device = make_device_with_module_bays(f"serial-placeholder-{len(placeholder)}", ["Slot 1"])
         seed_mapping(device, "default", own=68)
@@ -517,7 +525,7 @@ class TestUpdateModuleSerialView:
         view._librenms_api = live_librenms.api
         rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
         seed_inventory(view, device, rows, librenms_id=68)
-        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        inventory = cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key))
         grant = sign_module_grant(
             page_device_id=device.pk,
             device_id=device.pk,
@@ -535,8 +543,60 @@ class TestUpdateModuleSerialView:
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 302
+        # A stale grant also redirects and keeps the serial, so the refusal must be the missing serial.
+        assert message_texts(request, "error") == [NO_INCOMING_SERIAL_MESSAGE]
         module.refresh_from_db()
-        assert module.serial == ""
+        assert module.serial == "OLD"
+
+    def test_a_snapshot_merged_under_another_serial_context_refuses_the_update(self, live_librenms):
+        """The grant signs the policy and the rows; the snapshot stamp must also be the policy's context."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.module_grants import (
+            ACTION_UPDATE_SERIAL,
+            RENDER_ATTRIBUTED,
+            GrantRefusal,
+            installed_module_target,
+            module_inventory_snapshot_digest,
+            sign_module_grant,
+        )
+        from netbox_librenms_plugin.serial_identity import SerialContext
+        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device_with_module_bays("serial-other-stamp", ["Slot 1"])
+        seed_mapping(device, "default", own=68)
+        module = install_module(device, "Slot 1", "SERIAL-OTHER-STAMP-CARD", serial="OLD-SERIAL")
+        view = UpdateModuleSerialView()
+        view._librenms_api = live_librenms.api
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW-SERIAL")]
+        key = view.get_cache_key(device, "inventory", server_key="default")
+        other = SerialContext(None, (), unavailable="another context")
+        cache.set(key, module_inventory_cache_payload(rows, 68, None, serial_context=other), timeout=300)
+        grant = sign_module_grant(
+            page_device_id=device.pk,
+            device_id=device.pk,
+            server_key="default",
+            action=ACTION_UPDATE_SERIAL,
+            inventory_digest=module_inventory_snapshot_digest(rows),
+            policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
+            render_mode=RENDER_ATTRIBUTED,
+            ent_index=11,
+            action_target=installed_module_target(module.pk, module.module_bay_id),
+        )
+        data = {"module_id": module.pk, "ent_index": 11, "server_key": "default", "inventory_binding": grant}
+        request = make_request("post", data, user=make_superuser(), path="/modules/")
+
+        try:
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(key)
+
+        assert response.status_code == 302
+        assert message_texts(request, "error") == [GrantRefusal.SNAPSHOT.message]
+        module.refresh_from_db()
+        assert module.serial == "OLD-SERIAL"
 
     def test_an_invalid_module_id_is_reported(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
