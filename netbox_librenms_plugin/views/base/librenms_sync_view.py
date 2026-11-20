@@ -565,6 +565,7 @@ class BaseLibreNMSSyncView(
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
+            "vc_serial_members": [],
         }
 
         if self.librenms_id is not None:
@@ -648,7 +649,10 @@ class BaseLibreNMSSyncView(
 
                 # For Virtual Chassis, fetch inventory
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
+                    # The dialog names, links and offers only the members that the viewer may view.
+                    viewable = list(obj.virtual_chassis.members.restrict(getattr(request, "user", None), "view"))
+                    librenms_device_details["vc_serial_members"] = viewable
+                    librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj, viewable)
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True
@@ -830,7 +834,7 @@ class BaseLibreNMSSyncView(
         except Exception:
             return None
 
-    def _get_vc_inventory_serials(self, obj):
+    def _get_vc_inventory_serials(self, obj, viewable):
         """
         Fetch inventory serials for Virtual Chassis members.
 
@@ -839,6 +843,7 @@ class BaseLibreNMSSyncView(
 
         Args:
             obj: NetBox device object (VC member)
+            viewable: The chassis members that the viewer may view; only these are named.
 
         Returns:
             list: [
@@ -847,7 +852,8 @@ class BaseLibreNMSSyncView(
                     'serial': 'the LibreNMS serial, as the dialog shows it',
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
-                    'assigned_member': Device object or None (if serial matches existing assignment)
+                    'assigned_member': the viewable member that holds the serial, or None,
+                    'assigned_hidden': whether a member outside *viewable* holds the serial
                 }
             ]
 
@@ -862,6 +868,7 @@ class BaseLibreNMSSyncView(
         # Each member's own Device serial context admits and compares: a masterless member keeps its own rules.
         members_by_serial = MemberSerials(vc_members, self._serial_context)
 
+        viewable_pks = {member.pk for member in viewable}
         result = []
         # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
         for component in extract_vc_members(inventory, members_by_serial.contexts()):
@@ -869,7 +876,8 @@ class BaseLibreNMSSyncView(
                 continue
             # A serial that two members share assigns neither.
             holders = members_by_serial.find(component["serial"])
-            assigned_member = holders[0] if len(holders) == 1 else None
+            holder = holders[0] if len(holders) == 1 else None
+            hidden = holder is not None and holder.pk not in viewable_pks
 
             result.append(
                 {
@@ -877,7 +885,8 @@ class BaseLibreNMSSyncView(
                     "serial": display(component["serial"]),
                     "librenms_serial": display(component["serial"]),
                     "model": component["model"] or "-",
-                    "assigned_member": assigned_member,
+                    "assigned_member": None if hidden else holder,
+                    "assigned_hidden": hidden,
                 }
             )
 

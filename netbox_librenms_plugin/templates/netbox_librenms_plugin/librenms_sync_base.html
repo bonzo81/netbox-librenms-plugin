@@ -1202,6 +1202,8 @@ that may well be correct.
                                         <span class="text-success ms-1" title="Already assigned">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
+                                    {% elif item.assigned_hidden %}
+                                        <span class="text-muted">A member you cannot view</span>
                                     {% else %}
                                         <span class="text-muted">-</span>
                                     {% endif %}
@@ -1210,7 +1212,7 @@ that may well be correct.
                                     <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
-                                        {% for member in object.virtual_chassis.members.all %}
+                                        {% for member in vc_serial_members %}
                                         <option value="{{ member.pk }}" {% if item.assigned_member and item.assigned_member.pk == member.pk %}selected{% endif %}>
                                             {{ member.name }}
                                         </option>

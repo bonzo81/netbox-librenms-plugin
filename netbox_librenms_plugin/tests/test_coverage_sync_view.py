@@ -606,6 +606,11 @@ class TestLibreNMSDeviceInfo:
         assert result["librenms_device_details"]["netbox_dns_name"] == "dns-identity.example.test"
 
 
+def _all_members(device):
+    """Return every member of the chassis of *device*: a viewer who may view them all."""
+    return list(device.virtual_chassis.members.all())
+
+
 def _stack_inventory(*members, extra=()):
     """Return a stack root, its chassis members and *extra* rows as one inventory."""
     root = {"entPhysicalIndex": 1, "entPhysicalClass": "stack", "entPhysicalContainedIn": 0}
@@ -697,7 +702,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6648
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
 
@@ -723,7 +728,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6641
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert len(result) == 2
         assert result[0]["assigned_member"] == members[0]
@@ -748,7 +753,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6644
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert len(result) == 2
         assert result[0]["serial"] == "S/N BCFB9793"
@@ -785,7 +790,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6646
 
-        result = view._get_vc_inventory_serials(member)
+        result = view._get_vc_inventory_serials(member, _all_members(member))
 
         assert result[0]["serial"] == "VENDOR:MEMBER-SERIAL"
         assert result[0]["assigned_member"] == member
@@ -819,7 +824,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6650
 
-        result = view._get_vc_inventory_serials(page)
+        result = view._get_vc_inventory_serials(page, _all_members(page))
 
         assert result[0]["serial"] == "TAG ABC-DIALOG"
         assert result[0]["assigned_member"] is None
@@ -851,7 +856,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6651
 
-        result = view._get_vc_inventory_serials(page)
+        result = view._get_vc_inventory_serials(page, _all_members(page))
 
         assert [(item["serial"], item["assigned_member"]) for item in result][0] == ("TAG-AB", member)
 
@@ -882,7 +887,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6652
 
-        result = view._get_vc_inventory_serials(page)
+        result = view._get_vc_inventory_serials(page, _all_members(page))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("ROOT123", None), ("TAG-AB", member)]
 
@@ -908,9 +913,10 @@ class TestVirtualChassisInventory:
         _register_device(librenms_server, 6645, members[0].name, inventory=inventory)
         view = _device_view()
         view.librenms_id = 6645
+        viewable = _all_members(members[0])
 
         with CaptureQueriesContext(connection) as captured:
-            result = view._get_vc_inventory_serials(members[0])
+            result = view._get_vc_inventory_serials(members[0], viewable)
 
         assert len(result) == 5
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
@@ -930,7 +936,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6642
 
-        assert view._get_vc_inventory_serials(members[0]) == []
+        assert view._get_vc_inventory_serials(members[0], _all_members(members[0])) == []
 
     def test_the_dialog_offers_no_row_for_a_serial_that_is_not_text_or_a_number(self, librenms_server):
         """The dialog posts text, so a JSON `true` would reach Sync All as the serial "True"."""
@@ -940,7 +946,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6649
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert [item["librenms_serial"] for item in result] == ["VC-REAL-SERIAL"]
 
@@ -977,6 +983,34 @@ class TestVirtualChassisInventory:
         response = logged_in_client.get(_sync_url(owner))
         shown = {item["serial"]: item["assigned_member"] for item in response.context["vc_inventory_serials"]}
         assert shown == {"S/N OWNER-RAW": owner, "S/N MEMBER-RAW": member}
+
+    def test_the_dialog_names_and_offers_only_the_members_the_viewer_may_view(self, client, librenms_server):
+        """A hidden member holds a reported serial: the dialog shows the row, but no name, link or choice of it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        _vc, (page, visible, hidden) = make_virtual_chassis_members("inventory-scope", count=3)
+        hidden.serial = "VC-HIDDEN-SERIAL"
+        hidden.save()
+        seed_mapping(page, SERVER_KEY, own=6653)
+        inventory = _stack_inventory(
+            {"entPhysicalSerialNum": "VC-PAGE-SERIAL"}, {"entPhysicalSerialNum": "VC-HIDDEN-SERIAL"}
+        )
+        _register_device(librenms_server, 6653, page.name, inventory=inventory)
+        user = make_user_with_perms("inventory-scope-viewer", [])
+        client.force_login(grant(user, "view", Device, constraints={"pk__in": [page.pk, visible.pk]}))
+
+        response = client.get(_sync_url(page))
+
+        html = response.content.decode()
+        start = html.index('id="vc-serials-form"')
+        form = html[start : html.index("</form>", start)]
+        assert "VC-HIDDEN-SERIAL" in form
+        assert hidden.name not in form
+        assert hidden.get_absolute_url() not in form
+        assert f'value="{hidden.pk}"' not in form
+        assert f'value="{visible.pk}"' in form
 
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""
