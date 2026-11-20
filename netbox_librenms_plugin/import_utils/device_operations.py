@@ -4,7 +4,6 @@ import logging
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
-from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from tenancy.models import Tenant
@@ -34,7 +33,7 @@ from ..serial_identity import (
     resolve_device_write,
     stored_form,
 )
-from ..transactions import atomic_with_events, classify_conflict
+from ..transactions import atomic_with_events
 from ..platform_versions import (
     HIDDEN_PLATFORM,
     PlatformFacts,
@@ -1018,13 +1017,9 @@ def validate_device_for_import(  # noqa: C901
                         # Unavailable until the lookup returns, so a failed lookup never reads as a shared serial.
                         result["legacy_id_serial_unavailable"] = True
                         try:
-                            # A savepoint keeps the connection usable after a database error of the query.
-                            with transaction.atomic():
-                                holders = resolve_device(incoming_serial, rules=serial_rules)
-                        except (RuleConfigurationError, DatabaseError) as exc:
-                            if classify_conflict(exc):
-                                raise
-                            # The legacy ID names the Device, so a failed lookup hides only the other holders.
+                            holders = resolve_device(incoming_serial, rules=serial_rules)
+                        except RuleConfigurationError as exc:
+                            # The legacy ID names the Device, so another maker's broken rule hides only the other holders.
                             detail = exception_text_for(exc, Device, None)
                             result["warnings"].append(f"The other holders of the serial cannot be checked: {detail}")
                         else:
@@ -1758,8 +1753,6 @@ def validate_device_for_import(  # noqa: C901
         return result
 
     except Exception as e:
-        if classify_conflict(e):
-            raise
         logger.exception(f"Error validating device for import: {libre_device.get('hostname', 'unknown')}")
         # The validation result has no viewer: it is cached and shown to any import user.
         detail = exception_text_for(e, VirtualMachine if import_as_vm else Device, None)

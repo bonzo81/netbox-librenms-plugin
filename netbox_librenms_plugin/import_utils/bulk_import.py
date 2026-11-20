@@ -28,7 +28,7 @@ from ..serial_identity import (
     is_sole_holder,
     resolve_device,
 )
-from ..transactions import TransactionConflict, atomic_with_events, run_transaction
+from ..transactions import atomic_with_events
 from ..utils import (
     cached_row_matches,
     exception_text_for,
@@ -237,32 +237,24 @@ def detect_collisions_for_device_ids(
             # (e.g. a same-batch retry that hits the cache instead of re-fetching), even though this
             # id is (correctly) recorded unresolved above.
             devices_cache[device_id] = libre_device
-        try:
-            # The runner tries a row once more after a lock conflict.
-            validation = run_transaction(
-                lambda libre_device=libre_device, device_id=device_id: validate_device_for_import(
-                    # DB-only collision pre-check: don't hand the validator an API client (it would let
-                    # API-backed validation paths run even with the cache supplied + include_vc_detection
-                    # False). The collision-relevant match fields are resolved from the DB; api is only
-                    # used for VC/chassis enrichment, all of which is guarded on `api` being truthy.
-                    libre_device,
-                    api=None,
-                    # Validate in the row's ACTUAL import mode: VM rows skip the Device-only
-                    # serial/IP matching exactly like bulk_import_vms will, so a coincidental
-                    # serial can't fabricate a collision against a Device the row never touches.
-                    import_as_vm=device_id in vm_id_set,
-                    use_sysname=use_sysname,
-                    strip_domain=strip_domain,
-                    server_key=api.server_key,
-                    include_vc_detection=False,
-                    collision_only=True,
-                    serial_rules=serial_rules,
-                )
-            )
-        except TransactionConflict:
-            # Both attempts met a lock conflict, so this row was not collision-checked; the other rows go on.
-            unresolved_ids.append(device_id)
-            continue
+        validation = validate_device_for_import(
+            # DB-only collision pre-check: don't hand the validator an API client (it would let
+            # API-backed validation paths run even with the cache supplied + include_vc_detection
+            # False). The collision-relevant match fields are resolved from the DB; api is only
+            # used for VC/chassis enrichment, all of which is guarded on `api` being truthy.
+            libre_device,
+            api=None,
+            # Validate in the row's ACTUAL import mode: VM rows skip the Device-only
+            # serial/IP matching exactly like bulk_import_vms will, so a coincidental
+            # serial can't fabricate a collision against a Device the row never touches.
+            import_as_vm=device_id in vm_id_set,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+            server_key=api.server_key,
+            include_vc_detection=False,
+            collision_only=True,
+            serial_rules=serial_rules,
+        )
         if any(str(issue).startswith(VALIDATION_ERROR_ISSUE_PREFIX) for issue in validation.get("issues", [])):
             # validate_device_for_import() caught an exception and returned only a partial result
             # (its except branch appends a VALIDATION_ERROR_ISSUE_PREFIX issue). The collision-relevant

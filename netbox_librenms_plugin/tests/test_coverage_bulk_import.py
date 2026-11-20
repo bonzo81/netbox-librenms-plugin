@@ -213,61 +213,23 @@ class TestCollisionDetection:
         assert collisions == []
         assert unresolved == []
 
-    @pytest.mark.parametrize("failure", ["broken-rule", "query-timeout"])
-    def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(
-        self, live_librenms, failure
-    ):
-        """The legacy ID names the Device, so a failed holder lookup must not drop the row from the grouping."""
-        from django.db import connection
-
+    def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(self, live_librenms):
+        """The legacy ID names the Device, so another maker's broken rule must not drop the row from the grouping."""
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
 
         target = make_device("collision-legacy-target", serial="LEGACY-COLLIDE", librenms_cf=53)
-        if failure == "broken-rule":
-            _broken_serial_rule("collision-legacy")
+        _broken_serial_rule("collision-legacy")
         legacy = _libre_device(53, "collision-legacy-other-name", serial="LEGACY-COLLIDE")
         by_name = _libre_device(54, target.name)
         _register_device(live_librenms, legacy)
         _register_device(live_librenms, by_name)
 
-        def holder_query_times_out(execute, sql, params, many, context):
-            if failure == "query-timeout" and "BTRIM" in sql and '"dcim_device"' in sql:
-                # A real server timeout, so the error aborts the transaction as a slow holder query does.
-                execute("SET LOCAL statement_timeout = 1", None, False, context)
-                return execute("SELECT pg_sleep(1)", None, False, context)
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(holder_query_times_out):
-            collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
+        collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
 
         assert unresolved == []
         assert [collision["nb_device_pk"] for collision in collisions] == [target.pk]
         assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {53, 54}
-
-    def test_a_lock_conflict_in_the_legacy_holder_query_leaves_the_row_unresolved(self, live_librenms):
-        """Validation passes a lock conflict on; the scan tries the row once more, then leaves it unchecked."""
-        from django.db import connection
-
-        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
-
-        make_device("collision-legacy-lock-target", serial="LEGACY-LOCK", librenms_cf=55)
-        _register_device(live_librenms, _libre_device(55, "collision-legacy-lock-name", serial="LEGACY-LOCK"))
-        attempts = []
-
-        def holder_query_meets_a_lock(execute, sql, params, many, context):
-            if "BTRIM" in sql and '"dcim_device"' in sql:
-                attempts.append(sql)
-                # The server raises SQLSTATE 55P03, as a lock_timeout on a locked row does.
-                body = "BEGIN RAISE EXCEPTION 'lock not available' USING ERRCODE = '55P03'; END"
-                return execute(f"DO $$ {body} $$", None, False, context)
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(holder_query_meets_a_lock):
-            collisions, unresolved = detect_collisions_for_device_ids([55], live_librenms.api)
-
-        assert (collisions, unresolved) == ([], [55])
-        assert len(attempts) == 2
 
     def test_missing_live_device_is_unresolved(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids

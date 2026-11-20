@@ -540,59 +540,6 @@ class TestImportDevicesJob:
         assert job.data["errors"][0]["device_id"] == 6403
         assert "couldn't be read to verify them" in job.data["errors"][0]["error"]
 
-    def test_a_lock_conflict_in_one_row_of_the_precheck_skips_only_that_row(self, librenms_server):
-        """A lock conflict in one row's validation leaves that row unchecked; the other row imports and the job saves."""
-        from dcim.models import Device, DeviceRole
-        from django.db import connection
-
-        from netbox_librenms_plugin.jobs import ImportDevicesJob
-
-        infrastructure = make_device("background-lock-infrastructure")
-        make_device("background-lock-legacy", serial="LEGACY-LOCKED", librenms_cf=6431)
-        user = _import_user("lock-conflict", vms=False)
-        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
-        job = _job(user, "lock-conflict-import")
-        rows = {
-            6431: _device_payload(6431, hostname="background-lock-legacy-name", serial="LEGACY-LOCKED"),
-            6432: _device_payload(
-                6432,
-                hostname="background-lock-checked-device",
-                hardware=infrastructure.device_type.model,
-                location=infrastructure.site.name,
-            ),
-        }
-        for device_id, row in rows.items():
-            librenms_server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
-
-        def holder_query_meets_a_lock(execute, sql, params, many, context):
-            if "BTRIM" in sql and '"dcim_device"' in sql and "LEGACY-LOCKED" in str(params):
-                # The server raises SQLSTATE 55P03, as a lock_timeout on a locked row does.
-                body = "BEGIN RAISE EXCEPTION 'lock not available' USING ERRCODE = '55P03'; END"
-                return execute(f"DO $$ {body} $$", None, False, context)
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(holder_query_meets_a_lock):
-            ImportDevicesJob(job).run(
-                request=queued_request(job.user),
-                import_plans=[
-                    {
-                        "source_device_id": device_id,
-                        "object_type": "device",
-                        "role_id": infrastructure.role_id,
-                        "rack_id": None,
-                    }
-                    for device_id in rows
-                ],
-                server_key=SERVER_KEY,
-                libre_devices_cache=rows,
-            )
-
-        job.refresh_from_db()
-        assert job.data["completed"] is True
-        assert Device.objects.filter(name="background-lock-checked-device").exists()
-        assert (job.data["success_count"], job.data["failed_count"]) == (1, 1)
-        assert [error["device_id"] for error in job.data["errors"]] == [6431]
-
     def test_a_lone_row_whose_stack_read_failed_is_skipped_not_imported(self, librenms_server):
         """One row runs the same pre-check as many: an unreadable stack must not import VC-less."""
         from dcim.models import Device, DeviceRole
