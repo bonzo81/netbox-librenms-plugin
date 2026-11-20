@@ -38,6 +38,7 @@ from ..utils import (
 )
 from .cache import (
     get_cache_index_key,
+    get_chassis_inventory_cache_key,
     get_cache_metadata_key,
     get_import_device_cache_key,
     get_validated_device_cache_key,
@@ -1505,6 +1506,10 @@ def process_device_filters(  # noqa: C901
     if job and _is_job_cancelled(job):
         job.logger.warning("Job was stopped before VC pre-fetch")
         return _empty_return(return_cache_status)
+
+    if clear_cache and libre_devices:
+        # The DeviceType fallback reads the chassis inventory again, as the VC prefetch reads the stacks again.
+        cache.delete_many([get_chassis_inventory_cache_key(d["device_id"], api.server_key) for d in libre_devices])
 
     # Pre-warm VC cache if needed
     if vc_detection_enabled and libre_devices:

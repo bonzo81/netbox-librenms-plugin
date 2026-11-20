@@ -60,7 +60,7 @@ from ..utils import (
     parse_location_for_import,
     resolve_location_mapping,
 )
-from .cache import get_import_device_cache_key
+from .cache import get_chassis_inventory_cache_key, get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
     VCNumberingError,
@@ -275,6 +275,18 @@ def resolve_device_by_host_ip(primary_ip):
     return None, False
 
 
+def _chassis_inventory(api, device_id):
+    """Return ``(success, items)`` of the chassis-class inventory; a successful read is cached for the API timeout."""
+    cache_key = get_chassis_inventory_cache_key(device_id, api.server_key)
+    cached = cache.get(cache_key) if api.cache_timeout else None
+    if cached is not None:
+        return True, cached
+    success, inventory = api.get_inventory_filtered(device_id, ent_physical_class="chassis")
+    if success and api.cache_timeout:
+        cache.set(cache_key, inventory, timeout=api.cache_timeout)
+    return success, inventory
+
+
 def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: dict | None = None):
     """
     Attempt device type matching using chassis inventory fields.
@@ -299,7 +311,7 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
 
     """
     try:
-        success, inventory = api.get_inventory_filtered(device_id, ent_physical_class="chassis")
+        success, inventory = _chassis_inventory(api, device_id)
         if not success or not inventory:
             return None
 
