@@ -1,8 +1,8 @@
-"""Real-DB guard against lossy librenms_id coercion in _refresh_existing_device.
+"""Real-DB guard against lossy librenms_id coercion in validate_device_for_import.
 
 CodeRabbit (PR #116): ``_id_lookup`` did ``find_by_librenms_id(m, int(librenms_id), ...)``.
 ``int(42.9)`` silently truncates to ``42`` and would bind an unrelated NetBox device whose
-librenms_id is 42. A float carries no exact integer id, so the refresh must fail closed
+librenms_id is 42. A float carries no exact integer id, so the matcher must fail closed
 instead of truncating into a different valid id.
 
 These tests exercise the real ORM: a real Device carrying ``librenms_id={"default": 42}``,
@@ -30,26 +30,24 @@ def _make_device(name):
 class TestIdLookupLossyCoercionRealDB:
     def test_float_device_id_does_not_bind_by_truncated_id(self):
         """A float device_id (42.9) must not truncate to 42 and bind the device linked to id 42."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         self._make_device_id_42()
-        validation = {"existing_device": None, "import_as_vm": False, "device_role": {}, "issues": []}
         # hostname/sysName intentionally unmatched so a bind can only come from the id lookup.
         libre_device = {"device_id": 42.9, "hostname": "no-such-host-116", "sysName": "no-such-sys-116"}
 
-        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+        validation = validate_device_for_import(libre_device, server_key="default", include_vc_detection=False)
 
         assert validation["existing_device"] is None
 
     def test_int_device_id_binds(self):
         """Positive control: an exact int device_id (42) binds the device — the lookup really runs."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         device = self._make_device_id_42()
-        validation = {"existing_device": None, "import_as_vm": False, "device_role": {}, "issues": []}
         libre_device = {"device_id": 42, "hostname": "no-such-host-116", "sysName": "no-such-sys-116"}
 
-        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+        validation = validate_device_for_import(libre_device, server_key="default", include_vc_detection=False)
 
         assert validation["existing_device"] is not None
         assert validation["existing_device"].pk == device.pk
@@ -57,13 +55,12 @@ class TestIdLookupLossyCoercionRealDB:
 
     def test_non_numeric_device_id_does_not_bind_by_id(self):
         """A non-numeric device_id ("abc") yields no real id match → existing_device stays None."""
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         self._make_device_id_42()
-        validation = {"existing_device": None, "import_as_vm": False, "device_role": {}, "issues": []}
         libre_device = {"device_id": "abc", "hostname": "no-such-host-116", "sysName": "no-such-sys-116"}
 
-        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+        validation = validate_device_for_import(libre_device, server_key="default", include_vc_detection=False)
 
         assert validation["existing_device"] is None
 

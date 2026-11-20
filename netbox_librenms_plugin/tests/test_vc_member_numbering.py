@@ -542,7 +542,7 @@ def _job_rows(job, user):
 
 
 class TestCachedValidations:
-    """A3 with warm caches: a configuration edit makes every cached validation miss."""
+    """A3 with warm caches: a search after a configuration edit validates its rows under the new configuration."""
 
     def _edits(self):
         """Return ``{name: (setup, edit)}``: each edit changes the rule that numbers the cached Cisco row."""
@@ -611,7 +611,7 @@ class TestCachedValidations:
         assert _positions(_search(caching_librenms, row)) == [0, 1, 2]
 
     @pytest.mark.parametrize("change", ["rule-deleted", "mapping-remapped", "device-type-renamed"])
-    def test_a_completed_job_expires_after_a_configuration_edit(
+    def test_a_completed_job_shows_the_numbers_of_the_current_configuration(
         self, caching_librenms, django_capture_on_commit_callbacks, change
     ):
         setup, hardware = self._edits()[change]
@@ -626,7 +626,20 @@ class TestCachedValidations:
         with django_capture_on_commit_callbacks(execute=True):
             edit()
 
-        assert _job_rows(job, user) == []
+        (current,) = _job_rows(job, user)
+        assert _positions(current["_validation"]) == [0, 1, 2]
+
+    def test_a_rule_update_that_sends_no_signal_shows_on_the_next_search(self, caching_librenms):
+        """A queryset update sends no signal; the next search validates the row again and reads the rule."""
+        from netbox_librenms_plugin.models import VCMemberNumberingRule
+
+        rule = _rule(manufacturer=_cisco_type().manufacturer)
+        row = _serve(caching_librenms.server, _cisco_recording(), "unsignalled-update", CISCO_MODEL)
+        assert _positions(_search(caching_librenms, row)) == [1, 2, 3]
+
+        VCMemberNumberingRule.objects.filter(pk=rule.pk).update(numbering_mode="reported")
+
+        assert _positions(_search(caching_librenms, row)) == [0, 1, 2]
 
     def test_a_repaired_rule_makes_a_blocked_row_importable_again(
         self, caching_librenms, django_capture_on_commit_callbacks

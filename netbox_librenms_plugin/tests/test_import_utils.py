@@ -1776,11 +1776,6 @@ class TestBuildIdServerInfo:
         assert result is None
 
 
-# ---------------------------------------------------------------------------
-# Tests for _refresh_existing_device sys_name fallback fix
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.django_db
 class TestGetHostnameForAction:
     """Resolve action names from cached state or a real request."""
