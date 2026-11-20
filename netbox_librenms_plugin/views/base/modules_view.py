@@ -140,8 +140,9 @@ def _names_another_part(item: dict, transceiver: dict, context: SerialContext) -
     entity_serial, optic_serial = item.get("entPhysicalSerialNum"), transceiver.get("serial")
     if is_identity(entity_serial, context) and is_identity(optic_serial, context):
         return compare(entity_serial, optic_serial, context) is Comparison.DIFFERENT
-    # A reported serial without an identity still names a part, so it matches no serial on the other side.
-    return bool(display(entity_serial)) and bool(display(optic_serial))
+    entity_text, optic_text = display(entity_serial), display(optic_serial)
+    # A reported serial without an identity still names a part: only the same text names the same part.
+    return bool(entity_text) and bool(optic_text) and entity_text != optic_text
 
 
 # ENTITY-MIB classes of hardware that is never an optic; a port, module, container or other entity can be.

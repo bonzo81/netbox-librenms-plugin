@@ -1153,6 +1153,35 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert inventory == inventory_seed
 
+    def test_an_entity_index_match_keeps_the_optic_when_both_report_one_short_serial(self, settings, librenms_server):
+        """Both APIs report AB-12 for the optic at its own entity index, so the texts name one part."""
+        view = _real_api_view(settings, librenms_server, librenms_id=111)
+        librenms_server.register(
+            "/api/v0/devices/111/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {"entity_physical_index": 300, "model": "SFP-10G-SR", "serial": " AB-12 ", "port_id": 42}
+                ],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/111/ports",
+            {"status": "ok", "ports": [{"port_id": 42, "ifName": "Eth9", "ifIndex": 9}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {"entPhysicalIndex": 300, "entPhysicalClass": "port", "entPhysicalSerialNum": "AB-12", "ifIndex": 9}
+        ]
+
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
+
+        assert error is None
+        assert [(item["entPhysicalModelName"], item["_librenms_port_id"]) for item in inventory] == [("SFP-10G-SR", 42)]
+
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
     ):
