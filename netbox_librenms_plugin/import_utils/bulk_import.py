@@ -1411,6 +1411,30 @@ def _stopped_at_unavailable_serial(validation: dict) -> bool:
     return any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", []))
 
 
+def validate_search_row(
+    api: LibreNMSAPI, device: dict, *, vc_detection_enabled, use_sysname, strip_domain, serial_rules, numbering_rules
+) -> dict:
+    """
+    Validate one row of an import search against the current NetBox state.
+
+    A search and the completed-job page call it for every row. Only the LibreNMS-side inputs come from the cache.
+    """
+    validation = validate_device_for_import(
+        device,
+        api=api,
+        include_vc_detection=vc_detection_enabled,
+        force_vc_refresh=False,
+        server_key=api.server_key,
+        use_sysname=use_sysname,
+        strip_domain=strip_domain,
+        serial_rules=serial_rules,
+        numbering_rules=numbering_rules,
+    )
+    if not vc_detection_enabled:
+        validation["virtual_chassis"] = empty_virtual_chassis_data()
+    return validation
+
+
 def _empty_return(return_cache_status: bool):
     """Centralised empty-result return value for process_device_filters."""
     return ([], False) if return_cache_status else []
@@ -1552,7 +1576,6 @@ def process_device_filters(  # noqa: C901
         # Drop any cached validation/meta keys before recomputing
         device.pop("_validation", None)
 
-        # Generate shared cache key for this validated device
         device_id = device["device_id"]
         cache_key = get_validated_device_cache_key(
             server_key=api.server_key,
@@ -1564,66 +1587,24 @@ def process_device_filters(  # noqa: C901
             serial_rules=serial_rules,
             generation=generation,
         )
-
-        # Check if we already have cached validation for this device
-        # (only if not forcing refresh)
-        if not clear_cache:
-            cached_device = cache.get(cache_key)
-            # A row that stopped at an Unavailable serial lookup is partial, so validate it again.
-            if cached_device and not _stopped_at_unavailable_serial(cached_device["_validation"]):
-                # Use cached validation
-                device["_validation"] = cached_device["_validation"]
-
-                # Refresh existing_device from DB to avoid stale data
-                # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(
-                    device["_validation"], libre_device=device, server_key=api.server_key, serial_rules=serial_rules
-                )
-
-                # Apply exclude_existing filter if enabled
-                if exclude_existing:
-                    validation = device["_validation"]
-                    if validation["existing_device"]:
-                        continue
-
-                validated_devices.append(device)
-                continue
-
-        # Not in cache or forcing refresh - validate now
-        validation = validate_device_for_import(
+        validation = validate_search_row(
+            api,
             device,
-            api=api,
-            include_vc_detection=vc_detection_enabled,
-            force_vc_refresh=False,
-            server_key=api.server_key,
+            vc_detection_enabled=vc_detection_enabled,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             serial_rules=serial_rules,
             numbering_rules=numbering_rules,
         )
+        # The dialog reads this raw row, so it describes the row that the table shows.
+        cache.set(get_import_device_cache_key(device_id, api.server_key), dict(device), timeout=api.cache_timeout)
 
-        # Set VC detection metadata
-        if not vc_detection_enabled:
-            validation["virtual_chassis"] = empty_virtual_chassis_data()
-
-        # Apply exclude_existing filter if enabled
         if exclude_existing and validation["existing_device"]:
             continue
 
         device["_validation"] = validation
         validated_devices.append(device)
-
-        # Cache with TWO keys for different purposes:
-        # 1. Complex key (with filter context) - for full validated device with all metadata
         cache.set(cache_key, device, timeout=api.cache_timeout)
-
-        # 2. Simple key (device ID only) - for quick device data lookup by role/rack updates
-        #    This avoids redundant API calls when user interacts with dropdowns
-        simple_cache_key = get_import_device_cache_key(device_id, api.server_key)
-        # Cache just the raw device data (not the full validation result)
-        # This is what get_validated_device_with_selections() expects
-        device_data_only = {k: v for k, v in device.items() if k != "_validation"}
-        cache.set(simple_cache_key, device_data_only, timeout=api.cache_timeout)
 
     # Store cache metadata (timestamp) for all filter operations
     # This enables countdown display regardless of background job vs synchronous execution
