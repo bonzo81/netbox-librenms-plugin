@@ -923,17 +923,13 @@ class TestEquivalentFormsAcrossDecisions:
         assert result["serial_action"] == "merge_netbox_devices"
         assert result["merge_candidates"]["oob_named"]["pk"] == oob.pk
 
-    def test_the_cached_refresh_binds_the_device_that_stores_the_decorated_form(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+    def test_the_serial_match_binds_the_device_that_stores_the_decorated_form(self):
         from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
-        device = make_device("refresh-forms", serial="S/N REFRESH-SN1")
-        validation = {"existing_device": None, "import_as_vm": False, "can_import": True, "issues": []}
+        device = make_device("decorated-forms", serial="S/N DECORATED-SN1")
 
-        _refresh_existing_device(
-            validation, libre_device={"device_id": 7805, "hostname": "unmatched-refresh", "serial": "REFRESH-SN1"}
-        )
+        validation = _validate({"device_id": 7805, "hostname": "unmatched-decorated", "serial": "DECORATED-SN1"})
 
         assert validation["existing_device"] == device
         assert validation["existing_match_type"] == "serial"

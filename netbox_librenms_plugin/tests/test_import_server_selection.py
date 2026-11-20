@@ -682,10 +682,7 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
     from django.contrib.auth import get_user_model
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
-    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
-    from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-    from netbox_librenms_plugin.serial_identity import SerialRules
+    from netbox_librenms_plugin.import_utils import get_import_device_cache_key
 
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user_model = get_user_model()
@@ -694,19 +691,8 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
     device_id = 46105
     filters = {"hostname": "private-job-result"}
-    cached_device = librenms_device(device_id, "private-job-result")
-    cached_device["_validation"] = validate_device_for_import(
-        cached_device, server_key="secondary", include_vc_detection=False
-    )
-    cache_key = get_validated_device_cache_key(
-        server_key="secondary",
-        filters=filters,
-        device_id=device_id,
-        vc_enabled=False,
-        use_sysname=True,
-        strip_domain=False,
-    )
-    cache.set(cache_key, cached_device, timeout=300)
+    cache_key = get_import_device_cache_key(device_id, "secondary")
+    cache.set(cache_key, librenms_device(device_id, "private-job-result"), timeout=300)
     job = Job.objects.create(
         name="Private transient server filter job",
         user=owner,
@@ -716,7 +702,6 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
             "device_ids": [device_id],
             "filters": filters,
             "server_key": "secondary",
-            "serial_rules": serial_rules_version(SerialRules.load()),
             "vc_detection_enabled": False,
             "use_sysname": True,
             "strip_domain": False,
@@ -744,7 +729,7 @@ def test_non_superuser_job_url_falls_back_to_synchronous_server_search(client, s
     from dcim.models import Device
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+    from netbox_librenms_plugin.import_utils import get_import_device_cache_key
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
@@ -752,14 +737,7 @@ def test_non_superuser_job_url_falls_back_to_synchronous_server_search(client, s
     import_url = reverse("plugins:netbox_librenms_plugin:librenms_import")
     job_device_id = 46106
     filters = {"hostname": "private-non-superuser-job-result"}
-    cache_key = get_validated_device_cache_key(
-        server_key="secondary",
-        filters=filters,
-        device_id=job_device_id,
-        vc_enabled=False,
-        use_sysname=True,
-        strip_domain=False,
-    )
+    cache_key = get_import_device_cache_key(job_device_id, "secondary")
     cache.set(cache_key, librenms_device(job_device_id, "private-non-superuser-job-result"), timeout=300)
     job = Job.objects.create(
         name="Non-superuser transient server filter job",
@@ -861,10 +839,7 @@ def test_background_filter_job_uses_and_records_its_transient_server(settings, s
     from core.models import Job
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.import_utils import (
-        get_import_device_cache_key,
-        get_validated_device_cache_key,
-    )
+    from netbox_librenms_plugin.import_utils import get_import_device_cache_key
     from netbox_librenms_plugin.jobs import FilterDevicesJob
 
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
@@ -890,16 +865,7 @@ def test_background_filter_job_uses_and_records_its_transient_server(settings, s
     job.refresh_from_db()
     assert job.data["server_key"] == "secondary"
     assert job.data["device_ids"] == [46104]
-    # _load_job_results reads the validated key, so only this one proves the results page can load.
-    validated_key = get_validated_device_cache_key(
-        server_key=job.data["server_key"],
-        filters=job.data["filters"],
-        device_id=46104,
-        vc_enabled=job.data["vc_detection_enabled"],
-        use_sysname=job.data["use_sysname"],
-        strip_domain=job.data["strip_domain"],
-    )
-    assert cache.get(validated_key)["hostname"] == "secondary-background-edge"
+    # _load_job_results validates the raw row of this key, so it proves the results page can load.
     assert cache.get(get_import_device_cache_key(46104, "secondary"))["hostname"] == "secondary-background-edge"
     assert cache.get(get_import_device_cache_key(46104, "primary")) is None
     requests = _requests_by_server(servers)
