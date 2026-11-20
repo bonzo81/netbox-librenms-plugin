@@ -352,11 +352,11 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             )
             from netbox_librenms_plugin.import_utils.cache import search_metadata_is_current
 
-            # Check if validated results already exist for this naming-mode
+            # Check if a search already exists for this naming-mode
             # namespace.  The metadata key encodes server, filters, vc_enabled,
             # use_sysname and strip_domain, so a naming-preference change
             # correctly shows the cache as cold and triggers the background path.
-            # A serial rule edit changes the validated row keys, so it also shows the cache as cold.
+            # A serial rule edit changes the keys of the cached stack detection, so it also shows the cache as cold.
             validated_cached = False
             if not self._cache_cleared:
                 try:

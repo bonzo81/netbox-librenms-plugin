@@ -1737,28 +1737,6 @@ class TestValidateDeviceForImport:
         assert result["oob_candidate"] is None
         assert result["serial_action"] != "oob_candidate"
 
-    def test_a_failed_reload_in_the_refresh_gets_no_attach_offer(self, monkeypatch):
-        """The refresh cannot read the matched Device again, so the cached offer is not verified."""
-        from netbox_librenms_plugin.import_utils import bulk_import
-
-        host = make_device("validation-reload-failed-host")
-        host.oob_ip = make_ip("198.18.33.1/32", assigned_object=make_interface(host, "mgmt"))
-        host.save()
-        payload = _device_payload(5501, hostname=host.name, sysName=host.name, serial="-", ip="198.18.33.1")
-        result = self._validate(payload)
-        assert result["serial_action"] == "oob_candidate"
-
-        def fail_linkage(*_args, **_kwargs):
-            raise RuntimeError("database read failed")
-
-        # Error injection: a transient read failure inside the reload.
-        monkeypatch.setattr(bulk_import, "_refresh_librenms_linkage", fail_linkage)
-
-        bulk_import._refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
-
-        assert result["oob_candidate"] is None
-        assert result["serial_action"] != "oob_candidate"
-
     def test_a_refresh_rebuilds_the_offer_for_the_current_chassis_owner(self):
         """The chassis owner of the matched member changes between validation and refresh."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device

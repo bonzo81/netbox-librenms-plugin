@@ -92,7 +92,7 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
-# The fragment of the blocker of a row whose serial no lookup can read; the refresh strips a stale copy by it.
+# The fragment of the blocker of a row whose serial no lookup can read; the collision precheck keys on it.
 SERIAL_UNAVAILABLE_ISSUE_MARKER = "cannot be matched:"
 STACK_DETECTION_FAILED_MESSAGE = "Stack detection failed. Refresh LibreNMS data and try again."
 
@@ -233,8 +233,8 @@ def resolve_device_by_host_ip(primary_ip):
     whichever duplicate row sorts first. An IP can be a Device's ``oob_ip`` while assigned
     to no interface, so the assigned-object scan alone would miss an OOB-only link.
 
-    Shared by :func:`validate_device_for_import` and ``bulk_import._refresh_existing_device``
-    so the two paths can't drift on which device a management IP resolves to.
+    Shared by :func:`validate_device_for_import` and the import views, so they agree on which
+    device a management IP resolves to.
 
     Args:
         primary_ip: The management IP (host form) to resolve.
@@ -458,7 +458,7 @@ def _member_serial_refusals(prepared) -> list:
 
 
 def serial_unavailable_issue(incoming_serial) -> str:
-    """Return the blocker of a row whose serial lookup is Unavailable; validation and the refresh both add it."""
+    """Return the blocker of a row whose serial lookup is Unavailable."""
     # The constant, not the lookup's reason: the issue text must carry nothing that an unscoped lookup returned.
     return f"Serial '{display(incoming_serial)}' {SERIAL_UNAVAILABLE_ISSUE_MARKER} {UNAVAILABLE_MASTER_LINK}"
 
@@ -709,8 +709,8 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
     serial update, host promotion, type mismatch or host warnings. A merge suggestion stays as it is. Else a
     Device host gets the attach offer, built again from current facts, when the owner of its LibreNMS links has
     no OOB link, and the already-linked warning when it has one. A match that the validation did not verify
-    (``match_verified`` False) gets no offer. Validation and the cached-row refresh both call it, so the rule
-    has one definition.
+    (``match_verified`` False) gets no offer. Every return path of validation calls it, so the rule has one
+    definition.
     """
     libre_device = libre_device or {}
     result["row_is_oob_controller"] = _oob_controller_evidence(result, libre_device, server_key)
@@ -1392,9 +1392,8 @@ def _match_and_validate(  # noqa: C901
                 # existing_device) never sees them — without this, two Devices plus one VM on a
                 # hostname would sail through as a new import, i.e. the VM's presence would
                 # RELAX the terminal protection the 2-Devices-no-VM case gets. Mirrors that
-                # guard's terminal state (message keeps the "hostname/serial" substring the
-                # refresh-path blocker cleanup keys on), including its early return: a
-                # hostname-bound duplicate never falls through to serial/IP re-binding either.
+                # guard's terminal state, including its early return: a hostname-bound
+                # duplicate never falls through to serial/IP re-binding either.
                 _device_peers = list(Device.objects.filter(name__iexact=hostname)[:2])
                 _vm_peers = list(VirtualMachine.objects.filter(name__iexact=hostname)[:2])
                 if len(_device_peers) > 1 or len(_vm_peers) > 1:
@@ -1557,10 +1556,9 @@ def _match_and_validate(  # noqa: C901
                     # surface a blocking issue. The match is left for display only.
                     # Drop the arbitrary existing_device and all match-derived linkage/name state:
                     # this is a terminal ambiguity, so retaining the .first() row would let
-                    # bulk_import treat it as a real existing match — `_refresh_existing_device`
-                    # short-circuits on a set existing_device (skipping the ambiguity re-check) and
-                    # the exclude_existing / collision paths key off it — pinning the row to the
-                    # wrong device. Only existing_match_type carries the ambiguity forward.
+                    # bulk_import treat it as a real existing match (the exclude_existing and
+                    # collision paths key off it), pinning the row to the wrong device. Only
+                    # existing_match_type carries the ambiguity forward.
                     result["existing_device"] = None
                     result["existing_librenms_link"] = None
                     clear_match_derived_action_fields(result)
@@ -1571,8 +1569,6 @@ def _match_and_validate(  # noqa: C901
                     result["existing_match_type"] = "ambiguous_hostname_or_serial"
                     result["can_import"] = False
                     result["is_ready"] = False
-                    # Both wordings keep the "hostname/serial" substring the refresh-path
-                    # blocker cleanup keys on (_AMBIGUOUS_SERIAL_IP_MARKERS in bulk_import).
                     _dup_kind = "virtual machines" if _matched_is_vm else "devices"
                     _dup_msg = (
                         f"Multiple NetBox {_dup_kind} share this device's hostname/serial; resolve the "
@@ -1693,19 +1689,13 @@ def _match_and_validate(  # noqa: C901
                 primary_ip = libre_device.get("ip")
                 if primary_ip:
                     # Shared resolver: scans every net_host row across the interface-assignment and
-                    # oob_ip-FK paths and fails closed on >1 distinct device (mirrors
-                    # _refresh_existing_device in bulk_import.py via the same helper).
+                    # oob_ip-FK paths and fails closed on >1 distinct device.
                     matched_object, ip_ambiguous = resolve_device_by_host_ip(primary_ip)
                     if ip_ambiguous:
                         # Duplicate net_host rows point at >1 distinct NetBox device — binding to
                         # an arbitrary one could re-home the import to the wrong device, so fail
-                        # closed (mirrors the librenms_id cross-model ambiguity guard above).
-                        # Put this collision into the same terminal ambiguity state the
-                        # hostname/serial guard uses, so a cached primary-IP collision can be
-                        # cleared by _refresh_existing_device() once the duplicate IP assignment is
-                        # resolved. The message carries the shared "serial or management IP" marker
-                        # the refresh cleanup strips on; without the match_type + marker the stale
-                        # blocker would survive refresh and keep the row blocked until cache expiry.
+                        # closed (mirrors the librenms_id cross-model ambiguity guard above), in the
+                        # same terminal ambiguity state that the hostname/serial guard uses.
                         result["existing_match_type"] = "ambiguous_hostname_or_serial"
                         result["issues"].append(
                             f"Multiple NetBox devices match this device's serial or management IP "

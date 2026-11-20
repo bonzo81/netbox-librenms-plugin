@@ -3,60 +3,11 @@
 import hashlib
 import json
 import logging
-import time
 from collections.abc import Mapping
 
 from django.core.cache import cache
-from django.db import transaction
-from django.db.models.signals import post_delete, post_save
 
 logger = logging.getLogger(__name__)
-
-IMPORT_CONFIGURATION_GENERATION_KEY = "librenms_import_configuration_generation"
-
-
-def import_configuration_generation() -> int:
-    """
-    Return the generation of the NetBox inputs that select an import row's DeviceType and numbering rule.
-
-    A cached validation keys on it, so an edit of one of those inputs makes every cached validation miss.
-    A new counter starts at the current time, so it is larger than every value of an expired counter.
-    """
-    generation = cache.get(IMPORT_CONFIGURATION_GENERATION_KEY)
-    if generation is None:
-        fresh = time.time_ns()
-        added = cache.add(IMPORT_CONFIGURATION_GENERATION_KEY, fresh, timeout=None)
-        generation = fresh if added else cache.get(IMPORT_CONFIGURATION_GENERATION_KEY, fresh)
-    return generation
-
-
-def _bump_import_configuration_generation() -> None:
-    """Move the generation forward; without a counter, start one that is later than every earlier generation."""
-    try:
-        cache.incr(IMPORT_CONFIGURATION_GENERATION_KEY)
-    except ValueError:
-        cache.add(IMPORT_CONFIGURATION_GENERATION_KEY, time.time_ns(), timeout=None)
-
-
-def _schedule_import_configuration_bump(sender, using, **kwargs):
-    """Move the generation after the write commits, so a validation that reads the old rows keys on the old one."""
-    transaction.on_commit(_bump_import_configuration_generation, using=using, robust=True)
-
-
-def connect_import_configuration_signals():
-    """Subscribe to the writes of every input that selects an import row's DeviceType or numbering rule."""
-    from dcim.models import DeviceType, Manufacturer
-
-    from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule, VCMemberNumberingRule
-
-    for model in (VCMemberNumberingRule, DeviceTypeMapping, NormalizationRule, DeviceType, Manufacturer):
-        label = model._meta.label_lower
-        for signal, kind in ((post_save, "save"), (post_delete, "delete")):
-            signal.connect(
-                _schedule_import_configuration_bump,
-                sender=model,
-                dispatch_uid=f"netbox_librenms_plugin_import_configuration_{kind}_{label}",
-            )
 
 
 def _build_filter_hash(filters: dict) -> str:
@@ -143,7 +94,7 @@ def get_active_cached_searches(server_key: str, serial_rules) -> list[dict]:
 
     Args:
         server_key: LibreNMS server identifier
-        serial_rules: The SerialRules that a search must have validated its rows under to be listed.
+        serial_rules: The SerialRules that a search must have read its stacks under to be listed.
 
     Returns:
         List of dicts containing cache metadata with enriched display_filters
@@ -205,7 +156,7 @@ def get_active_cached_searches(server_key: str, serial_rules) -> list[dict]:
             if remaining_seconds > 0:
                 # The index keeps a search of other serial rules: a rebuild under the current rules reuses its key.
                 valid_cache_keys.append(cache_key)
-                # A search that validated under other serial rules has no rows to reopen, so it is not listed.
+                # A search of other serial rules would detect its stacks again, so it is not listed.
                 if not search_metadata_is_current(metadata, serial_rules):
                     continue
                 # Add remaining time and cache key
@@ -255,62 +206,15 @@ def get_active_cached_searches_for_servers(servers: Mapping[str, str], serial_ru
 
 
 def serial_rules_version(serial_rules=None) -> str:
-    """Return the serial rule version that validated rows key on; None reads the rules."""
+    """Return the serial rule version that the cached stack detection keys on; None reads the rules."""
     from netbox_librenms_plugin.serial_identity import SerialRules
 
     return (serial_rules or SerialRules.load()).digest[:16]
 
 
 def search_metadata_is_current(metadata, serial_rules=None) -> bool:
-    """Return whether cached search *metadata* exists for the serial rules that its validated rows key on."""
+    """Return whether cached search *metadata* exists for the serial rules that its cached stack detection keys on."""
     return isinstance(metadata, dict) and metadata.get("serial_rules") == serial_rules_version(serial_rules)
-
-
-def get_validated_device_cache_key(
-    server_key: str,
-    filters: dict,
-    device_id: int | str,
-    vc_enabled: bool,
-    use_sysname: bool = True,
-    strip_domain: bool = False,
-    serial_rules=None,
-    generation: int | None = None,
-) -> str:
-    """
-    Generate a consistent cache key for validated device data.
-
-    This ensures both synchronous and background job processing use the same
-    cache keys, avoiding duplicate validation work and cache entries.
-
-    Args:
-        server_key: LibreNMS server key
-        filters: Filter dict with location, type, os, hostname, sysname, hardware keys
-        device_id: LibreNMS device ID
-        vc_enabled: Whether virtual chassis detection was enabled
-        use_sysname: Whether sysName is preferred over hostname for device naming
-        strip_domain: Whether domain suffix is stripped from device names
-        serial_rules: The SerialRules the validation used; None reads them. A rule edit changes the key.
-        generation: The :func:`import_configuration_generation` that the caller read before it read the
-            configuration it validates with; None reads it now. An edit that commits later then leaves the
-            result under the old generation, which no reader asks for.
-
-    Returns:
-        str: Cache key for the validated device
-
-    Example:
-        >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
-        >>> key
-        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False_rules=4f53cda18c2baa0c_config=1'
-    """
-    # Sort filters for a deterministic, cross-process stable hash; None values are excluded
-    # (consistent with get_cache_metadata_key).
-    filter_hash = _build_filter_hash(filters)
-    vc_part = "vc" if vc_enabled else "novc"
-    rules_part = serial_rules_version(serial_rules)
-    return (
-        f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
-        f"_rules={rules_part}_config={import_configuration_generation() if generation is None else generation}"
-    )
 
 
 def get_import_device_cache_key(device_id: int | str, server_key: str) -> str:
