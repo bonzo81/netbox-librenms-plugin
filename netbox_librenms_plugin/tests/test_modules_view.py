@@ -1111,15 +1111,22 @@ class TestMergeTransceiverDataPortIdentity:
             for item in inventory[1:]
         ] == [(77, "OPTIC123", 9)]
 
-    def test_a_coincident_entity_index_does_not_merge_onto_a_short_reported_serial(self, settings, librenms_server):
-        """Junos reports the port ifIndex as the optic index; a port entity with that index and a short serial is another part."""
+    @pytest.mark.parametrize(
+        ("port_serial", "optic_serial"),
+        [("AB-12", "OPTIC123"), ("PORT123", "AB-12")],
+        ids=["short-port", "short-optic"],
+    )
+    def test_a_coincident_entity_index_does_not_merge_a_short_serial(
+        self, settings, librenms_server, port_serial, optic_serial
+    ):
+        """Junos reports the port ifIndex as the optic index; a short serial on either side names another part."""
         view = _real_api_view(settings, librenms_server, librenms_id=110)
         librenms_server.register(
             "/api/v0/devices/110/transceivers",
             {
                 "status": "ok",
                 "transceivers": [
-                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "OPTIC123", "port_id": 9}
+                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": optic_serial, "port_id": 9}
                 ],
             },
             method="GET",
@@ -1134,7 +1141,7 @@ class TestMergeTransceiverDataPortIdentity:
                 "entPhysicalIndex": 50,
                 "entPhysicalName": "Port 9",
                 "entPhysicalClass": "port",
-                "entPhysicalSerialNum": "AB-12",
+                "entPhysicalSerialNum": port_serial,
                 "ifIndex": 50,
             }
         ]
