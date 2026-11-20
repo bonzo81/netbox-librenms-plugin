@@ -245,6 +245,28 @@ class TestCollisionDetection:
         assert [collision["nb_device_pk"] for collision in collisions] == [target.pk]
         assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {53, 54}
 
+    def test_a_lock_conflict_in_the_legacy_holder_query_reaches_the_caller(self, live_librenms):
+        """A lock conflict goes on to the transaction runner, which tries again; validation must not keep it."""
+        from django.db import OperationalError, connection
+
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.transactions import classify_conflict
+
+        make_device("collision-legacy-lock-target", serial="LEGACY-LOCK", librenms_cf=55)
+        _register_device(live_librenms, _libre_device(55, "collision-legacy-lock-name", serial="LEGACY-LOCK"))
+
+        def holder_query_meets_a_lock(execute, sql, params, many, context):
+            if "BTRIM" in sql and '"dcim_device"' in sql:
+                # The server raises SQLSTATE 55P03, as a lock_timeout on a locked row does.
+                body = "BEGIN RAISE EXCEPTION 'lock not available' USING ERRCODE = '55P03'; END"
+                return execute(f"DO $$ {body} $$", None, False, context)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(holder_query_meets_a_lock), pytest.raises(OperationalError) as caught:
+            detect_collisions_for_device_ids([55], live_librenms.api)
+
+        assert classify_conflict(caught.value)
+
     def test_missing_live_device_is_unresolved(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 

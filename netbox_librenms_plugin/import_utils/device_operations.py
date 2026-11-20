@@ -34,7 +34,7 @@ from ..serial_identity import (
     resolve_device_write,
     stored_form,
 )
-from ..transactions import atomic_with_events
+from ..transactions import atomic_with_events, classify_conflict
 from ..platform_versions import (
     HIDDEN_PLATFORM,
     PlatformFacts,
@@ -1022,6 +1022,8 @@ def validate_device_for_import(  # noqa: C901
                             with transaction.atomic():
                                 holders = resolve_device(incoming_serial, rules=serial_rules)
                         except (RuleConfigurationError, DatabaseError) as exc:
+                            if classify_conflict(exc):
+                                raise
                             # The legacy ID names the Device, so a failed lookup hides only the other holders.
                             detail = exception_text_for(exc, Device, None)
                             result["warnings"].append(f"The other holders of the serial cannot be checked: {detail}")
@@ -1756,6 +1758,8 @@ def validate_device_for_import(  # noqa: C901
         return result
 
     except Exception as e:
+        if classify_conflict(e):
+            raise
         logger.exception(f"Error validating device for import: {libre_device.get('hostname', 'unknown')}")
         # The validation result has no viewer: it is cached and shown to any import user.
         detail = exception_text_for(e, VirtualMachine if import_as_vm else Device, None)
