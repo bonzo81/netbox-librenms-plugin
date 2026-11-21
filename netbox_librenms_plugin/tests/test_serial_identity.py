@@ -1079,28 +1079,33 @@ def caching_librenms(settings, monkeypatch, request):
         yield server, LibreNMSAPI(server_key=server_key)
 
 
-def _cached_search(caching_librenms, serial):
-    """Search LibreNMS for one device through the import search, which caches its validation."""
+def _cached_search(caching_librenms, serial, *, expect_cache_hit=False):
+    """Validate one search row and check whether it came from the LibreNMS cache."""
     from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
 
     server, api = caching_librenms
     row = {"device_id": 7810, "hostname": "cache-incoming", "sysName": "cache-incoming", "serial": serial}
     server.register("/api/v0/devices", {"status": "ok", "devices": [{**row, "disabled": 0, "hardware": "", "os": ""}]})
     server.vc_inventory_callable(7810, [], {})
-    (found,) = process_device_filters(
-        api, {"hostname": "cache-incoming"}, vc_detection_enabled=False, clear_cache=False, show_disabled=True
+    (found,), from_cache = process_device_filters(
+        api,
+        {"hostname": "cache-incoming"},
+        vc_detection_enabled=False,
+        clear_cache=False,
+        show_disabled=True,
+        return_cache_status=True,
     )
+    assert from_cache is expect_cache_hit
     return found["_validation"]
 
 
 @pytest.mark.django_db
-class TestCachedSearchResults:
-    """S5: a cached search result shows the serial match that the current rules and rows give."""
+class TestWarmSearchResults:
+    """Cached LibreNMS rows use the current serial rules and NetBox devices."""
 
-    def test_cache_keys_serialize_each_rule_snapshot_once(self, caching_librenms):
+    def test_vc_cache_keys_serialize_each_rule_snapshot_once(self, caching_librenms):
         from cProfile import Profile
 
-        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
         from netbox_librenms_plugin.serial_identity import SerialRules, _rules_digest
 
@@ -1108,24 +1113,17 @@ class TestCachedSearchResults:
         (rule,) = _rules_only((SEEDED, r"\1", None))
         rules = SerialRules.load()
 
-        def keys(device_id, snapshot):
-            return (
-                get_validated_device_cache_key(api.server_key, {}, device_id, True, serial_rules=snapshot),
-                _vc_cache_key(api, device_id, snapshot),
-            )
-
         with Profile() as profile:
-            before = keys(1, rules)
-            keys(2, rules)
+            before = _vc_cache_key(api, 1, rules)
+            _vc_cache_key(api, 2, rules)
         assert [entry.callcount for entry in profile.getstats() if entry.code == _rules_digest.__code__] == [1]
 
         rule.match_pattern = r"^Serial (.+)$"
         rule.save()
-        after = keys(1, SerialRules.load())
-        assert all(old != new for old, new in zip(before, after, strict=True))
-        assert keys(1, rules) == before
+        assert _vc_cache_key(api, 1, SerialRules.load()) != before
+        assert _vc_cache_key(api, 1, rules) == before
 
-    def test_a_rule_deletion_drops_a_cached_serial_match(self, caching_librenms):
+    def test_a_rule_deletion_drops_the_serial_match_on_a_warm_search(self, caching_librenms):
         from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
@@ -1134,9 +1132,9 @@ class TestCachedSearchResults:
 
         _rules_only()
 
-        assert _cached_search(caching_librenms, "CACHE-SN1")["existing_device"] is None
+        assert _cached_search(caching_librenms, "CACHE-SN1", expect_cache_hit=True)["existing_device"] is None
 
-    def test_a_rule_deletion_recomputes_the_serial_drift_of_a_cached_hostname_match(self, caching_librenms):
+    def test_a_rule_deletion_recomputes_serial_drift_on_a_warm_search(self, caching_librenms):
         from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
@@ -1145,33 +1143,26 @@ class TestCachedSearchResults:
 
         _rules_only()
 
-        assert _cached_search(caching_librenms, "CACHE-SN3")["serial_action"] == "update_serial"
+        assert _cached_search(caching_librenms, "CACHE-SN3", expect_cache_hit=True)["serial_action"] == "update_serial"
 
     @pytest.mark.parametrize("change", ["equivalent-duplicate", "holder-serial-changed"])
-    def test_a_row_change_drops_a_cached_serial_match(self, caching_librenms, change):
+    def test_a_row_change_drops_the_serial_match_on_a_warm_search(self, caching_librenms, change):
         from dcim.models import Device
-        from django.core.cache import cache
 
-        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
         from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         holder = make_device(f"cache-row-holder-{change}", serial="S/N CACHE-SN2")
         assert _cached_search(caching_librenms, "CACHE-SN2")["existing_device"] == holder
-        _, api = caching_librenms
-        key = get_validated_device_cache_key(api.server_key, {"hostname": "cache-incoming"}, 7810, vc_enabled=False)
-        cached = cache.get(key)
-        cached["_validation"]["cache_marker"] = True
-        cache.set(key, cached, timeout=api.cache_timeout)
 
         if change == "equivalent-duplicate":
             make_device(f"cache-row-twin-{change}", serial="CACHE-SN2")
         else:
             Device.objects.filter(pk=holder.pk).update(serial="REPLACED-SN9")
-        validation = _cached_search(caching_librenms, "CACHE-SN2")
+        validation = _cached_search(caching_librenms, "CACHE-SN2", expect_cache_hit=True)
 
-        assert validation.get("cache_marker") is True
         assert validation["existing_device"] is None
+        assert validation["serial_duplicate"] is (change == "equivalent-duplicate")
         if change == "equivalent-duplicate":
             assert validation["can_import"] is False
 

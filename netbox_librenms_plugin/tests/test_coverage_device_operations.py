@@ -1178,23 +1178,24 @@ class TestValidateDeviceForImport:
         assert collision["serial_duplicate"] is True
 
     def test_duplicate_serial_without_a_unique_owner_is_terminal(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
         owner = make_device("validation-duplicate-serial-a", serial="DUPLICATE-ONLY-SERIAL")
         duplicate = make_device("validation-duplicate-serial-b", serial=owner.serial)
-        payload = _device_payload(5427, hostname="unmatched-duplicate-serial", serial=owner.serial)
+        ip_owner = make_device("validation-duplicate-serial-ip")
+        ip_on(ip_owner, "198.18.20.7/24", "management")
+        payload = _device_payload(5427, hostname="unmatched-duplicate-serial", serial=owner.serial, ip="198.18.20.7")
+
         result = self._validate(payload)
 
         assert result["existing_device"] is None
+        assert result["existing_match_type"] == "ambiguous_hostname_or_serial"
         assert result["serial_duplicate"] is True
-
-        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
-
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
         assert len(result["issues"]) == 1
-        assert result["serial_duplicate"] is True
+        assert "resolve the duplicate serial" in result["issues"][0]
 
         duplicate.delete()
-        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+        result = self._validate(payload)
 
         assert result["existing_device"] == owner
         assert result["existing_match_type"] == "serial"

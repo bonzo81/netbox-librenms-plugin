@@ -656,15 +656,10 @@ class TestProcessDeviceFilters:
             "Multiple NetBox devices share serial" in warning for warning in validated["_validation"]["warnings"]
         )
 
-    def test_live_list_is_validated_cached_and_reused(self, live_librenms, monkeypatch):
-        from dcim.models import Device
-
+    def test_live_list_is_cached_and_validated_again(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
-        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
 
-        NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1")
-        unrelated = make_device("filter-cached-unrelated", serial="UNRELATED-CACHED")
         live_librenms.api.cache_timeout = 300
         existing = make_device("filter-existing")
         seed_mapping(existing, "default", own=131)
@@ -686,21 +681,12 @@ class TestProcessDeviceFilters:
             show_disabled=True,
             return_cache_status=True,
         )
-        key = get_validated_device_cache_key(live_librenms.api.server_key, filters, 131, vc_enabled=False)
-        cached = cache.get(key)
-        cached["_validation"]["cache_marker"] = True
-        cache.set(key, cached, timeout=live_librenms.api.cache_timeout)
+        key = get_import_device_cache_key(row["device_id"], live_librenms.api.server_key)
+        assert cache.get(key) == row
         request_count = len(live_librenms.server.requests)
-        visits = []
-        from_db = Device.from_db
+        existing.name = "filter-existing-renamed"
+        existing.save(update_fields=["name"])
 
-        def count_candidate_loads(cls, db, field_names, values, **kwargs):
-            device = from_db(db, field_names, values, **kwargs)
-            if device.pk == unrelated.pk:
-                visits.append(device.pk)
-            return device
-
-        monkeypatch.setattr(Device, "from_db", classmethod(count_candidate_loads))
         second, second_from_cache = process_device_filters(
             live_librenms.api,
             filters,
@@ -713,10 +699,11 @@ class TestProcessDeviceFilters:
         assert first_from_cache is False
         assert second_from_cache is True
         assert first[0]["_validation"]["existing_device"] == existing
-        assert second[0]["_validation"].get("cache_marker") is True
+        assert first[0]["_validation"]["name_matches"] is True
         assert second[0]["_validation"]["existing_device"] == existing
+        assert second[0]["_validation"]["name_matches"] is False
+        assert second[0]["_validation"]["suggested_name"] == row["sysName"]
         assert len(live_librenms.server.requests) == request_count
-        assert not visits
 
     def test_disabled_rows_are_removed_before_validation(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
