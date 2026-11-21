@@ -521,6 +521,8 @@ def _completed_job(librenms, row, user):
 
     from core.models import Job
 
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+
     return Job.objects.create(
         name="Completed import search",
         user=user,
@@ -530,6 +532,7 @@ def _completed_job(librenms, row, user):
             "device_ids": [row["device_id"]],
             "filters": {"hostname": row["hostname"]},
             "server_key": librenms.api.server_key,
+            "serial_rules": serial_rules_version(),
             "vc_detection_enabled": True,
         },
     )
