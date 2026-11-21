@@ -1000,8 +1000,13 @@ def test_vc_name_sync_uses_the_serial_rule_only_for_serial_suffixes(
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(("pattern", "expected"), [("-{serial}", None), ("-M{position}", "stack-M2")])
-def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(logged_in_client, librenms_server, pattern, expected):
+@pytest.mark.parametrize(
+    ("pattern", "member_name", "expected"),
+    [("-{serial}", "stack-ABC123", None), ("-{serial}", None, None), ("-M{position}", "stack-ABC123", "stack-M2")],
+)
+def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(
+    logged_in_client, librenms_server, pattern, member_name, expected
+):
     from dcim.models import VirtualChassis
 
     from netbox_librenms_plugin.models import LibreNMSSettings
@@ -1009,7 +1014,7 @@ def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(logged_in_client, 
     chassis, (_first, member) = make_virtual_chassis_members("import-rename-rule")
     _other, (outside_master,) = make_virtual_chassis_members("import-rename-other", count=1)
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside_master)
-    member.name = "stack-ABC123"
+    member.name = member_name
     member.serial = "ABC123"
     member.save(update_fields=["name", "serial"])
     seed_mapping(member, SERVER_KEY, own=6651)
@@ -1023,6 +1028,7 @@ def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(logged_in_client, 
     response = logged_in_client.get(validation_url, {"server_key": SERVER_KEY})
     assert response.status_code == 200
     assert response.context["validation"]["existing_device"] == member
+    assert response.context["validation"]["name_matches"] is False
     assert (b'name="action" value="sync_name"' in response.content) is (expected is not None)
     assert response.context["validation"]["suggested_name"] == expected
 
@@ -1030,7 +1036,7 @@ def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(logged_in_client, 
         action_url, {"server_key": SERVER_KEY, "action": "sync_name", "existing_device_id": member.pk}
     )
     member.refresh_from_db()
-    assert member.name == (expected or "stack-ABC123")
+    assert member.name == (expected or member_name)
 
 
 @pytest.mark.django_db
