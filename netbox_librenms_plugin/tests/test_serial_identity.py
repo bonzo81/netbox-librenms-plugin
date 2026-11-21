@@ -209,6 +209,8 @@ class TestKeyAdmission:
     )
     def test_a_value_that_is_not_text_or_a_number_has_no_identity(self, value):
         """A JSON boolean, list or object has text that a stored serial can equal, but it names no hardware."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only()
         stored = str(value)
         make_device(f"malformed-serial-{len(stored)}", serial=stored)
@@ -432,6 +434,27 @@ class TestLookup:
             assert resolve_device(value, rules=rules) == reads[key]
             assert resolve_device_write(value, context, rules=rules) == writes[key]
             assert resolve_module(value, rules=rules) == module_reads[key]
+
+    @pytest.mark.parametrize("value", [True, ["ABC123"], {"serial": "ABC123"}], ids=["boolean", "list", "object"])
+    def test_batches_do_not_match_the_string_representation_of_malformed_serials(self, value):
+        from netbox_librenms_plugin.serial_identity import SerialRules, resolve_devices_write, resolve_modules
+
+        _rules_only()
+        text = str(value)
+        device = make_device_with_module_bays("lookup-malformed", ["Slot 1"], serial=text)
+        module = install_module(device, "Slot 1", "MALFORMED-CARD", serial=text)
+        rules = SerialRules.load()
+        context = rules.for_device(device)
+
+        assert resolve_devices([value], rules=rules)[text].kind is ResolutionKind.ABSENT
+        assert resolve_devices_write([value], context, rules=rules)[text].kind is ResolutionKind.ABSENT
+        assert resolve_modules([value], rules=rules)[text].kind is ResolutionKind.ABSENT
+
+        # A real text serial still matches when it shares the malformed value's result key.
+        for serials in ([value, text], [text, value]):
+            assert resolve_devices(serials, rules=rules)[text].object == device
+            assert resolve_devices_write(serials, context, rules=rules)[text].object == device
+            assert resolve_modules(serials, rules=rules)[text].object == module
 
     @pytest.mark.parametrize("lock", [False, True], ids=["read", "locked"])
     def test_a_large_batch_confirms_each_row_only_against_the_values_of_its_key(self, monkeypatch, lock):
