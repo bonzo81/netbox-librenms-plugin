@@ -527,8 +527,7 @@ def test_a_dropped_block_keeps_another_sessions_later_values_out_of_a_committed_
 
 
 @pytest.mark.django_db
-def test_a_block_that_drops_inside_the_open_writer_reloads_the_writers_event():
-    """The open outer block wrote the row and holds it; its event reads the row again after the inner rollback."""
+def test_a_block_that_drops_inside_the_open_writer_keeps_the_writers_payload():
     from netbox_librenms_plugin.transactions import atomic_with_events
 
     class _Refused(Exception):
@@ -544,6 +543,35 @@ def test_a_block_that_drops_inside_the_open_writer_reloads_the_writers_event():
 
         payload = _the_one_event(site)["data"]
     assert payload["description"] == "kept"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("later_save", [False, True], ids=["outer-save", "successful-inner-save"])
+def test_a_failed_savepoint_without_events_keeps_the_last_saved_payload(later_save):
+    from django.core.exceptions import ValidationError
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    site = _site("failed-savepoint-no-events")
+    with _netbox_request_context():
+        with atomic_with_events():
+            _write_site(site, "kept")
+            expected = "kept"
+            if later_save:
+                with atomic_with_events():
+                    _write_site(site, "superseded")
+                expected = "superseded"
+            with pytest.raises(ValidationError), atomic_with_events():
+                site.description = "rejected"
+                site.name = ""
+                site.full_clean()
+
+        event = _the_one_event(site)
+        assert event["snapshots"]["prechange"]["description"] == ""
+        assert event["snapshots"]["postchange"]["description"] == expected
+        assert event["data"]["description"] == expected
+    site.refresh_from_db()
+    assert site.description == expected
 
 
 @pytest.mark.django_db

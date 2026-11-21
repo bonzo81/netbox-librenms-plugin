@@ -212,14 +212,16 @@ def _run_attempt(work, connection):
 
     recorder = _ConflictRecorder()
     recorder_token = _active_recorder.set(recorder)
+    open_queues = _open_queues.get()
     attempt_queue = {}
-    open_token = _open_queues.set((*_open_queues.get(), attempt_queue))
+    open_token = _open_queues.set((*open_queues, attempt_queue))
     queue_token = events_queue.set(attempt_queue)
     try:
         # durable: Django refuses an enclosing atomic block, except a test case's own block.
         with transaction.atomic(durable=True):
             transaction.on_commit(mark_committed)
             with connection.execute_wrapper(recorder):
+                _freeze_event_data(*open_queues)
                 try:
                     result = work()
                 except TransactionManagementError:
@@ -254,8 +256,6 @@ def _run_attempt(work, connection):
         _open_queues.reset(open_token)
         if committed:
             _keep_events(attempt_events)
-        else:
-            _reload_event_sources(attempt_events)
 
 
 @contextmanager
@@ -267,20 +267,23 @@ def atomic_with_events():
     events in a queue of its own. They join the enclosing queue when the block commits (outermost) or
     releases its savepoint. They are dropped on any exception, a failed commit included, and when a
     caught error left the block marked for rollback. A commit callback that fails after the commit
-    does not drop them, as in ``run_transaction``. An event that leaves the open blocks has its
-    payload serialized before the block ends, so a later block cannot change it.
+    does not drop them, as in ``run_transaction``. Pending events are serialized before nested work
+    and before they leave the open blocks.
     """
-    outermost = not transaction.get_connection().in_atomic_block
+    connection = transaction.get_connection()
+    outermost = not connection.in_atomic_block
     committed = released = False
 
     def mark_committed():
         nonlocal committed
         committed = True
 
-    # An event that leaves the open blocks also leaves the reload of a later dropped block.
-    leaves_open_blocks = not any(queue is events_queue.get() for queue in _open_queues.get())
+    open_queues = _open_queues.get()
+    if not connection.needs_rollback:
+        _freeze_event_data(*open_queues)
+    leaves_open_blocks = not any(queue is events_queue.get() for queue in open_queues)
     block_queue = {}
-    tokens = events_queue.set(block_queue), _open_queues.set((*_open_queues.get(), block_queue))
+    tokens = events_queue.set(block_queue), _open_queues.set((*open_queues, block_queue))
     try:
         with transaction.atomic():
             if outermost:
@@ -303,38 +306,14 @@ def _close_event_queue(tokens, *, keep):
     _open_queues.reset(open_token)
     if keep:
         _keep_events(block_events)
-    else:
-        _reload_event_sources(block_events)
 
 
-def _freeze_event_data(queue):
-    """Serialize the payload of each event that leaves the open blocks, inside the transaction that wrote it."""
-    for event in queue.values():
-        if "data" not in event:
-            _ = event["data"]
-
-
-def _reload_event_sources(dropped):
-    """
-    Point each open block's event of an object that a dropped block wrote at the row as the database holds it now.
-
-    NetBox serializes an event's ``data`` from the saved instance when a consumer first reads it. A
-    dropped block can leave its rolled-back values on that instance, so the payload reads the row again.
-    Only an open block's event is reloaded: this transaction wrote its row and holds the row lock.
-    An event outside the open blocks was serialized when it left them.
-    """
-    if not dropped or transaction.get_connection().needs_rollback:
-        # The enclosing block rolls back too and drops or reloads its own events.
-        return
-    for queue in _open_queues.get():
-        for key in dropped.keys() & queue.keys():
-            event = queue[key]
-            if "data" in event:
-                # Serialized already (a delete, or a consumer read it): the payload is fixed.
-                continue
-            row = type(event["object"])._default_manager.filter(pk=event["object_id"]).first()
-            if row is not None:
-                event.refresh_serialization_source(row)
+def _freeze_event_data(*queues):
+    """Serialize pending event payloads inside the transaction that wrote their rows."""
+    for queue in queues:
+        for event in queue.values():
+            if "data" not in event:
+                _ = event["data"]
 
 
 @contextmanager
