@@ -1,5 +1,6 @@
 """Bulk import orchestration for devices and filter processing."""
 
+import functools
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from ..serial_identity import (
     fingerprint,
     is_sole_holder,
     resolve_device,
+    resolve_devices,
 )
 from ..transactions import atomic_with_events
 from ..utils import (
@@ -1486,6 +1488,11 @@ def process_device_filters(  # noqa: C901
     validated_devices = []
     total = len(libre_devices)
     serial_rules = serial_rules or SerialRules.load()
+
+    @functools.cache
+    def serial_discoveries():
+        return resolve_devices((display(row.get("serial")) for row in libre_devices), rules=serial_rules)
+
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
 
@@ -1552,6 +1559,7 @@ def process_device_filters(  # noqa: C901
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             serial_rules=serial_rules,
+            serial_discoveries=serial_discoveries,
         )
 
         # Set VC detection metadata

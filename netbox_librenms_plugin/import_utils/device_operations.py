@@ -1,6 +1,7 @@
 """Device validation, import, and fetch operations."""
 
 import logging
+from collections.abc import Callable
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
@@ -23,6 +24,7 @@ from ..serial_identity import (
     REFUSING,
     UNAVAILABLE_MASTER_LINK,
     Comparison,
+    Resolution,
     ResolutionKind,
     SerialRules,
     assignment_lock,
@@ -642,6 +644,7 @@ def validate_device_for_import(  # noqa: C901
     strip_domain: bool = False,
     preloaded_device_type_rules: dict | None = None,
     serial_rules: SerialRules | None = None,
+    serial_discoveries: Callable[[], dict[str, Resolution]] | None = None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -667,6 +670,7 @@ def validate_device_for_import(  # noqa: C901
         strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
         serial_rules: The batch's :class:`SerialRules`; None reads them once for this device.
+        serial_discoveries: Optional lazy batch of serial lookup results for search fallback.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -1129,7 +1133,10 @@ def validate_device_for_import(  # noqa: C901
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101). The owner counts equivalent rows under
                     # the serial rules, also rows that the user cannot see.
-                    discovery = resolve_device(incoming_serial, rules=serial_rules)
+                    if serial and serial_discoveries is not None:
+                        discovery = serial_discoveries()[serial]
+                    else:
+                        discovery = resolve_device(incoming_serial, rules=serial_rules)
                     serial_matches = list(discovery.matches)
                     if discovery.kind is ResolutionKind.UNAVAILABLE:
                         # The row stays unresolved: a weaker IP match must not bind it.

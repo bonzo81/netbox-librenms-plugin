@@ -666,6 +666,8 @@ class TestProcessDeviceFilters:
         from collections import Counter
 
         from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
         from netbox_librenms_plugin.models import NormalizationRule
@@ -697,10 +699,17 @@ class TestProcessDeviceFilters:
 
         monkeypatch.setattr(Device, "from_db", classmethod(count_candidate_loads))
 
-        validated = process_device_filters(
-            live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
-        )
+        with CaptureQueriesContext(connection) as captured:
+            validated = process_device_filters(
+                live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
+            )
 
+        candidate_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if 'BTRIM("dcim_device"."serial"' in query["sql"] and "LIKE ANY" in query["sql"]
+        ]
+        assert len(candidate_queries) == 1
         assert all(row["_validation"]["existing_device"] is None for row in validated[:-1])
         assert validated[-1]["_validation"]["existing_device"].pk == holder.pk
         assert sum(visits.values()) <= len(candidates), dict(visits)
