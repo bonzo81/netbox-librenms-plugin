@@ -1345,10 +1345,10 @@ class TestValidateDeviceForImport:
         assert "promote_to_host" not in result
         assert result["serial_role_choice_available"] is False
 
-    def test_a_rule_error_after_an_oob_id_match_still_classifies_the_controller(self):
-        """A broken serial rule stops validation after the OOB-ID match of a chassis member."""
-        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+    def test_an_oob_id_match_classifies_the_controller_with_a_broken_chassis_serial_rule(self):
+        from netbox_librenms_plugin.models import LibreNMSSettings
 
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
         other = make_device("validation-rule-error-master")
         member = make_device("validation-rule-error-member", serial="MEMBER-SN-5440")
         make_virtual_chassis("validation-rule-error-chassis", other, member)
@@ -1358,8 +1358,9 @@ class TestValidateDeviceForImport:
 
         result = self._validate(_device_payload(5440, hostname="rule-error-ctrl", serial="REAL-5440"))
 
-        assert [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
         assert (result["existing_device"], result["existing_match_type"]) == (member, "librenms_oob")
+        assert result["issues"] == []
+        assert result["match_verified"] is True
         assert result["row_is_oob_controller"] is True
         assert result["name_sync_available"] is False
 

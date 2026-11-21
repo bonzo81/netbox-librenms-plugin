@@ -5759,14 +5759,14 @@ class TestDeviceConflictActionBranches:
         assert Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk) == before
         assert not stored_mapping_for_test(Device.objects.get(pk=host.pk))
 
-    def test_a_rule_error_after_an_oob_id_match_does_not_rename_the_member(self):
-        """A broken serial rule stops validation after the OOB-ID match; the controller name stays off the member."""
+    def test_an_oob_id_match_with_a_broken_chassis_serial_rule_refuses_to_rename_the_member(self):
         from dcim.models import Device
 
+        from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _member_of_a_broken_rule_vendor
-        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
 
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
         other = make_device("branches-rule-error-master")
         member = make_device("branches-rule-error-member", serial="MEMBER-SN-5440")
         make_virtual_chassis("branches-rule-error-chassis", other, member)
@@ -5777,7 +5777,7 @@ class TestDeviceConflictActionBranches:
 
         response = post_view(self._make_view(), self._request("sync_name", member, "rule-error-user"), device_id=5440)
 
-        assert _OOB_ROW_REFUSED in response.content.decode()
+        assert response.headers.get("HX-Reswap") == "none"
         assert Device.objects.get(pk=member.pk).name == "branches-rule-error-member"
 
     def test_a_merge_row_at_the_host_oob_ip_copies_nothing(self):
