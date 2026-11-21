@@ -2394,16 +2394,17 @@ class DeviceConflictActionView(
                 elif action == "update":
                     # Update hostname, serial, and link to LibreNMS
                     hostname = _get_hostname_for_action(request, validation, libre_device)
-                    incoming_serial = libre_device.get("serial")
+                    incoming_serial = display(libre_device.get("serial"))
+                    updates_serial = writes_serial and bool(incoming_serial)
                     fields = ["name"]
-                    require_serial = writes_serial and is_identity(
+                    require_serial = updates_serial and is_identity(
                         incoming_serial, serial_rules.for_device(existing_device)
                     )
                     # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    if writes_serial:
+                    if updates_serial:
                         err, changed = _apply_conflict_checked_serial(
                             existing_device, incoming_serial, request.user, serial_rules, require_serial=require_serial
                         )
@@ -2419,7 +2420,7 @@ class DeviceConflictActionView(
                     ):
                         return err
                     logger.info(
-                        f"Updated device '{existing_device.name}': serial={display(incoming_serial)}, "
+                        f"Updated device '{existing_device.name}': serial={incoming_serial}, "
                         f"linked to LibreNMS ID {librenms_id}"
                     )
 

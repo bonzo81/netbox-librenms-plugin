@@ -3979,6 +3979,30 @@ class TestDeviceConflictActionBranches:
         assert reloaded.device_type_id == reported_type.pk
         assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("serial", ["", "-"])
+    def test_update_by_primary_ip_without_a_serial_preserves_the_stored_serial(self, serial):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        target = _stray_chassis_member("update-primary-ip", "STORED-SERIAL")
+        ip = ip_on(target, "198.18.20.15/24", "management")
+        Device.objects.filter(pk=target.pk).update(primary_ip4=ip)
+        hostname = "primary-ip-reported-name"
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=hostname, hardware=target.device_type.model, serial=serial, ip=str(ip.address.ip)
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        request = self._request("update", target, "update-primary-ip-user")
+
+        post_view(self._make_view(), request, device_id=42)
+
+        target.refresh_from_db()
+        assert target.name == hostname
+        assert target.serial == "STORED-SERIAL"
+        assert stored_mapping_for_test(target) == {self.server_key: 42}
+
     @pytest.mark.parametrize("action", ["update", "update_serial"])
     @pytest.mark.parametrize("outcome", ["absent", "exact", "new"])
     def test_a_forced_serial_and_link_action_requires_an_admitted_serial(self, client, action, outcome):
