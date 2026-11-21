@@ -305,6 +305,10 @@ def is_identity(value, context: SerialContext) -> bool:
     return not context.unavailable and bool(context._key(value))
 
 
+def module_move_serials_admitted(incoming, stored, destination: SerialContext) -> bool:
+    return is_identity(incoming, destination) and is_identity(stored, destination)
+
+
 def stored_form_differs(stored, incoming, context: SerialContext) -> bool:
     """Return whether *stored* names the hardware of *incoming* but is not the form a writer stores for it."""
     # The exact stored text: padding around a matching serial is another form too.

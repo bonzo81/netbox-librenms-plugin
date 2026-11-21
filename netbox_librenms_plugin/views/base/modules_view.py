@@ -35,6 +35,7 @@ from netbox_librenms_plugin.serial_identity import (
     compare,
     display,
     is_identity,
+    module_move_serials_admitted,
     plain_context,
     resolve_modules,
     stored_form_differs,
@@ -4660,7 +4661,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["serial_conflict_module"] = conflict
                 row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                 context = row["_serial_context"]
-                if is_identity(serial, context) and is_identity(conflict.serial, context):
+                if module_move_serials_admitted(serial, conflict.serial, context):
                     row["can_move_from"] = True
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True

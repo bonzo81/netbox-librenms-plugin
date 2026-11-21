@@ -479,6 +479,55 @@ def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_se
     assert (bool(forms), holder.device_id, holder.module_bay_id, child.device_id) == expected
 
 
+@pytest.mark.parametrize(("stored_serial", "admitted"), [("TAG CARD12", False), ("CARD12", True)])
+def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holder(
+    ui, settings, librenms_server, stored_serial, admitted
+):
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_librenms_servers,
+        install_module as install_in_bay,
+        make_device_with_module_bays,
+    )
+
+    recording = _recording()
+    entities = _entities(recording)
+    entities[REAL_NIM]["entPhysicalSerialNum"] = "CARD12"
+    librenms_server.load_recording(recording)
+    configure_librenms_servers(
+        settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "grants-token", "verify_ssl": False}}
+    )
+    device = c8300_device("c8300-preview-move", recording, SERVER_KEY)
+    contrib_rule(MODEL_RULE)
+    source = make_device_with_module_bays("preview-move-holder", ["Slot 1"])
+    holder = install_in_bay(source, "Slot 1", "PREVIEW-MOVE-CARD", serial=stored_serial)
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=source.device_type.manufacturer
+    )
+    NormalizationRule.objects.create(
+        scope="serial",
+        match_pattern=r"^TAG CARD(\d+)$",
+        replacement=r"\1",
+        manufacturer=device.device_type.manufacturer,
+    )
+    bay_name = entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"]
+    install_module(device, bay_name, *_nim(entities, "OLD"))
+
+    preview = ui.get(rendered_preview_url(render(ui, device), REAL_NIM), HTTP_HX_REQUEST="true")
+
+    assert preview.status_code == 200
+    html = preview.content.decode()
+    _, replace_fields = rendered_module_form(html, "replace-module", REAL_NIM)
+    assert replace_fields["conflict_module_id"] == str(holder.pk)
+    move_url = reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk])
+    move_holders = [
+        form["fields"]["conflict_module_id"] for form in module_tab_forms(html).forms if form["action"] == move_url
+    ]
+    assert move_holders == ([str(holder.pk)] if admitted else [])
+
+
 def _preview_serial_form(client, device, entities):
     install_module(
         device, entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"], *_nim(entities, "OLD")

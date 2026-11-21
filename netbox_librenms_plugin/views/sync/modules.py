@@ -60,6 +60,7 @@ from netbox_librenms_plugin.serial_identity import (
     freshness_token,
     is_identity,
     module_assignment,
+    module_move_serials_admitted,
     module_subtree_serials,
     locked_type_context,
     relocation_conflict,
@@ -2875,6 +2876,8 @@ class ModuleMismatchPreviewView(
                 "type_matched": type_matched,
                 "serial_mismatch": serial_mismatch,
                 "serial_conflict": serial_conflict,
+                "can_move_from": serial_conflict is not None
+                and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,

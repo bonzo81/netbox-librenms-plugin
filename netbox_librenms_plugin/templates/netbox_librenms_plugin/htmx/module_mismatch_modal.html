@@ -74,7 +74,9 @@
         Bay: <strong>{{ serial_conflict.module_bay.name }}</strong>.
         <br><small>
             <em>Replace</em> will also remove it from that location.
+            {% if can_move_from %}
             <em>Move</em> will update its location to this bay instead of creating a new entry.
+            {% endif %}
         </small>
     </div>
 </div>
@@ -121,7 +123,7 @@
     </form>
     {% endif %}
 
-    {% if serial_conflict %}
+    {% if can_move_from %}
     {# Move the existing module here rather than creating a new entry #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:move_module' pk=device_pk %}"
