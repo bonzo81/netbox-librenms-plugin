@@ -1029,8 +1029,10 @@ class TestVirtualChassisInventory:
         ]
         assert per_member == []
 
-    @pytest.mark.parametrize("status", [404, 503])
-    def test_failed_inventory_lookup_shows_a_read_error(self, logged_in_client, librenms_server, status):
+    @pytest.mark.parametrize(("status", "read_error"), [(404, False), (503, True)])
+    def test_inventory_lookup_distinguishes_empty_from_failed(
+        self, logged_in_client, librenms_server, status, read_error
+    ):
         _vc, (member,) = make_virtual_chassis_members("inventory-failure", count=1)
         seed_mapping(member, SERVER_KEY, own=6642)
         _register_device(librenms_server, 6642, member.name)
@@ -1040,8 +1042,9 @@ class TestVirtualChassisInventory:
 
         assert response.status_code == 200
         assert response.context["found_in_librenms"] is True
-        assert b"data-vc-inventory-error" in response.content
-        assert b"data-vc-serial-unavailable" not in response.content
+        assert response.context["vc_inventory_unavailable"] is read_error
+        assert (b"data-vc-inventory-error" in response.content) is read_error
+        assert (b"data-vc-serial-unavailable" in response.content) is (not read_error)
 
     def test_the_dialog_offers_no_row_for_a_serial_that_is_not_text_or_a_number(self, librenms_server):
         """The dialog posts text, so a JSON `true` would reach Sync All as the serial "True"."""

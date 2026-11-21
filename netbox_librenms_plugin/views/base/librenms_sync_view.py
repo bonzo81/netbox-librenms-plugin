@@ -876,7 +876,7 @@ class BaseLibreNMSSyncView(
                 }
 
         """
-        success, inventory = self.librenms_api.get_device_inventory(self.librenms_id)
+        success, inventory = self.librenms_api.get_device_inventory(self.librenms_id, missing_is_empty=True)
         if not success:
             return None
 
