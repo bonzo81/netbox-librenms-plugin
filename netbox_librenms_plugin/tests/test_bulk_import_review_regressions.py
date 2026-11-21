@@ -332,7 +332,7 @@ def _importable_row(live_librenms, device_id, tag, *, members=None):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("kind", ["device", "stack", "vm", "missing-os"])
-def test_a_platform_warning_failure_leaves_the_import_retryable(client, live_librenms, kind):
+def test_a_platform_warning_failure_leaves_the_import_retryable(client, live_librenms, kind, flushed_events):
     from dcim.models import Device, DeviceRole, DeviceType, Platform, Site, VirtualChassis
     from virtualization.models import VirtualMachine
 
@@ -389,6 +389,8 @@ def test_a_platform_warning_failure_leaves_the_import_retryable(client, live_lib
         assert [level for level, _ in messages_on(response.wsgi_request)] == ["error"]
         assert mapped_object() is None
         assert not model.objects.filter(name__startswith=row["hostname"]).exists()
+        if kind == "vm":
+            assert not any(event_model == "virtualmachine" for event_model, _pk in flushed_events)
         if members:
             assert not VirtualChassis.objects.filter(master__serial="WARNING-MASTER").exists()
 
@@ -401,6 +403,8 @@ def test_a_platform_warning_failure_leaves_the_import_retryable(client, live_lib
 
     imported = mapped_object()
     assert imported.platform == platform
+    if kind == "vm":
+        assert [pk for event_model, pk in flushed_events if event_model == "virtualmachine"] == [imported.pk]
     if members:
         chassis = imported.virtual_chassis
         assert chassis.master_id == imported.pk
