@@ -145,6 +145,7 @@ class TestPartialModuleRefreshRendersEmpty:
         from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
 
         device = self._device(f"partial-refresh-{'-'.join(failure)}")
@@ -344,6 +345,7 @@ class TestSerialRuleEditStalesTheSnapshot:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
         from netbox_librenms_plugin.views.base import modules_view
@@ -386,6 +388,7 @@ class TestSerialRuleEditStalesTheSnapshot:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
         from netbox_librenms_plugin.tests.conftest import make_module_bay, make_virtual_chassis_members
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
@@ -462,7 +465,7 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
         from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.serial_identity import SerialContext
+        from netbox_librenms_plugin.serial_identity import SerialRules, SerialContext
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -497,6 +500,7 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
         from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.mixins import CacheMixin

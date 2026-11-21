@@ -4,7 +4,6 @@ from copy import deepcopy
 
 import pytest
 
-from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 
@@ -138,6 +137,7 @@ class TestConfiguredServerCacheScoping:
     def test_modules_use_the_requested_server_mapping_and_snapshot(self, configured_servers):
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device("multiserver-module", librenms_cf={"production": 14})

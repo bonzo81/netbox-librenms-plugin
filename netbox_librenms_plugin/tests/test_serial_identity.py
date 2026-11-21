@@ -12,7 +12,6 @@ from netbox_librenms_plugin.serial_identity import (
     TRIM_CHARACTERS,
     Comparison,
     ResolutionKind,
-    SerialRules,
     compare,
     contains_pattern,
     display,
@@ -106,6 +105,7 @@ class TestSerialRuleLanguage:
     )
     def test_clean_accepts_one_group_reference(self, pattern, replacement):
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         NormalizationRule(scope="serial", match_pattern=pattern, replacement=replacement).full_clean()
         _rules_only((pattern, replacement, None))
@@ -120,6 +120,7 @@ class TestSerialRuleLanguage:
     def test_a_group_reference_reads_the_group_and_never_expands_a_template(self):
         r"""With 100 groups, the template \100 is an octal escape; \g<100> reads group 100."""
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         pattern = "(.)" * 99 + "([A-Z0-9]+)"
         value = "A" * 99 + "ZZZ123"
@@ -136,6 +137,8 @@ class TestSerialRuleLanguage:
         ids=["optional", "alternation", "empty"],
     )
     def test_a_group_that_takes_no_part_or_is_empty_ends_the_chain_without_an_identity(self, pattern, value):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only((pattern, r"\1", None), (r"^(.+)$", r"\1", None))
         context = SerialRules.load().context(None)
 
@@ -143,6 +146,8 @@ class TestSerialRuleLanguage:
         assert compare(value, value, context) is Comparison.ABSENT
 
     def test_a_rule_that_does_not_fullmatch_leaves_the_value(self):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only((r"S/N\s+(.+)", r"\1", None))
         context = SerialRules.load().context(None)
 
@@ -151,6 +156,8 @@ class TestSerialRuleLanguage:
         assert naming_token("S/N ABC", context) == "ABC"
 
     def test_manufacturer_rules_run_before_the_global_rules(self):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         maker = _manufacturer("order")
         _rules_only((r"^G-(.+)$", r"\1", None), (r"^M-(.+)$", r"\1", maker))
         rules = SerialRules.load()
@@ -160,6 +167,7 @@ class TestSerialRuleLanguage:
 
     def test_a_stored_rule_that_does_not_conform_fails_every_decision_of_its_chain(self):
         from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         (rule,) = _rules_only((SEEDED, r"\1", None))
         # A QuerySet.update() skips clean(), so the stored rule can still be non-conforming.
@@ -209,12 +217,16 @@ class TestKeyAdmission:
         ],
     )
     def test_the_admission_rule(self, value, identity):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only((SEEDED, r"\1", None))
 
         assert is_identity(value, SerialRules.load().context(None)) is identity
 
     @pytest.mark.parametrize("stored", ["unknown", "AB", "S/N N/A", "1"])
     def test_a_value_without_an_identity_binds_no_device_and_costs_no_lookup(self, stored):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only((SEEDED, r"\1", None))
         make_device(f"no-identity-{len(stored)}-{stored.replace('/', '')}", serial=stored)
         rules = SerialRules.load()
@@ -335,6 +347,8 @@ class TestLookup:
         assert resolve_device("OLD-EXTERNAL").kind is ResolutionKind.NO_MATCH
 
     def test_one_query_reads_the_candidates_of_a_whole_batch(self):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only((SEEDED, r"\1", None))
         serials = [f"BATCH-SN{number:03}" for number in range(20)]
         for number, serial in enumerate(serials[:10]):
@@ -535,6 +549,8 @@ class TestAmbiguity:
 
 class TestGroupingAndPresentation:
     def test_a_group_of_two_equivalent_observations_is_kept_whole(self):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only((SEEDED, r"\1", None))
         groups = group(["S/N GRP-SN1", "GRP-SN1", "GRP-SN2", "n/a"], SerialRules.load().context(None))
 
@@ -554,6 +570,8 @@ class TestGroupingAndPresentation:
         assert "serial" in refused.value.message_dict
 
     def test_a_legacy_stored_form_is_same_hardware_in_another_form(self):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         _rules_only((SEEDED, r"\1", None))
         context = SerialRules.load().context(None)
 
@@ -565,7 +583,7 @@ class TestGroupingAndPresentation:
     def test_padding_around_a_matching_stored_serial_is_another_form_that_the_writers_heal(self):
         from dcim.models import Device, Module
 
-        from netbox_librenms_plugin.serial_identity import device_assignment, module_assignment
+        from netbox_librenms_plugin.serial_identity import SerialRules, device_assignment, module_assignment
 
         _rules_only()
         rules = SerialRules.load()
@@ -585,6 +603,8 @@ class TestGroupingAndPresentation:
         assert device_assignment(device, " PAD12345 ", rules=rules).value is None
 
     def test_a_rule_edit_changes_the_freshness_token(self):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         (rule,) = _rules_only((SEEDED, r"\1", None))
         before = freshness_token("S/N FRESH-SN1", SerialRules.load().context(None))
         rule.match_pattern = r"^S/N:?\s+(.+)$"
@@ -605,7 +625,7 @@ class TestWriters:
     @pytest.mark.parametrize("first", ["global", "scoped"])
     def test_both_write_orders_of_two_rule_equivalent_serials_refuse_the_second(self, first):
         """A global device reports "PREFIX-ABC123"; a device of a maker whose rule strips "PREFIX-" reports "ABC123"."""
-        from netbox_librenms_plugin.serial_identity import device_assignment
+        from netbox_librenms_plugin.serial_identity import SerialRules, device_assignment
 
         maker = _manufacturer("write-order")
         _rules_only((r"^PREFIX-(.+)$", r"\1", maker))
@@ -642,7 +662,7 @@ class TestWriters:
         """A member keeps the master's context: a new master type decides the member serials too."""
         from dcim.models import VirtualChassis
 
-        from netbox_librenms_plugin.serial_identity import retype_conflict, retype_scope
+        from netbox_librenms_plugin.serial_identity import SerialRules, retype_conflict, retype_scope
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
 
         old_maker, new_maker = _manufacturer("retype-old"), _manufacturer("retype-new")
@@ -688,6 +708,7 @@ class TestWriters:
             create_virtual_chassis_with_members,
             identify_vc_master,
         )
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         maker_a, maker_b = _manufacturer("master-decision-a"), _manufacturer("master-decision-b")
         _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", maker_a))

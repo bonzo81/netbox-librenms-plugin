@@ -1,7 +1,6 @@
 """End-to-end tests for the module install actions and their inventory ignore rules."""
 
 import pytest
-from django.core.cache import cache
 
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
@@ -369,6 +368,7 @@ class TestInstallBranchView:
     def test_a_snapshot_cached_before_the_schema_version_is_a_missing_snapshot(self, live_librenms):
         """Rows from an older writer lack markers the readers rely on, so the branch install must not use them."""
         from dcim.models import Module
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
@@ -445,6 +445,7 @@ class TestInstallSelectedView:
 
     def test_a_snapshot_cached_before_the_schema_version_is_a_missing_snapshot(self, live_librenms):
         from dcim.models import Module
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 

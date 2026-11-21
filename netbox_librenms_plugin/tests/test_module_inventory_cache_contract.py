@@ -109,6 +109,7 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import cached_module_inventory
         from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 

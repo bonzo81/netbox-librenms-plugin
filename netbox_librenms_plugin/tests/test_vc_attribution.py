@@ -8,7 +8,6 @@ Plain ENTITY-MIB rows and real NetBox member Devices; the modules-tab tests in
 import pytest
 
 from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
-from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 pytestmark = pytest.mark.django_db
@@ -16,12 +15,16 @@ pytestmark = pytest.mark.django_db
 
 def _owners(page, members, inventory):
     """Return ``{entPhysicalIndex: owning Device}``; an unowned row stays on *page*, as the modules tab shows it."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     owners = attribute_inventory(inventory, members, SerialRules.load().for_device(page))
     return {row["entPhysicalIndex"]: member or page for row, (member, _source) in zip(inventory, owners, strict=True)}
 
 
 def _attribution(page, members, row):
     """Return ``(owning Device, source)`` for one row on its own."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     member, source = attribute_inventory([row], members, SerialRules.load().for_device(page))[0]
     return member or page, source
 
@@ -176,6 +179,8 @@ class TestUnrecognizedShape:
 
     def test_a_chassis_can_resolve_below_an_unattributed_stack_root(self):
         """A generic stack root must not suppress a chassis member position."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         page, member = _vc_members(["100012", "100013"])
         inventory = [
             {
@@ -209,6 +214,8 @@ class TestUnrecognizedShape:
     @pytest.mark.parametrize("root_name", ["Switch stack", "StackSub-0/0"])
     def test_a_vc_root_at_position_zero_does_not_claim_member_zero(self, root_class, root_name):
         """The root holds the members; its own position 0 or "0/0" name is not member 0."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         first, second = _zero_based_members(f"root-zero-{root_class}-{len(root_name)}")
         inventory = [
             {
@@ -449,6 +456,7 @@ def test_a_masterless_junos_stack_is_detected_under_the_rules_of_any_member():
     from dcim.models import Device, DeviceType, Manufacturer
 
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     page, member = make_junos_vc_members("junos-masterless-admits")
     # FPC 1 carries the serial of the NetBox device at position 0, so only the stack rows, not the position, name it.
