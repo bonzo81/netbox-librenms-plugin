@@ -4070,6 +4070,8 @@ class TestDeviceConflictActionBranches:
         """The target came from a serial match; a write after validation leaves it no longer the one holder."""
         from dcim.models import Device
 
+        from netbox_librenms_plugin.views.imports.actions import _SERIAL_MATCH_LOST
+
         _seed_decorated_serial_rule()
         view = self._make_view()
         target = make_device(f"branches-serial-{action}-{change}".replace("_", "-"), serial="SERIAL-MATCH-1")
@@ -4079,6 +4081,7 @@ class TestDeviceConflictActionBranches:
         response = self._post_after_validation(view, request, 42, _serial_match_lost(target, change))
 
         assert response.headers.get("HX-Reswap") == "none"
+        assert _SERIAL_MATCH_LOST.encode() in response.content
         assert f"{target.name}-twin".encode() not in response.content
         assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) is None
 
@@ -6078,6 +6081,8 @@ class TestAddAsOOBViewPost:
     def test_a_serial_match_that_no_longer_holds_under_the_lock_refuses_the_attach(self, change):
         from dcim.models import Device
 
+        from netbox_librenms_plugin.views.imports.actions import _SERIAL_MATCH_LOST
+
         _seed_decorated_serial_rule()
         view = self._make_view()
         existing_device = make_device(
@@ -6094,6 +6099,7 @@ class TestAddAsOOBViewPost:
         response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change))
 
         assert response["HX-Reswap"] == "none"
+        assert _SERIAL_MATCH_LOST.encode() in response.content
         assert f"{existing_device.name}-twin".encode() not in response.content
         assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
 
@@ -6644,6 +6650,8 @@ class TestPromoteToHostViewPost:
     def test_a_serial_match_that_no_longer_holds_under_the_lock_refuses_the_promotion(self, change):
         from dcim.models import Device
 
+        from netbox_librenms_plugin.views.imports.actions import _SERIAL_MATCH_LOST
+
         _seed_decorated_serial_rule()
         view = self._make_view()
         existing_device = make_device(
@@ -6660,6 +6668,7 @@ class TestPromoteToHostViewPost:
         response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change))
 
         assert response["HX-Reswap"] == "none"
+        assert _SERIAL_MATCH_LOST.encode() in response.content
         assert f"{existing_device.name}-twin".encode() not in response.content
         assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
 
@@ -7114,6 +7123,8 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         """The donor is the serial peer of the hostname match; a write after validation breaks that evidence."""
         from dcim.models import Device
 
+        from netbox_librenms_plugin.views.imports.actions import _SERIAL_MATCH_LOST
+
         _seed_decorated_serial_rule()
         winner = make_device(f"merge-serial-lost-{change}-winner", librenms_cf={self.server_key: {"id": 20}})
         donor = make_device(
@@ -7123,6 +7134,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         resp = self._post_merge(winner, donor, after_validation=_serial_match_lost(donor, change))
 
         assert resp["HX-Reswap"] == "none"
+        assert _SERIAL_MATCH_LOST.encode() in resp.content
         assert f"{donor.name}-twin".encode() not in resp.content
         assert stored_mapping_for_test(Device.objects.get(pk=donor.pk))[self.server_key] == {"id": 10}
 
