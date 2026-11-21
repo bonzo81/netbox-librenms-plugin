@@ -455,6 +455,51 @@ def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_im
 
 
 @pytest.mark.django_db
+def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link_is_repaired(live_librenms):
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+    serials = ["BROKEN-LINK-AAA", "BROKEN-LINK-BBB", "BROKEN-LINK-CCC"]
+    members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
+    prerequisites, row = _importable_row(live_librenms, 96313, "stack-broken-member-link", members=members)
+    stray = _stray_chassis_member("stack-stray", f"OLD-{serials[-1]}")
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^OLD-(.+)$", replacement=r"\1")
+    before = {model: set(model.objects.values_list("pk", flat=True)) for model in (Device, VirtualChassis)}
+    user = make_superuser("stack-broken-member-link-user")
+
+    def run():
+        return bulk_import_devices_shared(
+            [96313],
+            server_key="default",
+            manual_mappings_per_device={96313: prerequisites},
+            libre_devices_cache={96313: row},
+            user=user,
+        )
+
+    result = run()
+
+    assert result["success"] == []
+    assert [entry["device_id"] for entry in result["failed"]] == [96313]
+    assert result["virtual_chassis_created"] == 0
+    assert {model: set(model.objects.values_list("pk", flat=True)) for model in before} == before
+
+    VirtualChassis.objects.filter(pk=stray.virtual_chassis_id).update(master=stray)
+    Device.objects.filter(pk=stray.pk).update(serial="REPAIRED-HOLDER")
+    retry = run()
+
+    assert [entry["device_id"] for entry in retry["success"]] == [96313]
+    assert retry["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain="librenms-default-96313")
+    assert stored_mapping_for_test(chassis.master) == {"default": 96313}
+    assert set(chassis.members.values_list("serial", flat=True)) == set(serials)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client, live_librenms, htmx):
     """The failed chassis rolls the device back, so the answer reports a failed row and no import."""

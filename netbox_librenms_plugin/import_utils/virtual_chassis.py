@@ -7,6 +7,7 @@ from typing import List, NamedTuple
 
 from dcim.models import Device, DeviceType, VirtualChassis
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.db import DatabaseError, connection, transaction
 from redis.exceptions import RedisError
 
@@ -18,7 +19,6 @@ from ..constants import (
 )
 from ..librenms_api import LibreNMSAPI
 from ..serial_identity import (
-    REFUSING,
     Comparison,
     MemberSerials,
     ResolutionKind,
@@ -948,14 +948,13 @@ def _member_serial_taken(serial, resolution, created_members) -> bool:
         created_members: The members that this stack created so far, grouped by serial.
 
     """
+    if resolution.kind is ResolutionKind.UNAVAILABLE:
+        raise ValidationError(f"Cannot check VC member serial '{serial}': {resolution.reason}")
     if created_members.find(serial) or resolution.kind is ResolutionKind.UNIQUE:
         logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
         return True
     if resolution.kind is ResolutionKind.AMBIGUOUS:
         logger.warning(f"Skipped VC member with serial '{serial}': several devices already hold this serial")
-        return True
-    if resolution.kind in REFUSING:
-        logger.warning(f"Skipped VC member with serial '{serial}': {resolution.reason}")
         return True
     if resolution.uncertain:
         logger.warning(
