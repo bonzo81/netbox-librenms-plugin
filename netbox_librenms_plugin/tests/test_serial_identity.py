@@ -366,7 +366,12 @@ class TestLookup:
 
     @pytest.mark.parametrize("serials", [(123, 123.0), (123.0, 123)])
     def test_batches_resolve_integer_and_float_serials_as_distinct_text(self, serials):
-        from netbox_librenms_plugin.serial_identity import resolve_device_write, resolve_devices_write, resolve_modules
+        from netbox_librenms_plugin.serial_identity import (
+            SerialRules,
+            resolve_device_write,
+            resolve_devices_write,
+            resolve_modules,
+        )
 
         _rules_only()
         device = make_device_with_module_bays("lookup-numeric-bays", ["Slot 1", "Slot 2"])
@@ -973,7 +978,7 @@ class TestCachedSearchResults:
 
         from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
-        from netbox_librenms_plugin.serial_identity import _rules_digest
+        from netbox_librenms_plugin.serial_identity import SerialRules, _rules_digest
 
         _, api = caching_librenms
         (rule,) = _rules_only((SEEDED, r"\1", None))
