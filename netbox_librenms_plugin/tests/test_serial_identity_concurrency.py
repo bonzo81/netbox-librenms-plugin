@@ -896,7 +896,7 @@ def test_a_serial_write_on_a_member_that_becomes_master_waits_and_uses_its_new_r
         make_superuser("promote-serial-user"), url, {"server_key": SERVER_KEY}, [_set_master(chassis, promoted)]
     )
 
-    assert "40P01" not in sqlstates
+    assert {"40P01", "55P03"}.isdisjoint(sqlstates), sqlstates
     assert status == 302
     assert VirtualChassis.objects.get(pk=chassis.pk).master_id == promoted.pk
     assert Device.objects.get(pk=promoted.pk).serial == "OLD-D1"
@@ -916,7 +916,7 @@ def test_a_type_change_of_a_member_that_becomes_master_waits_and_reads_its_new_s
         make_superuser("promote-type-user"), url, {"server_key": SERVER_KEY}, [_set_master(chassis, promoted)]
     )
 
-    assert "40P01" not in sqlstates
+    assert {"40P01", "55P03"}.isdisjoint(sqlstates), sqlstates
     assert status == 302
     assert VirtualChassis.objects.get(pk=chassis.pk).master_id == promoted.pk
     assert Device.objects.get(pk=promoted.pk).device_type_id != rule_type.pk
