@@ -937,10 +937,18 @@ class TestCachedSearchResults:
     @pytest.mark.parametrize("change", ["equivalent-duplicate", "holder-serial-changed"])
     def test_a_row_change_drops_a_cached_serial_match(self, caching_librenms, change):
         from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
 
         _rules_only((SEEDED, r"\1", None))
         holder = make_device(f"cache-row-holder-{change}", serial="S/N CACHE-SN2")
         assert _cached_search(caching_librenms, "CACHE-SN2")["existing_device"] == holder
+        _, api = caching_librenms
+        key = get_validated_device_cache_key(api.server_key, {"hostname": "cache-incoming"}, 7810, vc_enabled=False)
+        cached = cache.get(key)
+        cached["_validation"]["cache_marker"] = True
+        cache.set(key, cached, timeout=api.cache_timeout)
 
         if change == "equivalent-duplicate":
             make_device(f"cache-row-twin-{change}", serial="CACHE-SN2")
@@ -948,6 +956,7 @@ class TestCachedSearchResults:
             Device.objects.filter(pk=holder.pk).update(serial="REPLACED-SN9")
         validation = _cached_search(caching_librenms, "CACHE-SN2")
 
+        assert validation.get("cache_marker") is True
         assert validation["existing_device"] is None
         if change == "equivalent-duplicate":
             assert validation["can_import"] is False

@@ -783,6 +783,7 @@ class TestProcessDeviceFilters:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
         from netbox_librenms_plugin.models import NormalizationRule
 
         NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1")
@@ -808,6 +809,10 @@ class TestProcessDeviceFilters:
             show_disabled=True,
             return_cache_status=True,
         )
+        key = get_validated_device_cache_key(live_librenms.api.server_key, filters, 131, vc_enabled=False)
+        cached = cache.get(key)
+        cached["_validation"]["cache_marker"] = True
+        cache.set(key, cached, timeout=live_librenms.api.cache_timeout)
         request_count = len(live_librenms.server.requests)
         visits = []
         from_db = Device.from_db
@@ -831,6 +836,7 @@ class TestProcessDeviceFilters:
         assert first_from_cache is False
         assert second_from_cache is True
         assert first[0]["_validation"]["existing_device"] == existing
+        assert second[0]["_validation"].get("cache_marker") is True
         assert second[0]["_validation"]["existing_device"] == existing
         assert len(live_librenms.server.requests) == request_count
         assert not visits
