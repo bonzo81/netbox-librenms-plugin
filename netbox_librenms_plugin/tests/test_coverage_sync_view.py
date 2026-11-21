@@ -732,6 +732,7 @@ class TestVirtualChassisInventory:
             assert response.context["vc_inventory_serials"] == []
             assert direct_url not in response.content.decode()
             assert b"data-vc-serial-unavailable" in response.content
+            assert b"data-vc-inventory-error" not in response.content
         else:
             response = logged_in_client.post(direct_url, {"server_key": SERVER_KEY})
             first.refresh_from_db()
@@ -1005,13 +1006,19 @@ class TestVirtualChassisInventory:
         ]
         assert per_member == []
 
-    def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
-        _vc, members = make_virtual_chassis_members("inventory-failure", count=1)
-        librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=404)
-        view = _device_view()
-        view.librenms_id = 6642
+    @pytest.mark.parametrize("status", [404, 503])
+    def test_failed_inventory_lookup_shows_a_read_error(self, logged_in_client, librenms_server, status):
+        _vc, (member,) = make_virtual_chassis_members("inventory-failure", count=1)
+        seed_mapping(member, SERVER_KEY, own=6642)
+        _register_device(librenms_server, 6642, member.name)
+        librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=status)
 
-        assert view._get_vc_inventory_serials(members[0], _all_members(members[0])) == []
+        response = logged_in_client.get(_sync_url(member))
+
+        assert response.status_code == 200
+        assert response.context["found_in_librenms"] is True
+        assert b"data-vc-inventory-error" in response.content
+        assert b"data-vc-serial-unavailable" not in response.content
 
     def test_the_dialog_offers_no_row_for_a_serial_that_is_not_text_or_a_number(self, librenms_server):
         """The dialog posts text, so a JSON `true` would reach Sync All as the serial "True"."""
