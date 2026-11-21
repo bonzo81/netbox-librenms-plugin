@@ -496,14 +496,14 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
     that *writer* gives its text, equals the key that *writer* gives a value: after the write, the
     two rows would have one identity, or a lookup of the row's text would find the target.
     """
-    values = list(dict.fromkeys(values))
+    values = list(dict.fromkeys(_text(value) for value in values))
     probes = _probe_keys(values, rules)
     by_own_key = _writer_keys(values, probes, writer)
     results = {value: _ABSENT for value, keys in probes.items() if not keys}
     open_values = [value for value in values if probes[value]]
     if not open_values:
         return results
-    exact = sorted({_text(value) for value in open_values} | {key for value in open_values for key in probes[value]})
+    exact = sorted(set(open_values) | {key for value in open_values for key in probes[value]})
     patterns = sorted({contains_pattern(key) for value in open_values for key in probes[value]})
     queryset = queryset.filter(_SerialCandidates(exact, patterns)).order_by("pk")
     matches = {value: [] for value in open_values}
@@ -531,7 +531,7 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
             candidates = _row_candidates(stored, context, by_key, by_own_key, writer)
         if context.unavailable:
             for value in open_values:
-                if any(key in stored for key in probes[value]) or stored == _text(value):
+                if any(key in stored for key in probes[value]) or stored == value:
                     unavailable.setdefault(value, context.unavailable)
         else:
             for value in candidates:
@@ -555,10 +555,10 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
 
 def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> dict:
     """
-    Return ``{serial: Resolution}``: the Devices that hold each incoming serial, in one query.
+    Return ``{serial_text: Resolution}``: the Devices that hold each incoming serial, in one query.
 
     Args:
-        serials: The incoming LibreNMS serials.
+        serials: The incoming LibreNMS serials. Result keys are their trimmed text.
         rules: The batch's serial rules; None reads them.
         exclude_pks: Devices to leave out before the count, for example the device that a write changes.
         lock: Lock confirmed matches ``FOR UPDATE`` and check their identity again; the caller holds a transaction.
@@ -575,14 +575,14 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
 
 def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> Resolution:
     """Return the Resolution of one incoming serial among Devices; see :func:`resolve_devices`."""
-    return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[serial]
+    return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[_text(serial)]
 
 
 def resolve_devices_write(
     serials: Iterable, context: SerialContext, *, rules: SerialRules, exclude_pks=(), master=None
 ) -> dict:
     """
-    Return ``{serial: Resolution}``: the Devices that a write of each serial under *context* would duplicate.
+    Return the Devices that each write under *context* would duplicate, keyed by trimmed serial text.
 
     A row matches when it holds the LibreNMS text under its own context, as in ``resolve_devices``,
     and also when its own key, or the key that *context* gives the row's text, equals the key that
@@ -592,7 +592,6 @@ def resolve_devices_write(
     """
     from dcim.models import Device
 
-    serials = list(dict.fromkeys(serials))
     queryset = Device.objects.select_related("device_type", "virtual_chassis__master__device_type")
     if exclude_pks:
         queryset = queryset.exclude(pk__in=list(exclude_pks))
@@ -611,7 +610,9 @@ def resolve_device_write(
     incoming, context: SerialContext, *, rules: SerialRules, exclude_pks=(), master=None
 ) -> Resolution:
     """Return the Devices that a write of *incoming* under *context* would duplicate; see ``resolve_devices_write``."""
-    return resolve_devices_write([incoming], context, rules=rules, exclude_pks=exclude_pks, master=master)[incoming]
+    return resolve_devices_write([incoming], context, rules=rules, exclude_pks=exclude_pks, master=master)[
+        _text(incoming)
+    ]
 
 
 def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
@@ -624,10 +625,10 @@ def resolve_modules(
     serials: Iterable, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False, spare=0
 ) -> dict:
     """
-    Return ``{serial: Resolution}``: the Modules that hold each incoming serial, in one query.
+    Return ``{serial_text: Resolution}``: the Modules that hold each incoming serial, in one query.
 
     Args:
-        serials: The incoming LibreNMS serials.
+        serials: The incoming LibreNMS serials. Result keys are their trimmed text.
         rules: The batch's serial rules; None reads them.
         device_ids: Only Modules on these Devices count; None counts every Module.
         exclude_pks: Modules to leave out before the count, for example the module that a write replaces.
@@ -656,7 +657,9 @@ def resolve_modules(
 
 def resolve_module(serial, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False):
     """Return the Resolution of one incoming serial among Modules; see :func:`resolve_modules`."""
-    return resolve_modules([serial], rules=rules, device_ids=device_ids, exclude_pks=exclude_pks, lock=lock)[serial]
+    return resolve_modules([serial], rules=rules, device_ids=device_ids, exclude_pks=exclude_pks, lock=lock)[
+        _text(serial)
+    ]
 
 
 def assignment_lock(serials: Iterable, *, model, rules: SerialRules) -> None:

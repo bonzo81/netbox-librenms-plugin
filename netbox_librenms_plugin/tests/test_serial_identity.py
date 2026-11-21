@@ -345,6 +345,32 @@ class TestLookup:
             ResolutionKind.NO_MATCH
         ] * 10
 
+    @pytest.mark.parametrize("serials", [(123, 123.0), (123.0, 123)])
+    def test_batches_resolve_integer_and_float_serials_as_distinct_text(self, serials):
+        from netbox_librenms_plugin.serial_identity import resolve_device_write, resolve_devices_write, resolve_modules
+
+        _rules_only()
+        device = make_device_with_module_bays("lookup-numeric-bays", ["Slot 1", "Slot 2"])
+        devices = {text: make_device(f"lookup-numeric-{text}", serial=text) for text in ("123", "123.0")}
+        modules = {
+            "123": install_module(device, "Slot 1", "NUMERIC-CARD", serial="123"),
+            "123.0": install_module(device, "Slot 2", "NUMERIC-CARD", serial="123.0"),
+        }
+        rules = SerialRules.load()
+        context = rules.for_device(device)
+
+        reads = resolve_devices(serials, rules=rules)
+        writes = resolve_devices_write(serials, context, rules=rules)
+        module_reads = resolve_modules(serials, rules=rules)
+        assert {key: result.object for key, result in reads.items()} == devices
+        assert {key: result.object for key, result in writes.items()} == devices
+        assert {key: result.object for key, result in module_reads.items()} == modules
+
+        for value, key in [(123, "123"), (123.0, "123.0"), (" 123 ", "123")]:
+            assert resolve_device(value, rules=rules) == reads[key]
+            assert resolve_device_write(value, context, rules=rules) == writes[key]
+            assert resolve_module(value, rules=rules) == module_reads[key]
+
     @pytest.mark.parametrize("lock", [False, True], ids=["read", "locked"])
     def test_a_large_batch_confirms_each_row_only_against_the_values_of_its_key(self, monkeypatch, lock):
         from dcim.models import Device
