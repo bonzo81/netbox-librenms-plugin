@@ -500,6 +500,38 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link
 
 
 @pytest.mark.django_db
+def test_a_standalone_bulk_import_without_a_serial_skips_the_broken_rule(client, live_librenms):
+    from dcim.models import Device, DeviceType
+
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
+
+    device_id = 96316
+    prerequisites, row = _importable_row(live_librenms, device_id, "standalone-broken-rule")
+    row["serial"] = "-"
+    live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+    device_type = DeviceType.objects.get(pk=prerequisites["device_type_id"])
+    _broken_serial_rule("standalone", manufacturer=device_type.manufacturer)
+    client.force_login(make_superuser("standalone-broken-rule-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "server_key": "default",
+            "select": [str(device_id)],
+            f"role_{device_id}": str(prerequisites["device_role_id"]),
+        },
+    )
+
+    assert response.status_code == 302
+    device = Device.objects.get(name=row["hostname"])
+    assert device.device_type_id == device_type.pk
+    assert device.serial == ""
+    assert device.virtual_chassis_id is None
+    assert stored_mapping_for_test(device) == {"default": device_id}
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("stray_first", [False, True], ids=["holders-first", "stray-first"])
 def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders(
     client, live_librenms, stray_first, caplog

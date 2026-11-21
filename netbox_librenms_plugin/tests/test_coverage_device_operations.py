@@ -22,13 +22,15 @@ from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_serv
 SERVER_KEY = "test-server"
 
 
-def _broken_serial_rule(tag):
-    """Store a serial rule of an unrelated manufacturer that every decision of its chain refuses."""
+def _broken_serial_rule(tag, *, manufacturer=None):
+    """Store a serial rule whose chain refuses every decision."""
     from dcim.models import Manufacturer
 
     from netbox_librenms_plugin.models import NormalizationRule
 
-    vendor = Manufacturer.objects.create(name=f"Broken rule vendor {tag}", slug=f"broken-rule-vendor-{tag}")
+    vendor = manufacturer or Manufacturer.objects.create(
+        name=f"Broken rule vendor {tag}", slug=f"broken-rule-vendor-{tag}"
+    )
     rule = NormalizationRule.objects.create(
         scope="serial", manufacturer=vendor, match_pattern=r"^(.+)-BROKEN$", replacement=r"\1"
     )
@@ -1683,12 +1685,14 @@ class TestImportSingleDevice:
         assert result["device"].serial == stored
 
     @pytest.mark.parametrize("incoming", [None, "", "-"])
-    def test_a_missing_serial_imports_beside_a_broken_rule_of_another_manufacturer(self, librenms_api, incoming):
+    def test_a_missing_serial_imports_with_a_broken_rule_of_the_selected_manufacturer(self, librenms_api, incoming):
         """The import locks and looks up no serial identity, so the broken rule does not refuse it."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
-        _broken_serial_rule("import")
+        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+
         site, device_type, role = self._infrastructure("broken-rule")
+        _broken_serial_rule("import", manufacturer=device_type.manufacturer)
         validation = _validation(site=site, device_type=device_type, role=role, resolved_name="broken-rule-import")
 
         result = import_single_device(
@@ -1700,7 +1704,12 @@ class TestImportSingleDevice:
         )
 
         assert (result["success"], result["error"]) == (True, None)
-        assert result["device"].serial == ""
+        device = result["device"]
+        device.refresh_from_db()
+        assert device.device_type_id == device_type.pk
+        assert device.serial == ""
+        assert device.virtual_chassis_id is None
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 5604}
 
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack

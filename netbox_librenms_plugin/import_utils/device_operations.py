@@ -1977,21 +1977,23 @@ def import_single_device(  # noqa: C901
         with atomic_with_events():
             # The serial identity locks come first; then the lookup sees a concurrent import's committed device.
             serial_rules = serial_rules or SerialRules.load()
-            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            incoming_serial = display(libre_device.get("serial"))
+            assignment_lock([incoming_serial], model=Device, rules=serial_rules)
             # The insert writes the type row's device count anyway; lock it now, so the context is its manufacturer.
             device_type = DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
-            taken = resolve_device_write(
-                libre_device.get("serial"), serial_rules.for_device_type(device_type), rules=serial_rules
-            )
-            if taken.kind in REFUSING:
-                return {
-                    "success": False,
-                    "device": None,
-                    "message": "",
-                    # No name: the lookup is unrestricted and this string reaches job data and logs.
-                    "error": _serial_taken_message(device_id, libre_device.get("serial"), taken),
-                    "synced": {},
-                }
+            if incoming_serial:
+                taken = resolve_device_write(
+                    incoming_serial, serial_rules.for_device_type(device_type), rules=serial_rules
+                )
+                if taken.kind in REFUSING:
+                    return {
+                        "success": False,
+                        "device": None,
+                        "message": "",
+                        # No name: the lookup is unrestricted and this string reaches job data and logs.
+                        "error": _serial_taken_message(device_id, incoming_serial, taken),
+                        "synced": {},
+                    }
             _locked_owner, conflict = lock_librenms_id_assignment(device_id, api.server_key)
             if conflict is not None:
                 return {
@@ -2040,7 +2042,7 @@ def import_single_device(  # noqa: C901
                 device_data["platform"] = platform_plan.platform
 
             # Persist the trimmed LibreNMS text; serial_identity keys it when it compares.
-            serial = stored_form(libre_device.get("serial"), Device)
+            serial = stored_form(incoming_serial, Device)
             if serial:
                 device_data["serial"] = serial
 

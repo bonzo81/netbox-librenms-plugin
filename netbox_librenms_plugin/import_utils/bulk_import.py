@@ -579,8 +579,8 @@ def bulk_import_devices_shared(  # noqa: C901
             # The one master decision for this row; a stack whose master is unknown imports standalone,
             # so it needs no chassis permission.
             master_member = None
-            master_context = serial_rules.for_device_type(device_type)
             if vc_data.get("is_stack", False):
+                master_context = serial_rules.for_device_type(device_type)
                 master_member = identify_vc_master(vc_data["members"], libre_device.get("serial"), master_context)
             creates_vc = master_member is not None
             if creates_vc:
