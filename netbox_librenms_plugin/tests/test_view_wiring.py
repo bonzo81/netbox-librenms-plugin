@@ -3343,7 +3343,10 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         source_bay = make_module_bay(source_device, "Unlisted Source Bay")
         target_bay = make_module_bay(target_device, "Target Bay")
         moving = Module.objects.create(
-            device=source_device, module_bay=source_bay, module_type=make_module_type("MT-scope-move-named")
+            device=source_device,
+            module_bay=source_bay,
+            module_type=make_module_type("MT-scope-move-named"),
+            serial="SCOPE-MOVE-NAMED",
         )
         user = self._user(
             "scope-move-named",
