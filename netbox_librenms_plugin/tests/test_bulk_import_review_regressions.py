@@ -344,6 +344,7 @@ def test_bulk_import_reports_duplicate_serial_as_terminal_ambiguity(live_librenm
     Device.objects.create(
         name=owner.name, serial=serial, site=other_site, device_type=owner.device_type, role=owner.role, status="active"
     )
+    import_site = Site.objects.create(name="Bulk duplicate destination", slug="bulk-duplicate-destination")
     user = make_superuser("bulk-duplicate-serial-user")
 
     def import_row(payload):
@@ -351,12 +352,18 @@ def test_bulk_import_reports_duplicate_serial_as_terminal_ambiguity(live_librenm
         return bulk_import_devices_shared(
             [device_id],
             server_key="default",
-            manual_mappings_per_device={device_id: {"device_role_id": prerequisites["device_role_id"]}},
+            manual_mappings_per_device={
+                device_id: {
+                    "site_id": import_site.pk,
+                    "device_type_id": prerequisites["device_type_id"],
+                    "device_role_id": prerequisites["device_role_id"],
+                }
+            },
             user=user,
         )
 
-    hostname_conflict = import_row({**row, "hostname": owner.name, "sysName": owner.name})
     serial_conflict = import_row({**row, "serial": serial})
+    hostname_conflict = import_row({**row, "hostname": owner.name, "sysName": owner.name})
 
     assert serial_conflict["success"] == []
     assert serial_conflict["skipped"] == []
