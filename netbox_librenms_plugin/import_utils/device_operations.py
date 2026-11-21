@@ -59,7 +59,7 @@ from ..utils import (
 from .cache import get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
-    _member_name,
+    _existing_member_name,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
@@ -980,17 +980,12 @@ def validate_device_for_import(  # noqa: C901
                     # The row carries the controller's hostname and serial, so it never names the host.
                     pass
                 elif hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
-                    context = serial_rules.for_device(existing_device)
-                    vc_expected_name = _member_name(
-                        hostname,
-                        existing_device.vc_position,
-                        incoming_serial if is_identity(incoming_serial, context) else existing_device.serial,
-                        None,
-                        context,
+                    vc_expected_name = _existing_member_name(
+                        hostname, existing_device, serial_rules, incoming_serial=incoming_serial
                     )
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True
-                    else:
+                    elif vc_expected_name:
                         result["name_sync_available"] = True
                         result["suggested_name"] = vc_expected_name
                 elif hostname and existing_device.name == hostname:

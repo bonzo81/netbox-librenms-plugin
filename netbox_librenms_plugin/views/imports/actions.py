@@ -2451,8 +2451,12 @@ class DeviceConflictActionView(
                     )
 
         elif action == "sync_name":
-            # Sync device name from LibreNMS (e.g., IP → sysName)
-            hostname = _get_hostname_for_action(request, validation, libre_device)
+            if existing_model is Device and existing_device.virtual_chassis_id:
+                hostname = validation.get("suggested_name")
+                if not validation.get("name_sync_available") or not hostname:
+                    return _htmx_error_response("No virtual chassis member name is available to sync.")
+            else:
+                hostname = _get_hostname_for_action(request, validation, libre_device)
             existing_device.name = hostname
             if err := _save_device(existing_device, update_fields=["name"], request=request):
                 return err

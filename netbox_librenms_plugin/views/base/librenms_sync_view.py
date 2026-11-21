@@ -11,7 +11,7 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, extract_vc_members
+from netbox_librenms_plugin.import_utils.virtual_chassis import _existing_member_name, extract_vc_members
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     assess_platform,
@@ -599,26 +599,19 @@ class BaseLibreNMSSyncView(
                 hardware_match = match_librenms_hardware_to_device_type(hardware)
 
                 # Compute resolved name using naming preferences
-                resolved_name = None
+                resolved_name = librenms_sysname
                 if request:
                     use_sysname, strip_domain = resolve_naming_preferences(request)
-                    resolved_name = _determine_device_name(
-                        device_info,
-                        use_sysname=use_sysname,
-                        strip_domain=strip_domain,
-                        device_id=self.librenms_id,
-                    )
-
-                    # For VC members, generate the expected VC member name
-                    if (
-                        resolved_name
-                        and hasattr(obj, "virtual_chassis")
-                        and obj.virtual_chassis is not None
-                        and obj.vc_position is not None
-                    ):
-                        resolved_name = _member_name(
-                            resolved_name, obj.vc_position, obj.serial, None, self._serial_context(obj)
+                    resolved_name = (
+                        _determine_device_name(
+                            device_info,
+                            use_sysname=use_sysname,
+                            strip_domain=strip_domain,
+                            device_id=self.librenms_id,
                         )
+                        or librenms_sysname
+                    )
+                    resolved_name = _existing_member_name(resolved_name, obj, self.serial_rules)
 
                 # Update device details regardless of match
                 librenms_device_details.update(
@@ -643,7 +636,7 @@ class BaseLibreNMSSyncView(
                         "librenms_device_location": device_info.get("location") or "-",
                         "librenms_device_ip": librenms_ip,
                         "sysName": librenms_sysname,
-                        "resolved_name": resolved_name or librenms_sysname,
+                        "resolved_name": resolved_name,
                         "librenms_device_hostname": device_info.get("hostname") or "-",
                         "librenms_device_hardware_match": hardware_match,
                     }

@@ -14,7 +14,7 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
-from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import _existing_member_name
 from netbox_librenms_plugin.platform_versions import (
     FactsSource,
     NewOSPlatform,
@@ -333,17 +333,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             strip_domain=strip_domain,
         )
 
-        # For VC members, generate the expected VC member name
-        if (
-            resolved_name
-            and hasattr(device, "virtual_chassis")
-            and device.virtual_chassis is not None
-            and device.vc_position is not None
-        ):
-            resolved_name = _member_name(
-                resolved_name, device.vc_position, device.serial, None, SerialRules.load().for_device(device)
-            )
-
+        resolved_name = _existing_member_name(resolved_name, device, SerialRules.load())
         if not resolved_name:
             messages.warning(request, "No name could be determined from LibreNMS")
             return _device_sync_redirect(request, pk, server_key)

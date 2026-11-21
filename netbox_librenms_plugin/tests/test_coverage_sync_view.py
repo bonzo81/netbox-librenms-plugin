@@ -956,6 +956,83 @@ class TestVirtualChassisInventory:
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("-{serial}", None),
+        ("-M{position}-{serial[0]}", None),
+        ("-M{position}", "stack-M2"),
+        ("-M{position}-{{serial}}", "stack-M2-{serial}"),
+    ],
+)
+def test_vc_name_sync_uses_the_serial_rule_only_for_serial_suffixes(
+    logged_in_client, librenms_server, pattern, expected
+):
+    from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
+
+    chassis, (master, member) = make_virtual_chassis_members("rename-rule")
+    chassis.master = master
+    chassis.save(update_fields=["master"])
+    member.name = "stack-ABC123"
+    member.serial = "ABC123"
+    member.save(update_fields=["name", "serial"])
+    seed_mapping(member, SERVER_KEY, own=6650)
+    settings_row = LibreNMSSettings.objects.first() or LibreNMSSettings()
+    settings_row.vc_member_name_pattern = pattern
+    settings_row.save()
+    rule = NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=master.device_type.manufacturer
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern="(")
+    _register_device(librenms_server, 6650, "stack")
+    action_url = reverse("plugins:netbox_librenms_plugin:update_device_name", args=[member.pk])
+
+    response = logged_in_client.get(_sync_url(member), {"server_key": SERVER_KEY})
+    assert response.status_code == 200
+    assert (f'action="{action_url}"' in response.content.decode()) is (expected is not None)
+    assert response.context["resolved_name"] == expected
+
+    response = logged_in_client.post(action_url, {"server_key": SERVER_KEY})
+    assert response.status_code == 302
+    member.refresh_from_db()
+    assert member.name == (expected or "stack-ABC123")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("pattern", "expected"), [("-{serial}", None), ("-M{position}", "stack-M2")])
+def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(logged_in_client, librenms_server, pattern, expected):
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    chassis, (_first, member) = make_virtual_chassis_members("import-rename-rule")
+    _other, (outside_master,) = make_virtual_chassis_members("import-rename-other", count=1)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside_master)
+    member.name = "stack-ABC123"
+    member.serial = "ABC123"
+    member.save(update_fields=["name", "serial"])
+    seed_mapping(member, SERVER_KEY, own=6651)
+    settings_row = LibreNMSSettings.objects.first() or LibreNMSSettings()
+    settings_row.vc_member_name_pattern = pattern
+    settings_row.save()
+    _register_device(librenms_server, 6651, "stack")
+    validation_url = reverse("plugins:netbox_librenms_plugin:device_validation_details", args=[6651])
+    action_url = reverse("plugins:netbox_librenms_plugin:device_conflict_action", args=[6651])
+
+    response = logged_in_client.get(validation_url, {"server_key": SERVER_KEY})
+    assert response.status_code == 200
+    assert response.context["validation"]["existing_device"] == member
+    assert (b'name="action" value="sync_name"' in response.content) is (expected is not None)
+    assert response.context["validation"]["suggested_name"] == expected
+
+    logged_in_client.post(
+        action_url, {"server_key": SERVER_KEY, "action": "sync_name", "existing_device_id": member.pk}
+    )
+    member.refresh_from_db()
+    assert member.name == (expected or "stack-ABC123")
+
+
+@pytest.mark.django_db
 class TestPlatformAndPatternHelpers:
     def test_platform_info_uses_an_exact_real_platform(self, librenms_server):
         from dcim.models import Platform
