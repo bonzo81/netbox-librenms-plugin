@@ -1217,7 +1217,7 @@ class TestMergeTransceiverDataPortIdentity:
     ):
         """Anonymization keeps a serial without an identity reported, so the port stays apart from the optic."""
         from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
-        from netbox_librenms_plugin.serial_identity import display
+        from netbox_librenms_plugin.serial_identity import SerialRules, display, is_identity
 
         live = {
             "device_id": 110,
@@ -1248,22 +1248,24 @@ class TestMergeTransceiverDataPortIdentity:
         }
 
         def merged(recording):
-            from netbox_librenms_plugin.serial_identity import SerialRules
-
             device_id = recording["device_id"]
             librenms_server.load_recording(recording)
             view = _real_api_view(settings, librenms_server, librenms_id=device_id)
             inventory = recording["responses"][f"GET /api/v0/inventory/{device_id}/all"]["inventory"]
-            result, error = view._merge_transceiver_data(
-                deepcopy(inventory), serial_context=SerialRules.load().context(None)
-            )
+            serial_context = SerialRules.load().context(None)
+            result, error = view._merge_transceiver_data(deepcopy(inventory), serial_context=serial_context)
             assert error is None
             return [
-                (item["entPhysicalIndex"], bool(display(item.get("entPhysicalSerialNum"))), "_librenms_port_id" in item)
+                (
+                    item["entPhysicalIndex"],
+                    bool(display(item.get("entPhysicalSerialNum"))),
+                    is_identity(item.get("entPhysicalSerialNum"), serial_context),
+                    "_librenms_port_id" in item,
+                )
                 for item in result
             ]
 
-        assert merged(live) == [(10, True, False), (77, True, True)]
+        assert merged(live) == [(10, True, False, False), (77, True, True, True)]
         assert merged(anonymize_recording(live, salt="replay")) == merged(live)
 
     def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self, settings, librenms_server):
