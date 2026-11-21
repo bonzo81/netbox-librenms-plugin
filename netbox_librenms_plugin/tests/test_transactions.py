@@ -601,16 +601,20 @@ def test_a_failed_savepoint_without_events_keeps_the_last_saved_payload(later_sa
 def test_row_savepoints_do_not_recheck_earlier_frozen_batch_events():
     from sys import getprofile, setprofile
 
-    from extras.events import EventContext
+    from extras import events as netbox_events
 
     from netbox_librenms_plugin.transactions import atomic_with_events, row_savepoint
+
+    event_context = getattr(netbox_events, "EventContext", None)
+    if event_context is None:
+        pytest.skip("NetBox eagerly serializes plain-dict events in this version")
 
     sites = [_site(f"batch-site-{index}") for index in range(12)]
     payload_checks = 0
 
     def count_payload_checks(frame, event, _arg):
         nonlocal payload_checks
-        if event == "call" and frame.f_code is EventContext.__contains__.__code__ and frame.f_locals["key"] == "data":
+        if event == "call" and frame.f_code is event_context.__contains__.__code__ and frame.f_locals["key"] == "data":
             payload_checks += 1
 
     with _netbox_request_context():
