@@ -5770,10 +5770,13 @@ class TestDeviceConflictActionBranches:
         other = make_device("branches-rule-error-master")
         member = make_device("branches-rule-error-member", serial="MEMBER-SN-5440")
         make_virtual_chassis("branches-rule-error-chassis", other, member)
-        seed_mapping(member, self.server_key, oob=5440, oob_type="idrac")
         # The chassis master decides the serial rules of its members.
         _member_of_a_broken_rule_vendor(other, "action-oob-id")
         self._register_device(5440, "branches-rule-error-ctrl", serial="REAL-5440")
+        unmatched_response = post_view(
+            self._make_view(), self._request("sync_name", member, "rule-error-unmatched-user"), device_id=5440
+        )
+        seed_mapping(member, self.server_key, oob=5440, oob_type="idrac")
 
         response = post_view(self._make_view(), self._request("sync_name", member, "rule-error-user"), device_id=5440)
         platform_response = post_view(
@@ -5782,6 +5785,8 @@ class TestDeviceConflictActionBranches:
 
         assert response.headers.get("HX-Reswap") == "none"
         assert response.content == platform_response.content
+        assert unmatched_response.headers.get("HX-Reswap") == "none"
+        assert response.content != unmatched_response.content
         assert Device.objects.get(pk=member.pk).name == "branches-rule-error-member"
 
     def test_a_merge_row_at_the_host_oob_ip_copies_nothing(self):
