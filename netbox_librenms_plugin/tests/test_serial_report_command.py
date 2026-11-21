@@ -92,10 +92,10 @@ class TestSerialReportCommand:
         assert lines[-1].startswith("3 row(s)")
 
     def test_the_report_does_not_cache_serials_from_the_scan(self):
-        from dcim.models import Device, Module, ModuleBay
+        from dcim.models import Device, Module
 
         from netbox_librenms_plugin.serial_identity import SerialRules, is_identity, report_rows
-        from netbox_librenms_plugin.tests.conftest import make_device, make_module_type
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
 
         _rules_only(r"^S/N\s+(.+)$")
         holder = make_device("report-scan-holder")
@@ -113,7 +113,7 @@ class TestSerialReportCommand:
                 for number in range(501)
             ]
         )
-        bays = ModuleBay.objects.bulk_create([ModuleBay(device=holder, name=f"Slot {number}") for number in range(501)])
+        bays = [make_module_bay(holder, f"Slot {number}") for number in range(501)]
         Module.objects.bulk_create(
             [
                 Module(
