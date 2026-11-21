@@ -1573,21 +1573,17 @@ def _match_and_validate(  # noqa: C901
                         result["can_import"] = False
                         result["is_ready"] = False
                         return result
-                    if len(serial_matches) > 1:
-                        # Device.serial is not unique in NetBox, so several rows already share it.
-                        # Binding to an arbitrary one is wrong, and importing anyway would mint YET
-                        # ANOTHER same-serial device. Make it a blocking issue (issue -> can_import
-                        # False) and flag the duplicate, rather than only warning and letting the row
-                        # import. Not serial_action="conflict": there is no single peer to resolve
-                        # against, so the sync-serial UI (which needs one existing_device) can't apply.
+                    if discovery.kind is ResolutionKind.AMBIGUOUS:
+                        # Leave the row unbound before the weaker IP lookup.
                         result["serial_duplicate"] = True
                         result["issues"].append(
                             f"Multiple NetBox devices share serial '{page_text(serial)}'; resolve the duplicate "
                             "serial before importing."
                         )
-                        existing_by_serial = None
-                    else:
-                        existing_by_serial = discovery.object
+                        result["can_import"] = False
+                        result["is_ready"] = False
+                        return result
+                    existing_by_serial = discovery.object
                     if existing_by_serial:
                         # Capture existing device's current LibreNMS linkage so the UI can
                         # present accurate state (NOT just "not linked to LibreNMS").

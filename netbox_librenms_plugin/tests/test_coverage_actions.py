@@ -1685,6 +1685,47 @@ class TestDeviceValidationDetailsView:
         for action in ("sync_serial", "sync_name", "sync_platform", "sync_device_type", "update_type"):
             assert f'name="action" value="{action}"' not in content, action
 
+    @pytest.mark.parametrize(
+        ("serial", "ambiguous"),
+        [("DETAILS-SHARED", True), ("DETAILS-UNMATCHED", False), ("", False)],
+        ids=["ambiguous", "no-match", "absent"],
+    )
+    def test_an_ambiguous_serial_prevents_ip_matching(self, client, serial, ambiguous):
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        make_device("details-serial-exact", serial="DETAILS-SHARED")
+        make_device("details-serial-padded", serial="  DETAILS-SHARED  ")
+        host = make_device("details-ip-owner")
+        host.primary_ip4 = ip_on(host, "198.18.31.2/32", "mgmt0")
+        host.save(update_fields=["primary_ip4"])
+        self.primary_server.device_info_response(
+            device_id=1, hostname="details-controller", hardware="iDRAC9", os="idrac", serial=serial, ip="198.18.31.2"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        client.force_login(make_superuser())
+
+        response = client.get(
+            url_for("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 1}),
+            {"server_key": "default"},
+            headers={"HX-Request": "true"},
+        )
+
+        assert response.status_code == 200
+        validation = response.context["validation"]
+        assert validation["serial_duplicate"] is ambiguous
+        if ambiguous:
+            assert validation["existing_device"] is None
+            assert validation["existing_match_type"] is None
+            assert validation["oob_candidate"] is None
+            assert validation["row_is_oob_controller"] is False
+            assert validation["can_import"] is False
+            assert validation["is_ready"] is False
+            assert len(validation["issues"]) == 1
+        else:
+            assert validation["existing_device"] == host
+            assert validation["existing_match_type"] == "primary_ip"
+            assert validation["oob_candidate"]["device"] == host
+
     def test_a_rediscovered_controller_at_the_oob_ip_offers_no_row_copy(self):
         """The host already has an OOB link, and a new LibreNMS ID answers at its OOB IP: no row copy is offered."""
         host = make_device(
