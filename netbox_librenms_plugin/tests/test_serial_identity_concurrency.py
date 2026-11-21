@@ -1051,8 +1051,6 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '20s'")
-            client = Client()
-            client.force_login(user)
 
             def observe_lock(execute, sql, params, many, context):
                 if observe and (
@@ -1063,7 +1061,12 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
                 return execute(sql, params, many, context)
 
             with connection.execute_wrapper(observe_lock):
-                return [messages_on(client.post(url, data).wsgi_request) for url, data in posts]
+                responses = []
+                for url, data in posts:
+                    client = Client()
+                    client.force_login(user)
+                    responses.append(messages_on(client.post(url, data).wsgi_request))
+                return responses
         finally:
             connection.close()
 
@@ -1089,11 +1092,11 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
         stale = modules.result(timeout=30)
 
     assert Device.objects.get(pk=device.pk).device_type_id == new_type.pk, "the type change itself must commit"
-    # The forms signed the old type, so the waiting updates refuse; fresh forms then run the identity check.
-    # One session: the second response also carries the first one's message.
-    assert stale[0] and {message for messages in stale for message in messages} == {
-        ("error", GrantRefusal.POLICY.message)
-    }, stale
+    assert stale[0] == [("error", GrantRefusal.POLICY.message)]
+    assert stale[1] == [("error", GrantRefusal.POLICY.message)]
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert (first.serial, second.serial) == ("OLD111", "OLD222")
     # The snapshot was merged under the old type's serial context, so a refresh stores it again under the new one.
     device.refresh_from_db()
     cache.set(
