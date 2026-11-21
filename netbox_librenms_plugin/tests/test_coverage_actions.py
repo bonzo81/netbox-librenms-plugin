@@ -2019,20 +2019,39 @@ class TestDeviceValidationDetailsView:
         assert response.status_code == 200
         assert b'value="sync_serial"' not in response.content
 
-    def test_an_unlinked_chassis_member_offers_link_without_serial_update(self):
+    def test_linking_a_chassis_member_preserves_its_name_and_serial(self):
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-chassis-link")
+        member.name = "SW01"
         member.serial = "MEMBER-OLD"
         member.save()
-        self.primary_server.device_info_response(device_id=1, hostname=member.name, serial="CHASSIS-SERIAL")
+        self.primary_server.device_info_response(device_id=1, hostname="sw01", serial="CHASSIS-SERIAL")
         self.primary_server.vc_inventory_callable(1, [], {})
 
         _view, response = self._get("default")
 
         assert response.status_code == 200
-        assert b'name="action" value="update_serial"' not in response.content
-        assert b'name="action" value="link"' in response.content
+        action_url = url_for("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 1})
+        link_forms = []
+        for form in re.findall(r"<form\b.*?</form>", response.content.decode(), re.DOTALL):
+            if open_tags(form, "form")[0].get("hx-post") != action_url:
+                continue
+            data = {tag["name"]: tag["value"] for tag in open_tags(form, "input") if tag.get("type") == "hidden"}
+            if data.get("action") in {"link", "update", "update_serial"}:
+                link_forms.append(data)
+        assert [form["action"] for form in link_forms] == ["link"]
+
+        request = make_view_request("post", link_forms[0], user=make_superuser(), HTTP_HX_REQUEST="true")
+        response = post_view(DeviceConflictActionView(), request, device_id=1)
+
+        assert response.status_code == 200
+        member.refresh_from_db()
+        assert stored_mapping_for_test(member) == {"default": 1}
+        assert member.serial == "MEMBER-OLD"
+        assert member.name == "SW01"
 
     def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
         from dcim.models import Platform

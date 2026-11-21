@@ -2457,10 +2457,10 @@ class DeviceConflictActionView(
                     return _htmx_error_response(str(exc))
 
                 if action == "link":
-                    # Link to LibreNMS and update name from LibreNMS data
-                    hostname = _get_hostname_for_action(request, validation, libre_device)
-                    existing_device.name = hostname
-                    fields = ["name"]
+                    fields = []
+                    if existing_model is not Device or not existing_device.virtual_chassis_id:
+                        existing_device.name = _get_hostname_for_action(request, validation, libre_device)
+                        fields.append("name")
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
