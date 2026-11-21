@@ -376,9 +376,10 @@ def test_a_lock_conflict_in_the_chassis_create_fails_the_stack_row_and_a_retry_i
             user=make_superuser("stack-conflict-user"),
         )
 
-    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"):
+    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01") as failed:
         result = run()
 
+    assert failed
     assert result["success"] == []
     assert result["warnings"] == []
     assert result["failed"] == [{"device_id": 96311, "error": CHASSIS_CONFLICT.format(96311)}]
@@ -467,7 +468,7 @@ def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client,
     client.force_login(make_superuser(f"stack-answer-{int(htmx)}-user"))
     headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
 
-    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"):
+    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01") as failed:
         response = client.post(
             reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
             {
@@ -478,6 +479,7 @@ def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client,
             **headers,
         )
 
+    assert failed
     assert not Device.objects.filter(serial__in=[f"SN-ANSWER-A-{htmx}", f"SN-ANSWER-B-{htmx}"]).exists()
     if htmx:
         assert response.status_code == 200
