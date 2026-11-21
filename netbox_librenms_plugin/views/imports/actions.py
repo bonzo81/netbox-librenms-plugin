@@ -2487,6 +2487,16 @@ class DeviceConflictActionView(
                             return _htmx_error_response(
                                 serial_conflict_text(conflict, display(incoming_serial), request.user)
                             )
+                    # The other Devices of a retyped chassis compare under the new type too.
+                    if serial_matched and retyped and retyped.devices:
+                        new_context = serial_rules.for_device_type(librenms_device_type)
+                        if not is_sole_holder(
+                            existing_device,
+                            libre_device.get("serial"),
+                            rules=serial_rules,
+                            contexts_by_pk={pk: new_context for pk, _serial in retyped.devices},
+                        ):
+                            return _htmx_error_response(_SERIAL_MATCH_LOST)
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):

@@ -657,7 +657,9 @@ def _resolve(
     return results
 
 
-def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> dict:
+def resolve_devices(
+    serials: Iterable, *, rules: SerialRules | None = None, exclude_pks=(), lock=False, contexts_by_pk=None
+) -> dict:
     """
     Return ``{serial_text: Resolution}``: the Devices that hold each incoming serial, in one query.
 
@@ -666,6 +668,7 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
         rules: The batch's serial rules; None reads them.
         exclude_pks: Devices to leave out before the count, for example the device that a write changes.
         lock: Lock confirmed matches ``FOR UPDATE`` and check their identity again; the caller holds a transaction.
+        contexts_by_pk: Proposed serial contexts for Devices affected by a pending type change.
 
     """
     from dcim.models import Device
@@ -674,14 +677,24 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
     queryset = Device.objects.select_related("device_type", "virtual_chassis__master__device_type")
     if exclude_pks:
         queryset = queryset.exclude(pk__in=list(exclude_pks))
-    return _resolve(queryset, serials, rules=rules, row_context=rules.for_device, lock=lock)
+    row_context = rules.for_device
+    if contexts_by_pk:
+
+        def row_context(row):
+            return contexts_by_pk.get(row.pk) or rules.for_device(row)
+
+    return _resolve(queryset, serials, rules=rules, row_context=row_context, lock=lock)
 
 
-def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> Resolution:
+def resolve_device(
+    serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False, contexts_by_pk=None
+) -> Resolution:
     """Return the Resolution of one incoming serial among Devices; see :func:`resolve_devices`."""
     if not is_serial_value(serial):
         return _ABSENT
-    return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[_text(serial)]
+    return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock, contexts_by_pk=contexts_by_pk)[
+        _text(serial)
+    ]
 
 
 def resolve_devices_write(
@@ -723,9 +736,9 @@ def resolve_device_write(
     ]
 
 
-def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
+def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=(), contexts_by_pk=None) -> bool:
     """Return whether *device* is the one Device, apart from *exclude_pks*, that holds the hardware *incoming* names."""
-    holder = resolve_device(incoming, rules=rules, exclude_pks=exclude_pks).object
+    holder = resolve_device(incoming, rules=rules, exclude_pks=exclude_pks, contexts_by_pk=contexts_by_pk).object
     return holder is not None and holder.pk == device.pk
 
 

@@ -5047,6 +5047,51 @@ class TestDeviceConflictActionBranches:
             assert holder.name.encode() not in response.content
         assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
 
+    @pytest.mark.parametrize(
+        ("match_type", "new_prefix", "refused"),
+        [("serial", "Y", True), ("serial", "X", False), ("hostname", "Y", False)],
+    )
+    def test_a_forced_chassis_link_keeps_its_serial_match(self, match_type, new_prefix, refused):
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (master, sibling) = make_virtual_chassis_members("branches-chassis-retype")
+        master.serial = "XABC123"
+        master.save()
+        sibling.serial = "YABC123"
+        sibling.save()
+        old_type_id = master.device_type_id
+        new_maker = Manufacturer.objects.create(name="Chassis retype maker", slug="chassis-retype-maker")
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker, model="Chassis retype", slug="chassis-retype", part_number="CHASSIS-RETYPE"
+        )
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=master.device_type.manufacturer
+        )
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=rf"^{new_prefix}(.+)$", replacement=r"\1", manufacturer=new_maker
+        )
+        hostname = master.name if match_type == "hostname" else "branches-chassis-retype-source"
+        self._register_device(42, hostname, serial="ABC123", hardware=new_type.part_number)
+        request = self._request("link", master, "branches-chassis-retype-user", force="on")
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        master.refresh_from_db()
+        sibling.refresh_from_db()
+        if refused:
+            assert response.headers.get("HX-Reswap") == "none"
+            assert master.device_type_id == old_type_id
+            assert stored_mapping_for_test(master) is None
+        else:
+            self._assert_success(response)
+            assert master.device_type_id == new_type.pk
+            assert stored_mapping_for_test(master) == {self.server_key: 42}
+        assert stored_mapping_for_test(sibling) is None
+        assert (master.serial, sibling.serial) == ("XABC123", "YABC123")
+
     @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
     def test_a_forced_type_change_refuses_two_serials_that_the_new_rules_key_to_one(self, shape):
         from dcim.models import Device, DeviceType, Manufacturer
