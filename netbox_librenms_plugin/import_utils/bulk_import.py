@@ -1385,6 +1385,8 @@ def process_device_filters(  # noqa: C901
     return_cache_status: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    *,
+    serial_rules: SerialRules | None = None,
 ) -> List[dict] | tuple[List[dict], bool]:
     """
     Process LibreNMS device filters and return validated devices.
@@ -1404,6 +1406,7 @@ def process_device_filters(  # noqa: C901
         return_cache_status: When True, returns (devices, from_cache) tuple
         use_sysname: If True, prefer sysName over hostname for device name resolution
         strip_domain: If True, strip domain suffix from device name
+        serial_rules: The serial rule snapshot used to validate and cache the search.
 
     Returns:
         List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
@@ -1482,7 +1485,7 @@ def process_device_filters(  # noqa: C901
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
-    serial_rules = SerialRules.load()
+    serial_rules = serial_rules or SerialRules.load()
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
 

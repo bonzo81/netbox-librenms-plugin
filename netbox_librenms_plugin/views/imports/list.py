@@ -134,6 +134,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             _refresh_existing_device,
             _stopped_at_unavailable_serial,
         )
+        from netbox_librenms_plugin.import_utils.cache import search_metadata_is_current
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         job_data = job.data or {}
@@ -168,9 +169,11 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             logger.warning(f"Job {job_id} missing device_ids")
             return []
 
-        # Fetch devices from cache using shared keys; a serial rule edit since the job makes them a miss.
-        validated_devices = []
         serial_rules = SerialRules.load()
+        if not search_metadata_is_current(job_data, serial_rules):
+            return []
+
+        validated_devices = []
         for device_id in device_ids:
             cache_key = get_validated_device_cache_key(
                 server_key=server_key,

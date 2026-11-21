@@ -797,6 +797,8 @@ def test_completed_filter_job_rebinds_results_and_follow_up_forms_to_its_server(
     """A completed job remains authoritative when its result URL omits server_key."""
     from core.models import Job
 
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user = make_superuser("import-job-server-owner")
     client.force_login(user)
@@ -822,6 +824,7 @@ def test_completed_filter_job_rebinds_results_and_follow_up_forms_to_its_server(
             "device_ids": [46103],
             "filters": {"hostname": "job-edge"},
             "server_key": "secondary",
+            "serial_rules": serial_rules_version(),
             "vc_detection_enabled": False,
             "use_sysname": True,
             "strip_domain": False,

@@ -92,6 +92,8 @@ class FilterDevicesJob(JobRunner):
 
         """
         from netbox_librenms_plugin.import_utils import process_device_filters
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         self.logger.info("Starting LibreNMS device filter job")
         self.logger.info(f"Filters: {filters}")
@@ -108,6 +110,7 @@ class FilterDevicesJob(JobRunner):
         self.logger.info(f"LibreNMS API initialized (cache timeout: {api.cache_timeout}s)")
 
         # Process filters using shared function
+        serial_rules = SerialRules.load()
         validated_devices = process_device_filters(
             api=api,
             filters=filters,
@@ -118,6 +121,7 @@ class FilterDevicesJob(JobRunner):
             job=self,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
+            serial_rules=serial_rules,
         )
 
         # Store device IDs for result retrieval
@@ -139,6 +143,7 @@ class FilterDevicesJob(JobRunner):
             "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
+            "serial_rules": serial_rules_version(serial_rules),
             "cache_timeout": api.cache_timeout,
             "cached_at": cached_at,
             "completed": True,

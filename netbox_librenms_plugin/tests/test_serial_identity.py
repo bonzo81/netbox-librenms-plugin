@@ -1057,6 +1057,7 @@ class TestCompletedSearchJobResults:
         from core.models import Job
         from dcim.models import Device
 
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
@@ -1073,6 +1074,7 @@ class TestCompletedSearchJobResults:
                 "device_ids": [7810],
                 "filters": {"hostname": "cache-incoming"},
                 "server_key": caching_librenms[1].server_key,
+                "serial_rules": serial_rules_version(),
                 "vc_detection_enabled": False,
             },
         )

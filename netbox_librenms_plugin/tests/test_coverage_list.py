@@ -222,9 +222,9 @@ class TestCompletedJobResults:
         from core.models import Job
 
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
-        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
-
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         user = _create_user(django_user_model, "completed-job")
         filters = {"hostname": "edge"}
@@ -241,6 +241,7 @@ class TestCompletedJobResults:
                 "device_ids": [4201, 4202],
                 "filters": filters,
                 "server_key": SERVER_KEY,
+                "serial_rules": serial_rules_version(),
                 "vc_detection_enabled": True,
                 "use_sysname": False,
                 "strip_domain": True,
@@ -589,6 +590,7 @@ class TestImportListRequest:
         from core.models import Job
         from dcim.models import Device
 
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
         from netbox_librenms_plugin.import_utils.device_operations import SERIAL_UNAVAILABLE_ISSUE_MARKER
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
@@ -604,7 +606,12 @@ class TestImportListRequest:
             user=user,
             job_id=uuid4(),
             status="completed",
-            data={"device_ids": [4112], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
+            data={
+                "device_ids": [4112],
+                "filters": {"hostname": "edge"},
+                "server_key": SERVER_KEY,
+                "serial_rules": serial_rules_version(),
+            },
         )
 
         # Without filter parameters the page reads the job's cached rows.
@@ -763,6 +770,58 @@ class TestImportListRequest:
         assert filters not in linked_filters()
 
     @pytest.mark.django_db
+    @pytest.mark.parametrize("version", ["changed", "missing"])
+    def test_job_only_results_require_the_serial_rule_version_used_by_the_job(
+        self, client, django_user_model, librenms_server, version
+    ):
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_librenms_plugin.jobs import FilterDevicesJob
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        user = _create_user(django_user_model, "versioned-job-results")
+        client.force_login(user)
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+
+        def run_search(*ids):
+            _register_devices(librenms_server, [_device(device_id) for device_id in ids])
+            job = Job.objects.create(name="Serial rule search", user=user, job_id=uuid4(), data={})
+            FilterDevicesJob.handle(
+                job=job,
+                filters={"hostname": "edge"},
+                vc_detection_enabled=False,
+                clear_cache=True,
+                show_disabled=False,
+                server_key=SERVER_KEY,
+            )
+            job.refresh_from_db()
+            assert job.status == JobStatusChoices.STATUS_COMPLETED, job.error
+            return job
+
+        def open_results(job):
+            response = client.get(_import_url(), {"job_id": job.pk})
+            assert response.status_code == 200
+            return response
+
+        first = run_search(41, 42)
+        assert sorted(row["device_id"] for row in open_results(first).context["table"].data) == [41, 42]
+
+        if version == "changed":
+            NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+            second = run_search(42, 43)
+            assert sorted(row["device_id"] for row in open_results(second).context["table"].data) == [42, 43]
+        else:
+            first.data.pop("serial_rules", None)
+            first.save(update_fields=["data"])
+
+        response = open_results(first)
+
+        assert list(response.context["table"].data) == []
+        assert len(message_texts(response.wsgi_request, "warning")) == 1
+
+    @pytest.mark.django_db
     def test_expired_completed_job_renders_one_actionable_warning(
         self,
         client,
@@ -770,6 +829,8 @@ class TestImportListRequest:
         librenms_server,
     ):
         from core.models import Job
+
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
 
         user = _create_user(django_user_model, "expired-job-results")
         client.force_login(user)
@@ -782,6 +843,7 @@ class TestImportListRequest:
                 "device_ids": [5101],
                 "filters": {"hostname": "edge"},
                 "server_key": SERVER_KEY,
+                "serial_rules": serial_rules_version(),
             },
         )
 
