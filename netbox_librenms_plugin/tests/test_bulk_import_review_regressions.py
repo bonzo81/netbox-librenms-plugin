@@ -742,6 +742,38 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_libre
 
 
 @pytest.mark.django_db
+def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(live_librenms):
+    from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+    from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    first_id, second_id = 96213, 96214
+    members = [_chassis(100, "STAMP-AAA", position=1), _chassis(200, "STAMP-BBB", position=2)]
+    _, first = _importable_row(live_librenms, first_id, "vc-stamp-first", members=members)
+    _, second = _importable_row(live_librenms, second_id, "vc-stamp-second")
+    first["serial"] = ""
+    live_librenms.api.cache_timeout = 300
+    assert get_virtual_chassis_data(live_librenms.api, first_id, force_refresh=True)["is_stack"]
+    live_librenms.server.requests.clear()
+
+    with aborting_statement(
+        lambda sql, params: sql.startswith("SELECT") and '"netbox_librenms_plugin_normalizationrule"' in sql
+    ) as failed:
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [first_id, second_id], live_librenms.api, libre_devices_cache={first_id: first, second_id: second}
+        )
+
+    assert failed
+    assert (collisions, unresolved) == ([], [first_id])
+    assert {request["path"] for request in live_librenms.server.requests} == {
+        f"/api/v0/devices/{second_id}",
+        f"/api/v0/inventory/{second_id}",
+        f"/api/v0/inventory/{second_id}/all",
+    }
+
+
+@pytest.mark.django_db
 def test_collision_precheck_skips_import_prerequisite_queries():
     """Collision matching must not query site, type, role, or platform import prerequisites."""
     from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids

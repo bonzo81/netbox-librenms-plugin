@@ -2,10 +2,12 @@
 
 import logging
 import re
+from contextlib import nullcontext
 from typing import List, NamedTuple
 
 from dcim.models import Device, DeviceType, VirtualChassis
 from django.core.cache import cache
+from django.db import DatabaseError, connection, transaction
 from redis.exceptions import RedisError
 
 from ..constants import (
@@ -106,7 +108,12 @@ def get_virtual_chassis_data(
 def _cached_virtual_chassis_data(api: LibreNMSAPI, device_id, force_refresh: bool, serial_rules) -> dict:
     """Return the cached detection data of *device_id*, and detect and cache it on a miss."""
     serial_rules = serial_rules or SerialRules.load()
-    cache_key = _vc_cache_key(api, device_id, serial_rules)
+    try:
+        with transaction.atomic() if connection.in_atomic_block else nullcontext():
+            cache_key = _vc_cache_key(api, device_id, serial_rules)
+    except DatabaseError as e:
+        logger.exception("Could not read serial rules for virtual chassis detection on device %s", device_id)
+        return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None))
     _cache_timeout = getattr(api, "cache_timeout", None)
     cache_timeout = 300 if _cache_timeout is None else _cache_timeout
     if not force_refresh and cache_timeout != 0:

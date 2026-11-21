@@ -2394,6 +2394,36 @@ class TestDeviceVCDetailsView:
         assert b"stack-master-M1" in result.content
         assert b"stack-master-M2" in result.content
 
+    def test_rule_read_failure_renders_detection_failure(self, client, live_librenms):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
+
+        device = make_device("vc-details-rule-failure")
+        live_librenms.server.device_info_response(
+            device_id=44, hostname=device.name, hardware=device.device_type.model, serial="VC-RULE-SN"
+        )
+        client.force_login(make_superuser("vc-details-rule-failure-user"))
+
+        def rule_select(sql, params):
+            return (
+                sql.startswith("SELECT")
+                and '"netbox_librenms_plugin_normalizationrule"' in sql
+                and NormalizationRule.SCOPE_SERIAL in params
+            )
+
+        with aborting_statement(rule_select) as failed, aborting_statement(rule_select) as repeated:
+            response = client.get(
+                reverse("plugins:netbox_librenms_plugin:device_vc_details", kwargs={"device_id": 44}),
+                {"server_key": "default"},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert failed and not repeated
+        assert response.status_code == 200
+        assert response.context["vc_data"]["detection_failed"] is True
+
     def test_zero_based_stack_renders_member_zero(self, settings, librenms_server):
         server_key = "vc-details-zero"
         device_id = 43

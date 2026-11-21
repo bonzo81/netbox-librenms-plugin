@@ -1920,15 +1920,13 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 status=200,
             )
 
-        # Preview the master the way import will match it: with the matched DeviceType's rules.
-        match = match_import_device_type(libre_device, self.librenms_api)
-        device_type = effective_import_device_type(match.get("device_type") if match and match["matched"] else None)
         serial_rules = SerialRules.load()
-        vc_data = vc_master_view(
-            get_virtual_chassis_data(self.librenms_api, device_id, serial_rules=serial_rules),
-            libre_device.get("serial"),
-            serial_rules.for_device_type(device_type),
-        )
+        vc_data = get_virtual_chassis_data(self.librenms_api, device_id, serial_rules=serial_rules)
+        if vc_data["is_stack"]:
+            # Preview the master under the matched DeviceType's rules.
+            match = match_import_device_type(libre_device, self.librenms_api)
+            device_type = effective_import_device_type(match.get("device_type") if match and match["matched"] else None)
+            vc_data = vc_master_view(vc_data, libre_device.get("serial"), serial_rules.for_device_type(device_type))
 
         context = {
             "libre_device": libre_device,
