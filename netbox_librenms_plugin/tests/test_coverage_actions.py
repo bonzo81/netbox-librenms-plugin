@@ -2004,6 +2004,21 @@ class TestDeviceValidationDetailsView:
         assert "mdi-check-circle" not in serial_row
         assert "sync_serial" not in serial_row
 
+    def test_a_chassis_member_offers_no_direct_serial_sync(self):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-serial-chassis")
+        member.serial = "MEMBER-OLD"
+        member.save()
+        seed_mapping(member, "default", own=1)
+        self.primary_server.device_info_response(device_id=1, hostname=member.name, serial="SIBLING-SERIAL")
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        assert b'value="sync_serial"' not in response.content
+
     def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
         from dcim.models import Platform
 
@@ -5213,6 +5228,24 @@ class TestDeviceConflictActionBranches:
 
         self._assert_success(response)
         assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-NEW"
+
+    def test_sync_serial_refuses_a_device_level_serial_for_a_chassis_member(self):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (target, sibling) = make_virtual_chassis_members("import-sync-serial-chassis")
+        target.serial = "MEMBER-OLD"
+        target.save()
+        seed_mapping(target, self.server_key, own=42)
+        self._register_device(42, target.name, serial="SIBLING-SERIAL")
+        request = self._request("sync_serial", target, "import-sync-serial-chassis-user")
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        target.refresh_from_db()
+        sibling.refresh_from_db()
+        assert (target.serial, sibling.serial) == ("MEMBER-OLD", "")
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     def test_sync_serial_reports_a_real_save_error(self):
         from dcim.models import Device

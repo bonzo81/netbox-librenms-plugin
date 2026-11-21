@@ -348,6 +348,13 @@ def keeps_stored_serial(stored, incoming, model) -> bool:
         return False
 
 
+def direct_serial_sync_refusal(device) -> str:
+    """Return why a device-level serial cannot be synced directly, or an empty string."""
+    if device.virtual_chassis_id is not None:
+        return "The LibreNMS device serial cannot identify this virtual chassis member."
+    return ""
+
+
 def stored_form_refusal(value, model) -> str:
     """
     Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can.

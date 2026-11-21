@@ -42,6 +42,7 @@ from netbox_librenms_plugin.serial_identity import (
     SerialRules,
     assignment_lock,
     device_assignment,
+    direct_serial_sync_refusal,
     display,
     is_sole_holder,
     lock_chassis_of,
@@ -211,8 +212,8 @@ def _write_device_serial(view, request, pk, server_key, incoming):
     old_values = []
 
     def apply(row):
-        if row.virtual_chassis_id is not None:
-            raise _WriteRefused("The LibreNMS device serial cannot identify this virtual chassis member.")
+        if refusal := direct_serial_sync_refusal(row):
+            raise _WriteRefused(refusal)
         assignment = device_assignment(row, incoming, rules=serial_rules)
         if assignment.conflict is not None:
             raise _WriteRefused(serial_conflict_text(assignment.conflict, serial, request.user))
