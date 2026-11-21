@@ -3681,9 +3681,9 @@ class TestDetectSerialConflicts:
             self._make_module(f"scope-{tag}", "SCOPE-SN1")
         page = make_device_with_module_bays("serial-conflict-scope-page", ["Slot 1", "Slot 2"])
         install_module(page, "Slot 1", "SERIAL-CONFLICT-scope-page", serial="SCOPE-SN1")
-        row = {"can_install": True, "serial": "SCOPE-SN1"}
+        row = {"can_install": True, "serial": "SCOPE-SN1", "selected_device_id": page.pk}
 
-        view._detect_serial_conflicts([row], obj=page)
+        view._detect_serial_conflicts([row])
 
         assert row.get("serial_conflict_ambiguous") is True
         assert row["can_install"] is False
@@ -7802,6 +7802,67 @@ def _make_mixed_manufacturer_chassis(tag):
         device.vc_position = position
         device.save(update_fields=["virtual_chassis", "vc_position"])
     return page, member, member_manufacturer
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target_has_holder", [False, True])
+def test_vc_install_checks_conflicts_on_the_row_target(client, live_librenms, target_has_holder):
+    from dcim.models import Module
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+    from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_module_type, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    target, other, other_maker = _make_mixed_manufacturer_chassis("install-conflict")
+    seed_mapping(target, "default", own=9312)
+    live_librenms.server.device_info_response(device_id=9312, hostname=target.name)
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=other_maker
+    )
+    off_target = install_module(other, "Carrier Bay", "OTHER-HOLDER", serial="TAG ABC123")
+    if target_has_holder:
+        for index in range(2):
+            bay = make_module_bay(other, f"Other Bay {index}")
+            install_module(other, bay.name, "OTHER-HOLDER", serial="TAG ABC123")
+        bay = make_module_bay(target, "Holder Bay")
+        install_module(target, bay.name, "TARGET-HOLDER", serial="ABC123")
+    module_type = make_module_type("TARGET-CARD", manufacturer=target.device_type.manufacturer)
+    inventory = [
+        {
+            "entPhysicalIndex": 81,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Page Bay",
+            "entPhysicalContainedIn": 0,
+            "entPhysicalParentRelPos": 1,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "ABC123",
+        }
+    ]
+    seed_inventory(DeviceModuleTableView(), target, inventory, librenms_id=9312)
+    client.force_login(make_superuser("install-conflict-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    (row,) = response.context["module_sync"]["table"].data
+    assert row["selected_device_id"] == target.pk
+    forms = [form for form in module_tab_forms(response.content.decode()).forms if "/install-module/" in form["action"]]
+    if target_has_holder:
+        assert row["serial_conflict_ambiguous"] is True
+        assert not forms
+    else:
+        assert row["serial_conflict_module"] == off_target
+        assert row["serial_conflict_visible"] is True
+        (form,) = forms
+        assert client.post(form["action"], form["fields"]).status_code == 302
+        assert Module.objects.filter(device=target, module_bay__name="Page Bay", serial="ABC123").exists()
 
 
 @pytest.mark.django_db

@@ -1,6 +1,6 @@
 import logging
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from django.contrib import messages
@@ -1396,7 +1396,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         table_data = self._group_children_under_parents(table_data)
 
         # Bulk-detect serial conflicts for rows that can be replaced/installed
-        self._detect_serial_conflicts(table_data, index_map, obj=owner, serial_rules=policy.serial_identity_rules)
+        self._detect_serial_conflicts(table_data, index_map, serial_rules=policy.serial_identity_rules)
         self._mark_grant_rows(table_data, grants_enabled=not index_ambiguous)
         if pin_to is None:
             self._mark_verify_rows(table_data)
@@ -4604,23 +4604,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             rows.append(row)
         return rows
 
-    @staticmethod
-    def _identity_scope_device_ids(obj):
-        """
-        Return the device ids an install on this page would target.
-
-        Only a match on one of these contradicts an install here. The write guard is device
-        scoped for the same reason: a vendor may reuse one serial across unrelated devices.
-        """
-        if obj is None:
-            return set()
-        scope = {obj.pk}
-        chassis = getattr(obj, "virtual_chassis", None)
-        if chassis is not None:
-            scope.update(chassis.members.values_list("pk", flat=True))
-        return scope
-
-    def _detect_serial_conflicts(self, table_data, index_map=None, obj=None, *, serial_rules=None):
+    def _detect_serial_conflicts(self, table_data, index_map=None, *, serial_rules=None):
         """
         Bulk-check whether a row's LibreNMS serial already names a Module in NetBox.
 
@@ -4633,13 +4617,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
           serial_conflict_module: the conflicting Module object (with device/module_bay loaded)
           can_move_from: True (convenience flag for templates/tests)
 
-        and ``can_install`` is cleared: a part NetBox already holds must not also be offered as a
-        fresh install. More than one match sets ``serial_conflict_ambiguous`` and picks nothing.
+        More than one match sets ``serial_conflict_ambiguous`` and picks nothing.
+        A holder on the row's target Device clears ``can_install``.
 
         Args:
             table_data (list): The table rows to check and update.
             index_map (dict | None): Inventory items by entPhysicalIndex, for ancestry checks.
-            obj (Device | None): Device whose VC membership bounds valid conflicts.
             serial_rules (SerialRules | None): The page's serial rules; None reads them.
 
         """
@@ -4664,14 +4647,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 .filter(pk__in=matched_pks, device__in=self.restricted_queryset(Device))
                 .values_list("pk", flat=True)
             )
-        scope_device_ids = self._identity_scope_device_ids(obj)
-        # Evidence revokes the install offer only where the write path also refuses it: a holder on a
-        # device in scope. Its own read, so holders elsewhere cannot fill the global read first.
-        scoped = (
-            resolve_modules([row["serial"] for row in rows], rules=serial_rules, device_ids=scope_device_ids, spare=1)
-            if scope_device_ids
-            else {}
-        )
+        serials_by_target = defaultdict(set)
+        for row in rows:
+            if row.get("can_install") and row.get("selected_device_id") is not None:
+                serials_by_target[row["selected_device_id"]].add(row["serial"])
+        target_matches = {
+            device_id: resolve_modules(serials, rules=serial_rules, device_ids=[device_id], spare=1)
+            for device_id, serials in serials_by_target.items()
+        }
 
         for row in rows:
             installed_id = row.get("installed_module_id")
@@ -4685,5 +4668,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["can_move_from"] = True
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
-            if scoped and scoped[row["serial"]].excluding(own_bay).matches:
-                row["can_install"] = False
+            if row.get("can_install"):
+                scoped = target_matches.get(row.get("selected_device_id"))
+                if scoped and scoped[row["serial"]].excluding(own_bay).matches:
+                    row["can_install"] = False
