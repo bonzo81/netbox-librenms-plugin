@@ -33,7 +33,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
     update_change,
 )
-from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
 
 
 SERVER_KEY = "default"
@@ -1384,6 +1383,8 @@ class TestConvertLegacyLibreNMSIdView:
         assert mapping_from_change_record(change, before=False) == {SERVER_KEY: 6561}
 
     def test_serial_mismatch_preserves_the_legacy_id(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
+
         device = make_device("legacy-mismatch", serial="NETBOX-SERIAL", librenms_cf=6562)
         librenms_server.device_info_response(
             device_id=6562,
@@ -1427,6 +1428,7 @@ class TestConvertLegacyLibreNMSIdView:
         self, client, librenms_server, hidden_twin
     ):
         """The serial confirms the target only when no other device holds it, also one the user cannot see."""
+        from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
         from dcim.models import Device
 
         from netbox_librenms_plugin.models import NormalizationRule
@@ -1459,6 +1461,7 @@ class TestConvertLegacyLibreNMSIdView:
         self, client, librenms_server, monkeypatch
     ):
         """The first serial check passes; a twin that appears after the Device row lock must refuse the locked check."""
+        from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
         from dcim.models import Device
 
         from netbox_librenms_plugin import transactions
@@ -1494,6 +1497,8 @@ class TestConvertLegacyLibreNMSIdView:
     @pytest.mark.parametrize("serial", [["MALFORMED-LEGACY"], {"serial": "MALFORMED-LEGACY"}, True])
     def test_a_malformed_librenms_serial_refuses_the_conversion(self, logged_in_client, librenms_server, serial):
         """A list or an object is no serial: the conversion refuses it, and the resolver never reads it."""
+        from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
+
         device = make_device("legacy-malformed-serial", serial="MALFORMED-LEGACY", librenms_cf=6569)
         librenms_server.device_info_response(device_id=6569, hostname=device.name, serial=serial)
 

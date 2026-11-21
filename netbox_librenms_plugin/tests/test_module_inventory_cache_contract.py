@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.module_grants import GrantRefusal
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
@@ -107,6 +106,7 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         ],
     )
     def test_the_reader_follows_the_table_fingerprint(self, cached_oob, link, readable):
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
         from netbox_librenms_plugin.sync_cache import cached_module_inventory
@@ -377,6 +377,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
     def test_a_written_mapping_still_returns_the_payload(self):
         """Positive control: the guard must not reject the ordinary path."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
@@ -390,6 +391,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
         """The helper must verify a write against current custom field data."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 

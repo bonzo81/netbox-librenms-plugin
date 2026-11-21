@@ -13,7 +13,6 @@ import pytest
 from django.conf import settings
 from django.test import override_settings
 
-from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
@@ -143,6 +142,7 @@ class TestPartialModuleRefreshRendersEmpty:
         ids=["transceivers", "ports", "inventory"],
     )
     def test_a_partial_refresh_renders_no_table(self, failure, expected, empty_rows_notice, librenms_server):
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
@@ -339,6 +339,7 @@ class TestSerialRuleEditStalesTheSnapshot:
         self, librenms_server, monkeypatch
     ):
         """The merge, the stamp and the signed policy read one observation of the Device."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from dcim.models import Device, DeviceType, Manufacturer
         from django.core.cache import cache
 
@@ -380,6 +381,7 @@ class TestSerialRuleEditStalesTheSnapshot:
 
     def test_a_master_type_change_after_the_policy_load_does_not_reach_the_stamp(self, librenms_server, monkeypatch):
         """A non-master owner's snapshot uses the master that the policy loaded, not one read after the load."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
         from django.core.cache import cache
 
@@ -457,6 +459,7 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
 
     @pytest.mark.parametrize("rejected", ["malformed", "other-device", "other-serial-context"])
     def test_the_module_table_reader(self, monkeypatch, rejected):
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
         from netbox_librenms_plugin.serial_identity import SerialContext
@@ -491,6 +494,7 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
         assert stored == fresh
 
     def test_the_module_writer_reader(self, monkeypatch):
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
