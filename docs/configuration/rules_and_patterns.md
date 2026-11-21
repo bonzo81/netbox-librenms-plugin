@@ -171,6 +171,10 @@ The report lists a row whose serial rules do not work, such as a rule with the r
 
 The report cannot find a row that a deleted rule produced. For example, a deleted rule turned `ID-ABC123` into `ABC123`: NetBox stores `ABC123`, LibreNMS reports `ID-ABC123`, and the current rules do not change `ABC123`. An empty report does not show that no such row exists. After you delete a serial rule, compare the serials in NetBox with LibreNMS.
 
+When you upgrade, check rules that matched only part of a serial. A rule with a valid group reference can still stop matching. For example, the pattern `^ID-([A-Z0-9]+)` with the replacement `\1` used to turn `ID-ABC123-REV` into `ABC123-REV`. To keep that result for this serial format, use the full-match pattern `^ID-([A-Z0-9]+-REV)$` with the replacement `\1`.
+
+Before you correct that rule, the report omits the stored `ABC123-REV` because the rule leaves it unchanged. After you upgrade, compare the serials in NetBox with LibreNMS to confirm they match, even when the report is empty.
+
 The plugin does not coordinate a serial rule change with serial writes that run at the same time. A rule change that commits during an import or a serial update can let two rows store serials that the new rules key to one value. A later lookup whose serial matches both rows then reports a conflict and binds neither. The plugin also does not check a device type change or a serial change that is made outside the plugin, for example in the NetBox UI.
 
 ### VLAN names
