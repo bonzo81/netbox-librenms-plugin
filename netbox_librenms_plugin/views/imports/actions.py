@@ -2398,13 +2398,17 @@ class DeviceConflictActionView(
         if action in {"link", "update", "update_serial"}:
             with atomic_with_events():
                 server_key = self.librenms_api.server_key
-                writes_serial = action != "link" and existing_model is Device
+                reported_serial = libre_device.get("serial")
+                incoming_serial = display(reported_serial)
+                updates_serial = existing_model is Device and (
+                    action == "update_serial" or (action == "update" and bool(incoming_serial))
+                )
                 serial_matched = existing_model is Device and validation.get("existing_match_type") == "serial"
                 serial_rules = SerialRules.load()
                 # A forced DeviceType change decides the identity of the stored serials too.
                 retyped = retype_scope(existing_device) if librenms_device_type and existing_model is Device else None
                 # Each Device action reads who holds the serial, also a link that writes none.
-                lock_serials = [libre_device.get("serial")] if existing_model is Device else []
+                lock_serials = [reported_serial] if existing_model is Device else []
                 # The serial identity locks come before the claim and the row lock.
                 if retyped is not None:
                     retype_lock(retyped, rules=serial_rules, serials=lock_serials)
@@ -2419,7 +2423,7 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
-                if writes_serial and (refusal := direct_serial_sync_refusal(existing_device)):
+                if updates_serial and (refusal := direct_serial_sync_refusal(existing_device)):
                     return _htmx_error_response(refusal)
                 if retyped is not None:
                     # The serial decision and the retype check both read the new type's maker under its row lock.
@@ -2466,27 +2470,24 @@ class DeviceConflictActionView(
                         fields.append("device_type")
                     if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
                         return err
-                    incoming_serial = libre_device.get("serial")
                     # Without an incoming serial the link compares nothing, so it reads no serial rule.
-                    if existing_model is Device and display(incoming_serial):
+                    if existing_model is Device and incoming_serial:
                         context = locked_context(existing_device, rules=serial_rules)
                         if context.unavailable:
                             # The link cannot tell who holds the serial, so it refuses as the other serial checks do.
                             unavailable = Resolution(ResolutionKind.UNAVAILABLE, reason=context.unavailable)
                             return _htmx_error_response(
-                                serial_conflict_text(unavailable, display(incoming_serial), request.user)
+                                serial_conflict_text(unavailable, incoming_serial, request.user)
                             )
-                        same_serial = compare(existing_device.serial, incoming_serial, context) is Comparison.SAME
+                        same_serial = compare(existing_device.serial, reported_serial, context) is Comparison.SAME
                         # The serial match selected the target, so a forced type must keep it.
                         if serial_matched and not same_serial:
                             return _htmx_error_response(_SERIAL_MATCH_LOST)
                         # A link writes no serial, but another holder of the incoming serial still refuses it.
                         if same_serial and (
-                            conflict := other_device_holder(existing_device, incoming_serial, rules=serial_rules)
+                            conflict := other_device_holder(existing_device, reported_serial, rules=serial_rules)
                         ):
-                            return _htmx_error_response(
-                                serial_conflict_text(conflict, display(incoming_serial), request.user)
-                            )
+                            return _htmx_error_response(serial_conflict_text(conflict, incoming_serial, request.user))
                     # The other Devices of a retyped chassis compare under the new type too.
                     if serial_matched and retyped and retyped.devices:
                         new_context = serial_rules.for_device_type(librenms_device_type)
@@ -2506,8 +2507,6 @@ class DeviceConflictActionView(
                 elif action == "update":
                     # Update hostname, serial, and link to LibreNMS
                     hostname = _get_hostname_for_action(request, validation, libre_device)
-                    incoming_serial = display(libre_device.get("serial"))
-                    updates_serial = writes_serial and bool(incoming_serial)
                     fields = ["name"]
                     require_serial = updates_serial and is_identity(
                         incoming_serial, serial_rules.for_device(existing_device)
@@ -2538,15 +2537,14 @@ class DeviceConflictActionView(
 
                 elif action == "update_serial":
                     # Update only the serial and link to LibreNMS
-                    incoming_serial = libre_device.get("serial")
                     fields = []
                     # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    if writes_serial:
+                    if updates_serial:
                         err, changed = _apply_conflict_checked_serial(
-                            existing_device, incoming_serial, request.user, serial_rules
+                            existing_device, reported_serial, request.user, serial_rules
                         )
                         if err:
                             return err
@@ -2559,7 +2557,7 @@ class DeviceConflictActionView(
                     ):
                         return err
                     logger.info(
-                        f"Updated serial on device '{existing_device.name}' to {display(incoming_serial)}, "
+                        f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
                         f"linked to LibreNMS ID {librenms_id}"
                     )
 
