@@ -377,6 +377,10 @@ class SerialGroups:
         key = "" if self.context.unavailable else self.context._key(value)
         return tuple(self._groups.get(key, ())) if key else ()
 
+    def contains(self, value) -> bool:
+        """Return whether the group has an item with the identity of *value*."""
+        return not self.context.unavailable and self.context._key(value) in self._groups
+
     def __iter__(self):
         return (tuple(items) for items in self._groups.values())
 

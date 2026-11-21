@@ -2380,7 +2380,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     existing["_librenms_ifdescr"] = ifdescr
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
-                if inv_serials.find(serial):
+                if inv_serials.contains(serial):
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
                 if ifname:

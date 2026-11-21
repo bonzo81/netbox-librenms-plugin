@@ -1509,10 +1509,13 @@ class TestPostInventoryRefresh:
         assert optic["entPhysicalModelName"] == "SFP-10G-LR"
         assert optic["entPhysicalSerialNum"] == "TAG OPTIC-7"
 
-    def test_post_deduplicates_an_optic_with_the_device_manufacturer_serial_rules(self, librenms_server, server_keys):
+    def test_post_deduplicates_optics_with_the_device_manufacturer_serial_rules(self, librenms_server, server_keys):
+        import sys
+
         from django.core.cache import cache
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialGroups
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -1524,37 +1527,55 @@ class TestPostInventoryRefresh:
             match_pattern=r"^TAG (.+)$",
             replacement=r"\1",
         )
+        entity_indexes = range(300, 332)
+        port_ids = range(42, 46)
         inventory = [
             {
-                "entPhysicalIndex": 300,
+                "entPhysicalIndex": index,
                 "entPhysicalClass": "port",
-                "entPhysicalName": "Existing optic",
+                "entPhysicalName": f"Existing optic {index}",
                 "entPhysicalModelName": "SFP-10G-LR",
                 "entPhysicalSerialNum": "TAG OPTIC-7",
                 "entPhysicalContainedIn": 0,
             }
+            for index in entity_indexes
         ]
         self._register_successful_refresh(
             librenms_server,
             inventory=inventory,
             transceivers=[
                 {
-                    "entity_physical_index": 400,
-                    "port_id": 42,
+                    "entity_physical_index": 400 + port_id,
+                    "port_id": port_id,
                     "model": "SFP-10G-LR",
                     "serial": "OPTIC-7",
                     "type": "SFP+",
                 }
+                for port_id in port_ids
             ],
-            ports=[{"port_id": 42, "ifName": "xe-0/0/0", "ifDescr": "uplink"}],
+            ports=[{"port_id": port_id, "ifName": f"xe-0/0/{port_id}", "ifIndex": port_id} for port_id in port_ids],
         )
         view = DeviceModuleTableView()
+        find_code = SerialGroups.find.__code__
+        find_calls = 0
 
-        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+        def profile(frame, event, _arg):
+            nonlocal find_calls
+            if event == "call" and frame.f_code is find_code:
+                find_calls += 1
+
+        request = make_request("post", {"server_key": server_key})
+        previous_profiler = sys.getprofile()
+        sys.setprofile(profile)
+        try:
+            response = post(view, request, pk=device.pk)
+        finally:
+            sys.setprofile(previous_profiler)
 
         assert response.status_code == 200
         snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
-        assert [item["entPhysicalIndex"] for item in snapshot["inventory"]] == [300]
+        assert [item["entPhysicalIndex"] for item in snapshot["inventory"]] == list(entity_indexes)
+        assert find_calls == 0
 
     @pytest.mark.parametrize("existing_entity", [False, True], ids=["synthetic", "existing-entity"])
     def test_post_keeps_both_optics_when_the_serial_rules_remove_their_identities(
