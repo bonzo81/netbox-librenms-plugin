@@ -179,7 +179,7 @@ def test_transient_vc_detection_failure_fails_closed_without_poisoning_retry():
     )
     retried = get_virtual_chassis_data(api, failed_id)
 
-    assert unresolved == [failed_id]
+    assert list(unresolved) == [failed_id]
     assert retried["is_stack"] is True
     assert api.root_attempts[failed_id] == 2
 

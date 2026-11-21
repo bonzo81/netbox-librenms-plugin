@@ -115,7 +115,7 @@ class TestBulkPrecheckDecision:
     def test_clean_batch_keeps_every_device_and_vm(self):
         from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
 
-        outcome = classify_bulk_precheck([], [], [1, 2], {3: {"cluster_id": 9}})
+        outcome = classify_bulk_precheck([], {}, [1, 2], {3: {"cluster_id": 9}})
 
         assert outcome.blocked is False
         assert outcome.importable_device_ids == [1, 2]
@@ -124,9 +124,9 @@ class TestBulkPrecheckDecision:
         assert outcome.block_message == ""
 
     def test_unresolved_rows_are_skipped_without_blocking_the_rest(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
+        from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE, classify_bulk_precheck
 
-        outcome = classify_bulk_precheck([], [2, 4], [1, 2, 3], {4: {}, 5: {}})
+        outcome = classify_bulk_precheck([], dict.fromkeys([2, 4], LIBRENMS_ROW_UNREADABLE), [1, 2, 3], {4: {}, 5: {}})
 
         assert outcome.blocked is False
         assert outcome.skipped_ids == [2, 4]
@@ -135,7 +135,7 @@ class TestBulkPrecheckDecision:
         assert "id(s): 2, 4" in outcome.skip_message
 
     def test_collision_blocks_the_whole_batch_and_names_visible_targets(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
+        from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE, classify_bulk_precheck
 
         collisions = [
             {
@@ -145,7 +145,7 @@ class TestBulkPrecheckDecision:
             }
         ]
 
-        outcome = classify_bulk_precheck(collisions, [3], [1, 2, 3], {})
+        outcome = classify_bulk_precheck(collisions, {3: LIBRENMS_ROW_UNREADABLE}, [1, 2, 3], {})
 
         assert outcome.blocked is True
         assert outcome.importable_device_ids == [1, 2]
@@ -157,7 +157,7 @@ class TestBulkPrecheckDecision:
 
         outcome = classify_bulk_precheck(
             [{"nb_device_pk": None, "target_visible": False, "librenms_devices": []}],
-            [],
+            {},
             [1],
             {},
         )
@@ -184,7 +184,7 @@ class TestCollisionDetection:
             libre_devices_cache=shared_cache,
         )
 
-        assert unresolved == []
+        assert unresolved == {}
         assert len(collisions) == 1
         assert collisions[0]["nb_device_pk"] == target.pk
         assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {41, 42}
@@ -211,7 +211,7 @@ class TestCollisionDetection:
         collisions, unresolved = detect_collisions_for_device_ids([51, 52], live_librenms.api)
 
         assert collisions == []
-        assert unresolved == []
+        assert unresolved == {}
 
     def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(self, live_librenms):
         """The legacy ID names the Device, so another maker's broken rule must not drop the row from the grouping."""
@@ -227,7 +227,7 @@ class TestCollisionDetection:
 
         collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
 
-        assert unresolved == []
+        assert unresolved == {}
         assert [collision["nb_device_pk"] for collision in collisions] == [target.pk]
         assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {53, 54}
 
@@ -237,7 +237,7 @@ class TestCollisionDetection:
         collisions, unresolved = detect_collisions_for_device_ids([404], live_librenms.api)
 
         assert collisions == []
-        assert unresolved == [404]
+        assert list(unresolved) == [404]
 
     def test_mis_keyed_cached_row_fails_closed_without_http(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
@@ -249,7 +249,7 @@ class TestCollisionDetection:
         )
 
         assert collisions == []
-        assert unresolved == [61]
+        assert list(unresolved) == [61]
         assert live_librenms.server.requests == []
 
     def test_fetched_identity_mismatch_is_not_written_to_shared_cache(self, live_librenms):
@@ -268,7 +268,7 @@ class TestCollisionDetection:
         )
 
         assert collisions == []
-        assert unresolved == [71]
+        assert list(unresolved) == [71]
         assert shared_cache == {}
 
 

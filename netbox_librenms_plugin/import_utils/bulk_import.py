@@ -75,6 +75,9 @@ from netbox_librenms_plugin.server_mappings import (
 
 logger = logging.getLogger(__name__)
 
+LIBRENMS_ROW_UNREADABLE = "LibreNMS data couldn't be read to verify the row"
+NETBOX_SERIAL_UNVERIFIED = "NetBox could not verify the serial"
+
 # Stable fragment of the ambiguous-librenms_id blocker message. Shared by the writer
 # (the AmbiguousLibreNMSIdError handler) and the cleaner (the pre-lookup reset in
 # _refresh_existing_device) so a resolved duplicate's stale message is reliably removed
@@ -137,7 +140,7 @@ def detect_collisions_for_device_ids(
     job=None,
     vm_device_ids=None,
     user=None,
-) -> tuple[list[dict], list]:
+) -> tuple[list[dict], dict[int, str]]:
     """
     Detect NetBox object collisions for a batch, and the rows that cannot be checked.
 
@@ -170,10 +173,7 @@ def detect_collisions_for_device_ids(
             the user's view scope are redacted before the result reaches a template or job log.
 
     Returns:
-        tuple[list[dict], list]: ``(collisions, unresolved_ids)``. ``collisions`` contains the
-            groups from :func:`detect_bulk_collisions`. ``unresolved_ids`` contains ids that could
-            not be validated or whose virtual chassis inventory could not be assessed, plus every
-            unscanned id after cancellation.
+        tuple: Collision groups and safe reasons keyed by each unresolved row ID.
 
     """
     use_sysname = (sync_options or {}).get("use_sysname", True)
@@ -184,19 +184,15 @@ def detect_collisions_for_device_ids(
     devices_cache = libre_devices_cache if libre_devices_cache is not None else {}
     vm_id_set = set(vm_device_ids or ())
     devices = []
-    unresolved_ids = []
+    unresolved = {}
     device_ids = list(device_ids)
     serial_rules = SerialRules.load()
     for idx, device_id in enumerate(device_ids, start=1):
-        # Same cancellation cadence as the import loops below (first id, then every 5th):
-        # a large batch with many cache misses is one LibreNMS call per id, so a cancelled
-        # job must not sit through the whole scan. The unscanned remainder goes to
-        # unresolved_ids — those ids were NOT collision-checked, and the caller's existing
-        # unresolved gate already fails closed on them, so nothing imports unchecked.
+        # Mark the unscanned rows unresolved so the caller can stop the batch.
         if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
             if getattr(job, "logger", None):
                 job.logger.warning(f"Collision pre-check stopped by cancellation at id {idx} of {len(device_ids)}")
-            unresolved_ids.extend(device_ids[idx - 1 :])
+            unresolved.update(dict.fromkeys(device_ids[idx - 1 :], LIBRENMS_ROW_UNREADABLE))
             break
         libre_device = devices_cache.get(device_id)
         just_fetched = False
@@ -215,12 +211,12 @@ def detect_collisions_for_device_ids(
                     job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {detail}")
                 else:
                     logger.warning("Collision pre-check couldn't fetch device %s: %s", device_id, exc)
-                unresolved_ids.append(device_id)
+                unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
                 continue
             if not success or not isinstance(libre_device, dict):
                 # Couldn't fetch device info → can't collision-check this id. Record it so the
                 # caller blocks it instead of importing it unchecked (fail closed).
-                unresolved_ids.append(device_id)
+                unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
                 continue
             just_fetched = True
         # Fail closed on a bad cached payload too: a negatively-cached lookup (an empty dict or a
@@ -228,7 +224,7 @@ def detect_collisions_for_device_ids(
         # would otherwise reach validation as a brand-new device and make the collision gate report
         # a clean scan for an id it never actually verified.
         if not row_identity_matches(libre_device, device_id):
-            unresolved_ids.append(device_id)
+            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
             continue
         if just_fetched:
             # Persist the freshly fetched row into the shared cache — but only now that its
@@ -264,16 +260,15 @@ def detect_collisions_for_device_ids(
             # closed: record it as unresolved rather than collision-check it on incomplete data
             # (mirrors the get_device_info miss above). The prefix is a shared constant so this
             # guard can't silently drift from the producer's wording.
-            unresolved_ids.append(device_id)
+            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
             continue
         if _stopped_at_unavailable_serial(validation):
-            # An Unavailable serial lookup gives no identity to collision-check, so the row stays unresolved.
-            unresolved_ids.append(device_id)
+            unresolved[device_id] = NETBOX_SERIAL_UNVERIFIED
             continue
         if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, serial_rules=serial_rules).get(
             "detection_failed"
         ):
-            unresolved_ids.append(device_id)
+            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
         devices.append(
             {
                 "device_id": device_id,
@@ -284,7 +279,7 @@ def detect_collisions_for_device_ids(
     collisions = detect_bulk_collisions(devices)
     if user is not None:
         collisions = scope_bulk_collisions(collisions, user)
-    return collisions, unresolved_ids
+    return collisions, unresolved
 
 
 @dataclass
@@ -335,7 +330,7 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
 
     Args:
         collisions: Collision groups from :func:`detect_bulk_collisions`.
-        unresolved: Ids that couldn't be collision-checked (fetch/validation miss).
+        unresolved: Safe reasons keyed by the IDs that could not be checked.
         device_ids: The batch's device-import ids.
         vm_imports: The batch's VM imports mapping (``{device_id: manual_mappings}``).
 
@@ -349,13 +344,16 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
 
     skip_message = ""
     if unresolved and not collisions:
-        ids = ", ".join(str(d) for d in unresolved)
-        skip_message = (
-            f"Skipped {len(unresolved)} selected row(s) (id(s): {ids}): their LibreNMS data "
-            f"couldn't be read to verify them, so they were not imported. The remaining "
-            f"selected rows continue through normal import checks; review the final result for "
-            f"their outcome, then retry the skipped rows individually."
+        ids_by_reason = {}
+        for device_id, reason in unresolved.items():
+            ids_by_reason.setdefault(reason, []).append(str(device_id))
+        skip_message = " ".join(
+            f"Skipped {len(ids)} selected row(s) (id(s): {', '.join(ids)}): {reason}, so they were not imported."
+            for reason, ids in ids_by_reason.items()
         )
+        skip_message += " The remaining selected rows continue through normal import checks. Review the final result."
+        if LIBRENMS_ROW_UNREADABLE in ids_by_reason:
+            skip_message += " Retry rows with unreadable LibreNMS data individually."
 
     block_message = ""
     if collisions:

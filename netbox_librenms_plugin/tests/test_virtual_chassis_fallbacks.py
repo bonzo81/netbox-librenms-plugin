@@ -357,7 +357,7 @@ class TestDetectVirtualChassisFailures:
 
         _collisions, unresolved = detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=rows)
 
-        assert unresolved == [7501]
+        assert list(unresolved) == [7501]
         assert vc_module.get_virtual_chassis_data(api, 7502)["is_stack"] is True
 
     def test_a_failed_member_lookup_reports_detection_failure(self, settings, librenms_server, caplog):

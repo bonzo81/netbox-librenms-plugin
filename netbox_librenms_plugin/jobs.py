@@ -342,8 +342,7 @@ class ImportDevicesJob(JobRunner):
                     if skipped_device_ids:
                         self.logger.warning(precheck_outcome.skip_message)
                         device_result.setdefault("failed", []).extend(
-                            {"device_id": device_id, "error": precheck_outcome.skip_message}
-                            for device_id in skipped_device_ids
+                            {"device_id": device_id, "error": unresolved[device_id]} for device_id in skipped_device_ids
                         )
 
         # Import VMs
@@ -356,7 +355,7 @@ class ImportDevicesJob(JobRunner):
                 vm_result["failed"] = [{"device_id": device_id, "error": batch_blocked_msg} for device_id in vm_imports]
             else:
                 # Apply the same skip set to VMs: import the collision-checked VM rows, skip the
-                # unresolved ones (surfaced as failures with the shared message).
+                # unresolved ones (surfaced as failures with their reasons).
                 importable_vm_imports = precheck_outcome.importable_vm_imports if precheck_outcome else vm_imports
                 skipped_vm_ids = [d for d in vm_imports if d in skipped_id_set] if precheck_outcome else []
                 if importable_vm_imports:
@@ -369,7 +368,7 @@ class ImportDevicesJob(JobRunner):
                 if skipped_vm_ids:
                     self.logger.warning(precheck_outcome.skip_message)
                     vm_result.setdefault("failed", []).extend(
-                        {"device_id": device_id, "error": precheck_outcome.skip_message} for device_id in skipped_vm_ids
+                        {"device_id": device_id, "error": unresolved[device_id]} for device_id in skipped_vm_ids
                     )
 
         # Combine results — partition device_result successes by model type since

@@ -200,7 +200,7 @@ class TestCollisionScanCancellation:
         )
 
         assert collisions == []
-        assert unresolved == [201, 202, 203]
+        assert list(unresolved) == [201, 202, 203]
         assert live_librenms.server.requests == []
 
     def test_a_mid_scan_stop_marks_every_unscanned_id_unresolved(self, live_librenms, rq_job):
@@ -219,7 +219,7 @@ class TestCollisionScanCancellation:
         )
 
         assert collisions == []
-        assert unresolved == device_ids[4:]
+        assert list(unresolved) == device_ids[4:]
         # Four scanned rows, each costing a device lookup plus the stack-identity inventory read.
         # The remaining three ids are never requested, which is what proves the scan stopped.
         assert len(live_librenms.server.requests) == 8
@@ -251,7 +251,7 @@ class TestCollisionScanFetchFailure:
         )
 
         assert collisions == []
-        assert unresolved == [301]
+        assert list(unresolved) == [301]
 
     def test_a_cache_backend_failure_mid_lookup_marks_the_row_unresolved(self, live_librenms, caplog):
         """get_device_info writes its result to Redis; a real Redis outage raises out of the client."""
@@ -267,7 +267,7 @@ class TestCollisionScanFetchFailure:
             collisions, unresolved = detect_collisions_for_device_ids([302], live_librenms.api, libre_devices_cache={})
 
         assert collisions == []
-        assert unresolved == [302]
+        assert list(unresolved) == [302]
         assert any(
             "Collision pre-check couldn't fetch device 302" in message
             for message in _messages_from(caplog, _MODULE_LOGGER)
@@ -288,7 +288,7 @@ class TestCollisionScanFetchFailure:
                 [303], live_librenms.api, libre_devices_cache={}, job=job
             )
 
-        assert unresolved == [303]
+        assert list(unresolved) == [303]
         assert any(
             "Collision pre-check couldn't fetch device 303" in message
             for message in _messages_from(caplog, "collision-scan-job")

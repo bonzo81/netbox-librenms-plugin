@@ -2,7 +2,7 @@
 
 import pytest
 
-from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
+from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE, classify_bulk_precheck
 from netbox_librenms_plugin.import_utils.collisions import detect_bulk_collisions
 
 
@@ -448,7 +448,7 @@ def test_non_string_merge_model_name_is_normalized():
 
 def test_classify_clean_batch_imports_everything():
     """No collisions and no unresolved rows → nothing blocked or skipped; the whole batch is importable."""
-    outcome = classify_bulk_precheck([], [], device_ids=[1, 2], vm_imports={3: {"cluster_id": 9}})
+    outcome = classify_bulk_precheck([], {}, device_ids=[1, 2], vm_imports={3: {"cluster_id": 9}})
     assert outcome.blocked is False
     assert outcome.block_message == ""
     assert outcome.skipped_ids == []
@@ -459,7 +459,9 @@ def test_classify_clean_batch_imports_everything():
 
 def test_classify_unresolved_rows_are_skipped_not_blocked():
     """Unresolved rows are excluded from the importable sets (device AND VM) and surfaced via skip_message — NOT a whole-batch block."""
-    outcome = classify_bulk_precheck([], [2, 3], device_ids=[1, 2], vm_imports={3: {"cluster_id": 9}, 4: {}})
+    outcome = classify_bulk_precheck(
+        [], dict.fromkeys([2, 3], LIBRENMS_ROW_UNREADABLE), device_ids=[1, 2], vm_imports={3: {"cluster_id": 9}, 4: {}}
+    )
     assert outcome.blocked is False
     assert outcome.skipped_ids == [2, 3]
     # id 2 (a device) and id 3 (a VM) drop out; the rest import.
@@ -468,7 +470,7 @@ def test_classify_unresolved_rows_are_skipped_not_blocked():
     # Object-neutral wording naming the skipped ids, never "device(s)".
     assert "Skipped 2 selected row(s)" in outcome.skip_message
     assert "id(s): 2, 3" in outcome.skip_message
-    assert "couldn't be read to verify them" in outcome.skip_message
+    assert LIBRENMS_ROW_UNREADABLE in outcome.skip_message
     assert "device(s)" not in outcome.skip_message
 
 
@@ -476,7 +478,7 @@ def test_classify_collisions_block_whole_batch():
     """A genuine collision blocks the whole batch: blocked=True, block_message names the NetBox object pk(s)."""
     outcome = classify_bulk_precheck(
         [{"nb_device_pk": 7, "target_visible": True}],
-        [],
+        {},
         device_ids=[1, 2],
         vm_imports={},
     )
@@ -490,7 +492,7 @@ def test_classify_collisions_block_whole_batch():
 
 def test_classify_collision_without_visibility_metadata_omits_pk():
     """An unscoped collision payload must not claim that permission scoping hid its target."""
-    outcome = classify_bulk_precheck([{"nb_device_pk": 77}], [], device_ids=[1, 2], vm_imports={})
+    outcome = classify_bulk_precheck([{"nb_device_pk": 77}], {}, device_ids=[1, 2], vm_imports={})
 
     assert outcome.blocked is True
     assert "Visible pk(s)" not in outcome.block_message
@@ -502,7 +504,7 @@ def test_classify_blocked_batch_omits_imported_rows_message():
     """A collision blocks every row, so unresolved-row copy must not claim that rows imported."""
     outcome = classify_bulk_precheck(
         [{"nb_device_pk": 7}],
-        [2],
+        {2: LIBRENMS_ROW_UNREADABLE},
         device_ids=[1, 2],
         vm_imports={},
     )

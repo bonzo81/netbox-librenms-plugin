@@ -837,7 +837,11 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
 @pytest.mark.django_db
 def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved(live_librenms):
     """The scan cannot check a serial whose lookup is Unavailable, so the precheck must skip that row."""
-    from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck, detect_collisions_for_device_ids
+    from netbox_librenms_plugin.import_utils.bulk_import import (
+        NETBOX_SERIAL_UNVERIFIED,
+        classify_bulk_precheck,
+        detect_collisions_for_device_ids,
+    )
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
     _stray_chassis_member("scan-stray", "STRAY-SCAN-1")
@@ -855,9 +859,68 @@ def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved(l
 
     collisions, unresolved = detect_collisions_for_device_ids([96401], live_librenms.api, libre_devices_cache=rows)
 
-    assert (collisions, unresolved) == ([], [96401])
+    assert (collisions, unresolved) == ([], {96401: NETBOX_SERIAL_UNVERIFIED})
     assert classify_bulk_precheck(collisions, unresolved, [96401], {}).importable_device_ids == []
     assert not live_librenms.server.requests
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("background", [False, True], ids=["view", "job"])
+def test_bulk_import_reports_the_unverified_serial_without_netbox_details(client, live_librenms, caplog, background):
+    from core.models import Job
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_SERIAL_UNVERIFIED
+    from netbox_librenms_plugin.jobs import ImportDevicesJob
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+    blocked_id, ready_id = 96402, 96403
+    member = _stray_chassis_member("private-precheck", "STRAY-PRECHECK")
+    _, blocked_row = _importable_row(live_librenms, blocked_id, "unverified-serial")
+    blocked_row["serial"] = member.serial
+    live_librenms.server.register(f"/api/v0/devices/{blocked_id}", {"status": "ok", "devices": [blocked_row]})
+    prerequisites, ready_row = _importable_row(live_librenms, ready_id, "checked-serial")
+    role_id = prerequisites["device_role_id"]
+    user = make_superuser("unverified-serial-user")
+
+    if background:
+        job = Job.objects.create(name="Bulk serial precheck", user=user, job_id=uuid4(), data={})
+        ImportDevicesJob(job).run(
+            request=queued_request(user),
+            import_plans=[
+                {"source_device_id": device_id, "object_type": "device", "role_id": role_id, "rack_id": None}
+                for device_id in (blocked_id, ready_id)
+            ],
+            server_key="default",
+            libre_devices_cache={},
+        )
+        job.refresh_from_db()
+        (error,) = job.data["errors"]
+        assert error["device_id"] == blocked_id
+        assert NETBOX_SERIAL_UNVERIFIED in error["error"]
+        warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    else:
+        client.force_login(user)
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+            {
+                "server_key": "default",
+                "select": [str(blocked_id), str(ready_id)],
+                f"role_{blocked_id}": str(role_id),
+                f"role_{ready_id}": str(role_id),
+            },
+        )
+        assert response.status_code == 302
+        warnings = [message for level, message in messages_on(response.wsgi_request) if level == "warning"]
+
+    assert not Device.objects.filter(name=blocked_row["hostname"]).exists()
+    assert stored_mapping_for_test(Device.objects.get(name=ready_row["hostname"])) == {"default": ready_id}
+    (warning,) = (message for message in warnings if str(blocked_id) in message)
+    assert NETBOX_SERIAL_UNVERIFIED in warning
+    chassis = member.virtual_chassis
+    chassis.refresh_from_db()
+    assert all(name not in warning for name in (member.name, chassis.name, chassis.master.name))
 
 
 @pytest.mark.django_db
@@ -884,7 +947,7 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_libre
             [96211, 96212], live_librenms.api, libre_devices_cache=rows, sync_options={"use_sysname": True}
         )
 
-    assert (collisions, unresolved) == ([], [])
+    assert (collisions, unresolved) == ([], {})
     assert [query["sql"] for query in captured.captured_queries].count(serial_only_query) == 1
     assert [
         (request["path"], request["query"])
@@ -921,7 +984,7 @@ def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(
         )
 
     assert failed
-    assert (collisions, unresolved) == ([], [first_id])
+    assert (collisions, list(unresolved)) == ([], [first_id])
     assert {request["path"] for request in live_librenms.server.requests} == {
         f"/api/v0/devices/{second_id}",
         f"/api/v0/inventory/{second_id}",
@@ -962,7 +1025,7 @@ def test_collision_precheck_skips_import_prerequisite_queries():
         )
 
     assert collisions == []
-    assert unresolved == []
+    assert unresolved == {}
     import_prerequisite_tables = {
         "dcim_devicetype",
         "dcim_devicerole",
