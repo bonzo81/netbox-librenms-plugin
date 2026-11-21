@@ -3941,6 +3941,67 @@ class TestDeviceConflictActionBranches:
         assert reloaded.device_type_id == reported_type.pk
         assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("action", ["update", "update_serial"])
+    @pytest.mark.parametrize("outcome", ["absent", "exact", "new"])
+    def test_a_forced_serial_and_link_action_requires_an_admitted_serial(self, client, action, outcome):
+        from dcim.models import DeviceType, Manufacturer
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        serial = "TAG-AB" if outcome == "absent" else "TAG-ABC"
+        old_serial = serial if outcome == "exact" else "OLD123"
+        target = make_device("forced-serial-target", serial=old_serial)
+        old_type_id = target.device_type_id
+        manufacturer = Manufacturer.objects.create(name="Forced serial maker", slug="forced-serial-maker")
+        reported_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Forced serial type",
+            slug="forced-serial-type",
+            part_number="FORCED-SERIAL-TYPE",
+        )
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^TAG-(.+)$", replacement=r"\1", manufacturer=manufacturer
+        )
+        self._register_device(42, target.name, serial=serial, hardware=reported_type.part_number)
+        client.force_login(make_superuser("forced-serial-user"))
+        server = {"server_key": self.server_key}
+        route = {"device_id": 42}
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs=route),
+            server,
+            HTTP_HX_REQUEST="true",
+        )
+        assert details.status_code == 200
+        validation = details.context["validation"]
+        assert validation["existing_device"] == target
+        assert validation["device_type_mismatch"]
+        if outcome != "exact":
+            assert validation["serial_action"] == "update_serial"
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs=route),
+            {**server, "action": action, "existing_device_id": target.pk, "force": "on"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        target.refresh_from_db()
+        if outcome == "absent":
+            assert response.headers.get("HX-Reswap") == "none"
+            assert response.headers.get("HX-Trigger") != "closeModal"
+            assert (target.serial, target.device_type_id, stored_mapping_for_test(target)) == (
+                old_serial,
+                old_type_id,
+                None,
+            )
+        else:
+            assert response.headers.get("HX-Trigger") == "closeModal"
+            assert (target.serial, target.device_type_id, stored_mapping_for_test(target)) == (
+                serial,
+                reported_type.pk,
+                {self.server_key: 42},
+            )
+
     @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
     @pytest.mark.parametrize("action", ["link", "update", "update_serial"])
     def test_a_serial_match_that_no_longer_holds_under_the_lock_refuses_the_action(self, action, change):

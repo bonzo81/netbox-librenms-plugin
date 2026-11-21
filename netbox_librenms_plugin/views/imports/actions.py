@@ -619,7 +619,9 @@ def _save_retyped_device(device, device_type, request) -> HttpResponse | None:
         return _save_device(device, update_fields=["device_type"], request=request)
 
 
-def _apply_conflict_checked_serial(device, incoming_serial, user, serial_rules) -> tuple[HttpResponse | None, bool]:
+def _apply_conflict_checked_serial(
+    device, incoming_serial, user, serial_rules, *, require_serial: bool = True
+) -> tuple[HttpResponse | None, bool]:
     """
     Set *incoming_serial* on the locked *device* in memory, or report why the serial is not written.
 
@@ -638,9 +640,10 @@ def _apply_conflict_checked_serial(device, incoming_serial, user, serial_rules) 
         user: The requesting user. The conflict lookup is unrestricted (a duplicate the user cannot
             see still blocks the write), so only their view scope decides whether it is named.
         serial_rules: The serial rules that the caller's transaction read.
+        require_serial: Refuse the action if the incoming serial has no identity.
 
     Returns:
-        tuple: ``(error response, False)`` on a conflict, else ``(None, whether device.serial changed)``.
+        tuple: ``(error response, False)`` on refusal, else ``(None, whether device.serial changed)``.
 
     """
     serial = display(incoming_serial)
@@ -649,6 +652,8 @@ def _apply_conflict_checked_serial(device, incoming_serial, user, serial_rules) 
     except ValidationError as exc:
         # The LibreNMS serial does not fit the field; the writer refuses rather than cut it.
         return _htmx_error_response(f"Validation error: {exception_text_for(exc, type(device), user)}"), False
+    if assignment.absent and require_serial:
+        return _htmx_error_response("No valid serial from LibreNMS"), False
     conflict = assignment.conflict
     if conflict is None:
         if assignment.value is not None:
@@ -2391,13 +2396,16 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     incoming_serial = libre_device.get("serial")
                     fields = ["name"]
+                    require_serial = writes_serial and is_identity(
+                        incoming_serial, serial_rules.for_device(existing_device)
+                    )
                     # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
                     if writes_serial:
                         err, changed = _apply_conflict_checked_serial(
-                            existing_device, incoming_serial, request.user, serial_rules
+                            existing_device, incoming_serial, request.user, serial_rules, require_serial=require_serial
                         )
                         if err:
                             return err
