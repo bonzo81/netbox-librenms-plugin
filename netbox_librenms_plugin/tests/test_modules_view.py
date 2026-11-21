@@ -3717,11 +3717,13 @@ class TestDetectSerialConflicts:
         page = make_device_with_module_bays("serial-conflict-scope-page", ["Slot 1", "Slot 2"])
         install_module(page, "Slot 1", "SERIAL-CONFLICT-scope-page", serial="SCOPE-SN1")
         row = {"can_install": True, "serial": "SCOPE-SN1", "selected_device_id": page.pk}
+        unassigned = {"can_install": True, "serial": "SCOPE-SN2", "selected_device_id": page.pk}
 
-        view._detect_serial_conflicts([row])
+        view._detect_serial_conflicts([row, unassigned])
 
         assert row.get("serial_conflict_ambiguous") is True
         assert row["can_install"] is False
+        assert unassigned["can_install"] is True
 
     def test_can_install_no_serial_not_flagged(self, django_assert_num_queries):
         """A can_install row with no serial is not checked for conflicts."""
@@ -7634,6 +7636,63 @@ def test_a_chassis_page_without_member_serials_offers_no_module_action(client, s
         # The control: with a usable master link the same row offers its install.
         (row,) = list(table.data)
         assert row["can_install"] is True
+
+
+@pytest.mark.django_db
+def test_the_modules_tab_checks_missing_serials_once_across_members(client, settings, librenms_server):
+    from django.core.cache import cache
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        bind_librenms_server,
+        make_module_bay,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis_members,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    bind_librenms_server(settings, librenms_server, server_key="default")
+    _, members = make_virtual_chassis_members("module-missing-serial", count=3)
+    owner = members[0]
+    module_type = make_module_type("MISSING-SERIAL-CARD", manufacturer=owner.device_type.manufacturer)
+    inventory = []
+    for member in members:
+        position = member.vc_position
+        slot = f"Slot {position}"
+        make_module_bay(member, slot)
+        inventory.append(
+            {
+                "entPhysicalIndex": position,
+                "entPhysicalClass": "module",
+                "entPhysicalName": slot,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalParentRelPos": position,
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": f"UNASSIGNED-CARD-{position}",
+            }
+        )
+    librenms_id = 9358
+    librenms_server.inventory_response(librenms_id, inventory)
+    payload = trusted_module_inventory_payload(owner, inventory, librenms_id=librenms_id)
+    cache.set(DeviceModuleTableView().get_cache_key(owner, "inventory", server_key="default"), payload, 300)
+    cache.set(f"librenms_device_info_default_{librenms_id}", (True, {"device_id": librenms_id}), 300)
+    client.force_login(make_superuser("missing-module-serial-user"))
+
+    with CaptureQueriesContext(connection) as queries:
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
+            {"tab": "modules", "server_key": "default"},
+        )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    assert {row["selected_device_id"] for row in rows if row["can_install"]} == {member.pk for member in members}
+    serial_reads = [query for query in queries if 'BTRIM("dcim_module"."serial"' in query["sql"]]
+    assert len(serial_reads) == 1
 
 
 @pytest.mark.django_db

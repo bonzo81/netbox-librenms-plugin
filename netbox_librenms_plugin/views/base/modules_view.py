@@ -4649,18 +4649,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
         serials_by_target = defaultdict(list)
         for row in rows:
-            if row.get("can_install") and row.get("selected_device_id") is not None:
-                serials_by_target[row["selected_device_id"]].append(row["serial"])
+            serial = row["serial"]
+            if (
+                row.get("can_install")
+                and row.get("selected_device_id") is not None
+                and resolutions[serial].kind is not ResolutionKind.NO_MATCH
+            ):
+                serials_by_target[row["selected_device_id"]].append(serial)
         target_matches = {
             device_id: resolve_modules(serials, rules=serial_rules, device_ids=[device_id], spare=1)
             for device_id, serials in serials_by_target.items()
         }
 
         for row in rows:
+            serial = row["serial"]
+            resolution = resolutions[serial]
             installed_id = row.get("installed_module_id")
             # Exclude the module already in the current bay
             own_bay = [installed_id] if installed_id else ()
-            found = resolutions[row["serial"]].excluding(own_bay)
+            found = resolution.excluding(own_bay)
             if found.kind is ResolutionKind.UNIQUE:
                 conflict = found.object
                 row["serial_conflict_module"] = conflict
@@ -4668,7 +4675,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["can_move_from"] = True
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
-            if row.get("can_install"):
+            if row.get("can_install") and resolution.kind is not ResolutionKind.NO_MATCH:
                 scoped = target_matches.get(row.get("selected_device_id"))
-                if scoped and scoped[row["serial"]].excluding(own_bay).matches:
+                if scoped and scoped[serial].excluding(own_bay).matches:
                     row["can_install"] = False
