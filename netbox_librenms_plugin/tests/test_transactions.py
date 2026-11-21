@@ -624,6 +624,7 @@ def test_a_direct_save_refreshes_an_already_frozen_event_in_the_same_queue():
             _write_site(site, "second")
 
         event = _the_one_event(site)
+        assert "data" in event
         assert event["data"]["description"] == "second"
 
 
