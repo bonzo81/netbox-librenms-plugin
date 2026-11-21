@@ -8402,6 +8402,9 @@ def test_the_modules_tab_checks_complete_serials_once_across_members(client, set
                 "entPhysicalSerialNum": serial,
             }
         )
+    inventory = stack_inventory(
+        inventory, members, on_member={member.vc_position: member.vc_position for member in members}
+    )
     librenms_id = 9358
     librenms_server.inventory_response(librenms_id, inventory)
     payload = trusted_module_inventory_payload(owner, inventory, librenms_id=librenms_id)
