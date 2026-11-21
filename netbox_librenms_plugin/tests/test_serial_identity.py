@@ -266,17 +266,22 @@ class TestLookup:
         assert resolve_device("ABC-1").object == with_rule
         assert resolve_device("DEF-1").kind is ResolutionKind.NO_MATCH
 
-    def test_a_chassis_member_uses_the_rules_of_its_masters_manufacturer(self):
+    @pytest.mark.parametrize(
+        ("stored", "incoming"),
+        [("XMEMBER-SN2", "MEMBER-SN2"), ("MEMBER-SN2", "XMEMBER-SN2")],
+        ids=["decorated-storage", "legacy-storage"],
+    )
+    def test_a_chassis_member_uses_the_rules_of_its_masters_manufacturer(self, stored, incoming):
         master_maker = _manufacturer("master")
         member_maker = _manufacturer("member")
         _rules_only((r"^X(.+)$", r"\1", master_maker))
         master = _device_of(master_maker, "lookup-master", "MASTER-SN1")
-        member = _device_of(member_maker, "lookup-member", "XMEMBER-SN2")
+        member = _device_of(member_maker, "lookup-member", stored)
         chassis = make_virtual_chassis("lookup-chassis", master, member)
         chassis.master = master
         chassis.save()
 
-        assert resolve_device("MEMBER-SN2").object == member
+        assert resolve_device(incoming).object == member
 
     def test_a_master_outside_its_chassis_makes_a_probed_match_unavailable(self):
         from dcim.models import Device, VirtualChassis
