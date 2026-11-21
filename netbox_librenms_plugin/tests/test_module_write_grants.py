@@ -380,6 +380,56 @@ def test_replace_refuses_a_serial_conflict_that_appeared_after_its_preview(ui, c
     assert Module.objects.filter(pk=elsewhere.pk, device=elsewhere_device).exists()
 
 
+@pytest.mark.parametrize(
+    ("reported_serial", "replacement_serial"),
+    [("TAG 12", ""), ("TAG CARD123", "TAG CARD123")],
+    ids=["unadmitted", "admitted"],
+)
+def test_replace_only_removes_a_holder_when_the_target_admits_the_serial(
+    ui, settings, librenms_server, reported_serial, replacement_serial
+):
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_librenms_servers,
+        install_module as install_in_bay,
+        make_device_with_module_bays,
+    )
+
+    recording = _recording()
+    entities = _entities(recording)
+    entities[REAL_NIM]["entPhysicalSerialNum"] = reported_serial
+    librenms_server.load_recording(recording)
+    configure_librenms_servers(
+        settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "grants-token", "verify_ssl": False}}
+    )
+    device = c8300_device("c8300-replace-serial", recording, SERVER_KEY)
+    contrib_rule(MODEL_RULE)
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=device.device_type.manufacturer
+    )
+    remote = make_device_with_module_bays("replace-serial-holder", ["Slot 1"])
+    holder = install_in_bay(remote, "Slot 1", "REMOTE-CARD", serial=reported_serial, child_bays=["Child"])
+    child = install_in_bay(remote, "Child", "REMOTE-CHILD", serial="CHILD123", parent_module=holder)
+
+    action, fields = _replace_form(ui, device, entities)
+    installed = Module.objects.get(pk=fields["module_id"])
+    response = post(ui, action, fields)
+
+    assert response.status_code == 302
+    replacement = Module.objects.get(device=device, module_bay_id=installed.module_bay_id)
+    assert replacement.pk != installed.pk
+    assert replacement.module_type.model == _nim(entities)[0]
+    remote_pks = {holder.pk, child.pk}
+    expected = (str(holder.pk), replacement_serial, set()) if replacement_serial else (None, "", remote_pks)
+    assert (
+        fields.get("conflict_module_id"),
+        replacement.serial,
+        set(Module.objects.filter(pk__in=remote_pks).values_list("pk", flat=True)),
+    ) == expected
+
+
 def _preview_serial_form(client, device, entities):
     install_module(
         device, entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"], *_nim(entities, "OLD")

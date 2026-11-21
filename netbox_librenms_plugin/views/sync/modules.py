@@ -53,6 +53,7 @@ from netbox_librenms_plugin.serial_identity import (
     REFUSING,
     Comparison,
     SerialRules,
+    Resolution,
     ResolutionKind,
     compare,
     display,
@@ -2719,6 +2720,12 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
+def _resolve_replacement_holder(incoming, serial_context, *, rules, exclude_pk):
+    if not is_identity(incoming, serial_context):
+        return Resolution(ResolutionKind.ABSENT)
+    return resolve_module(incoming, rules=rules, exclude_pks=[exclude_pk])
+
+
 def _serial_holder_token(elsewhere):
     """Return a positive int for the other module that holds the incoming serial: none, several, or its row and place."""
     held = elsewhere.object
@@ -2839,7 +2846,9 @@ class ModuleMismatchPreviewView(
         serial_conflict = None
         serial_conflict_ambiguous = False
         serial_conflict_hidden = False
-        elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk])
+        elsewhere = _resolve_replacement_holder(
+            incoming, serial_context, rules=serial_rules, exclude_pk=installed_module.pk
+        )
         if elsewhere.kind is ResolutionKind.UNIQUE:
             serial_conflict = (
                 self.restricted_queryset(Module)
@@ -3020,10 +3029,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 librenms_item = granted.row(granted.grant.ent_index)
                 model_name = librenms_text(librenms_item.get("entPhysicalModelName"))
                 incoming = librenms_item.get("entPhysicalSerialNum")
-                serial = stored_form(incoming, Module)
                 serial_rules = granted.policy.serial_identity_rules
                 removals = {installed_module.pk: module_subtree_serials(installed_module.pk)}
-                previous = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk]).object
+                previous = _resolve_replacement_holder(
+                    incoming, serial_rules.for_module_target(target_device), rules=serial_rules, exclude_pk=module_id
+                ).object
                 if previous is not None:
                     removals[previous.pk] = module_subtree_serials(previous.pk)
                 scope = lock_module_write(
@@ -3065,6 +3075,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 target_bay = installed_module.module_bay
                 old_type_name = installed_module.module_type.model
                 old_bay_name = target_bay.name
+                serial_context = locked_type_context(target_device, rules=serial_rules)
+                serial = stored_form(incoming, Module) if is_identity(incoming, serial_context) else ""
                 new_module = Module(
                     device=target_device,
                     module_bay=target_bay,
@@ -3079,13 +3091,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # Resolve before locking a conflict row. An unplanned owner refuses
                 # the write instead of extending the Device set after component locks.
                 conflict_module = None
-                locked_type_context(target_device, rules=serial_rules)
-                elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk])
+                elsewhere = _resolve_replacement_holder(
+                    incoming, serial_context, rules=serial_rules, exclude_pk=module_id
+                )
                 # The locked module and the locked holder of the incoming serial must be the ones the preview showed.
                 granted.grant.require(
-                    action_target=_replace_target(
-                        installed_module, matched_type, serial_rules.for_module_target(target_device), elsewhere
-                    )
+                    action_target=_replace_target(installed_module, matched_type, serial_context, elsewhere)
                 )
                 if elsewhere.kind is ResolutionKind.AMBIGUOUS:
                     # Roll back and surface a clear error: we don't want to
