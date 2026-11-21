@@ -501,7 +501,9 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("stray_first", [False, True], ids=["holders-first", "stray-first"])
-def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders(client, live_librenms, stray_first):
+def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders(
+    client, live_librenms, stray_first, caplog
+):
     from dcim.models import Device, VirtualChassis
 
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
@@ -530,6 +532,11 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders
     )
 
     assert response.status_code == 302
+    assert any(
+        f"Cannot check VC member serial '{serial}'" in record.getMessage()
+        for record in caplog.records
+        if record.name == "netbox_librenms_plugin.import_utils.bulk_import"
+    )
     assert {model: set(model.objects.values_list("pk", flat=True)) for model in before} == before
 
 
