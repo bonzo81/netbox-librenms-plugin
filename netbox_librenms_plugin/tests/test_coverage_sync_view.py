@@ -1313,7 +1313,7 @@ def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(
     from netbox_librenms_plugin.models import LibreNMSSettings
 
     chassis, (_first, member) = make_virtual_chassis_members("import-rename-rule")
-    _other, (outside_master,) = make_virtual_chassis_members("import-rename-other", count=1)
+    outside_master = make_device("import-rename-outside-master")
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside_master)
     member.name = member_name
     member.serial = "ABC123"

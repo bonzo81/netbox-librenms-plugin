@@ -8725,6 +8725,7 @@ def test_vc_install_checks_conflicts_on_the_row_target(client, live_librenms, ta
             "entPhysicalSerialNum": "ABC123",
         }
     ]
+    inventory = stack_inventory(inventory, [target, other], on_member={81: target.vc_position})
     seed_inventory(DeviceModuleTableView(), target, inventory, librenms_id=9312)
     client.force_login(make_superuser("install-conflict-user"))
 
