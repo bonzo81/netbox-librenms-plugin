@@ -723,6 +723,53 @@ def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client,
     assert flushed_events == []
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("destination", ["same-device", "cross-device", "occupied"])
+def test_move_claims_serials_only_when_ownership_changes_or_a_module_is_removed(client, destination):
+    from dcim.models import Manufacturer, Module, ModuleBay
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    source = make_device_with_module_bays("move-policy-source", ["Source Bay", "Target Bay"])
+    target = (
+        make_device_with_module_bays("move-policy-target", ["Target Bay"]) if destination == "cross-device" else source
+    )
+    serial = "" if destination == "occupied" else "ABC123"
+    moving = install_module(source, "Source Bay", "MOVE-POLICY-CARD", serial=serial)
+    source_bay_id = moving.module_bay_id
+    target_bay = ModuleBay.objects.get(device=target, name="Target Bay")
+    occupant = None
+    if destination == "occupied":
+        occupant = install_module(target, target_bay.name, "MOVE-POLICY-OCCUPANT", serial="DEF456")
+    other_maker = Manufacturer.objects.create(name="Move Policy Other Maker", slug="move-policy-other-maker")
+    rule = NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=other_maker
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern="(")
+    client.force_login(make_superuser("move-policy-user"))
+
+    data = {"conflict_module_id": moving.pk, "target_bay_id": target_bay.pk}
+    if occupant:
+        data["module_id"] = occupant.pk
+    response = client.post(reverse("plugins:netbox_librenms_plugin:move_module", args=[target.pk]), data)
+
+    assert response.status_code == 302
+    moving.refresh_from_db()
+    assert moving.serial == serial
+    if destination == "same-device":
+        assert moving.module_bay_id == target_bay.pk
+    else:
+        assert moving.device_id == source.pk
+        assert moving.module_bay_id == source_bay_id
+        if occupant:
+            assert Module.objects.filter(pk=occupant.pk, module_bay=target_bay, serial="DEF456").exists()
+
+
 @transactional_db_with_all_apps()
 def test_a_batch_claims_each_json_number_serial_by_its_text():
     """JSON 123 and 123.0 are one Python key but two stored serials, so a writer of either one waits for the batch."""

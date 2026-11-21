@@ -3282,8 +3282,20 @@ class MoveModuleView(
 
         occupant_removed_msg = from_device = from_bay = None
 
+        movable = self.restricted_queryset(Module, "change").filter(
+            pk=conflict_module_id, device__in=self.restricted_queryset(Device)
+        )
+        same_device_empty_bay = (
+            movable.filter(device=target_device).exists()
+            and not Module.objects.filter(module_bay_id=target_bay_id).exists()
+        )
+
         def move(module):
             nonlocal occupant_removed_msg, from_device, from_bay
+            if same_device_empty_bay and (
+                module.device_id != target_device.pk or Module.objects.filter(module_bay=target_bay).exists()
+            ):
+                raise _ModuleActionRefused("The modules or module bays changed. Refresh Modules and try again.")
             # Remove whatever is currently in the target bay (if provided and different).
             # Scoped by "delete": the device and bay filters prove where the row sits, not that
             # the grant covers it, and the gate asked has_perm without an instance.
@@ -3304,7 +3316,7 @@ class MoveModuleView(
             module.device = target_device
 
         serial_rules = SerialRules.load()
-        moving = module_subtree_serials(conflict_module_id)
+        moving = () if same_device_empty_bay else module_subtree_serials(conflict_module_id)
         occupant_id = (
             self.restricted_queryset(Module, "delete")
             .filter(pk=module_id, device=target_device, module_bay_id=target_bay_id)
@@ -3317,7 +3329,9 @@ class MoveModuleView(
             with atomic_with_events():
                 scope = lock_module_write(
                     observe_module_write(
-                        device_ids=[target_device.pk], subtree_roots=[conflict_module_id, occupant_id]
+                        device_ids=[target_device.pk],
+                        subtree_roots=[] if same_device_empty_bay else [conflict_module_id, occupant_id],
+                        observed_ids=[conflict_module_id] if same_device_empty_bay else [],
                     ),
                     rules=serial_rules,
                 )
@@ -3337,9 +3351,7 @@ class MoveModuleView(
                 # user's grant does not cover. The module is locked before the occupant.
                 try:
                     conflict_module = update_existing_row(
-                        self.restricted_queryset(Module, "change")
-                        .filter(pk=conflict_module_id, device__in=self.restricted_queryset(Device))
-                        .select_related("module_type", "module_bay", "device"),
+                        movable.select_related("module_type", "module_bay", "device"),
                         move,
                     )
                 except Module.DoesNotExist:
