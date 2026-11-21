@@ -417,23 +417,27 @@ def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_im
             user=make_superuser("stack-member-rollback-user"),
         )
 
-    def last_member_insert(sql, params):
-        return sql.startswith('INSERT INTO "dcim_device"') and serials[-1] in str(params)
+    device_insert = 'INSERT INTO "dcim_device"'
+    chassis_insert = 'INSERT INTO "dcim_virtualchassis"'
+    inserts = []
 
-    with CaptureQueriesContext(connection) as queries, failing_statement(last_member_insert, "40P01") as failed:
+    def record_insert(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if sql.startswith((device_insert, chassis_insert)):
+            inserts.append((sql, params))
+        return result
+
+    def last_member_insert(sql, params):
+        return sql.startswith(device_insert) and serials[-1] in params
+
+    with connection.execute_wrapper(record_insert), failing_statement(last_member_insert, "40P01") as failed:
         result = run()
 
     assert failed, "the last member INSERT never ran"
-    # The master (serial A), the chassis and the second member (serial B) were written before the failed INSERT.
-    inserts = [query["sql"] for query in queries if query["sql"].startswith("INSERT INTO")]
-    device_inserts = [sql for sql in inserts if sql.startswith('INSERT INTO "dcim_device"')]
-    # The failed INSERT raised before it ran, so the capture holds only the two saved Devices.
-    assert [[serial for serial in serials if serial in sql] for sql in device_inserts] == [
-        [serial] for serial in serials[:-1]
-    ]
-    assert inserts.index(device_inserts[0]) < next(
-        index for index, sql in enumerate(inserts) if sql.startswith('INSERT INTO "dcim_virtualchassis"')
-    )
+    master, chassis, member = inserts
+    assert master[0].startswith(device_insert) and serials[0] in master[1]
+    assert chassis[0].startswith(chassis_insert)
+    assert member[0].startswith(device_insert) and serials[1] in member[1]
     assert result["success"] == []
     assert [entry["device_id"] for entry in result["failed"]] == [96312]
     assert {model: model.objects.count() for model in written} == before
