@@ -6461,24 +6461,29 @@ class TestFindIntegratingAncestor:
         assert ancestor is xiom
 
     def test_skips_non_module_classes(self):
-        """Fan / PowerSupply rows sharing serial must not be deduped — surface as-is."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        chassis = {
+        parent = {
             "entPhysicalIndex": 1,
-            "entPhysicalClass": "chassis",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalClass": "module",
+            "entPhysicalSerialNum": "FAN123",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 0,
         }
         fan = {
             "entPhysicalIndex": 10,
             "entPhysicalClass": "fan",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "FAN123",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 1,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(fan, self._index([chassis, fan]), plain_context()) is None
+        assert BaseModuleTableView._find_integrating_ancestor(fan, self._index([parent, fan]), plain_context()) is None
+
+        module = {**fan, "entPhysicalClass": "module"}
+        assert (
+            BaseModuleTableView._find_integrating_ancestor(module, self._index([parent, module]), plain_context())
+            is parent
+        )
 
 
 class TestBuildRowIntegratedDedupe:
