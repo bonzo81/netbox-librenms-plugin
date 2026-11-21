@@ -404,7 +404,7 @@
                                     <i class="mdi mdi-check-circle"></i>
                                 </span>
                                 {% if serial_stored_form_differs %}
-                                <span class="badge text-bg-info ms-1" title="NetBox stores '{{ object.serial }}', which names the same hardware. Sync to store the LibreNMS text.">stored form differs</span>
+                                <span class="badge text-bg-info ms-1"{% if not object.virtual_chassis %} title="NetBox stores '{{ object.serial }}', which names the same hardware. Sync to store the LibreNMS text."{% endif %}>stored form differs</span>
                                 {% endif %}
                                 {% endif %}
                             </td>

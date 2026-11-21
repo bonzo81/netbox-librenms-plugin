@@ -306,6 +306,8 @@ class TestSyncPageRouting:
         assert response.context["serial_stored_form_differs"] is matches
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
         assert sync_serial_url in response.content.decode()
+        badge = re.search(rb'<span class="badge text-bg-info ms-1" title=', response.content)
+        assert (badge is not None) is matches
 
     @pytest.mark.parametrize(("stored", "fits"), [("L" * 46, True), ("L" * 47, False)])
     def test_the_stored_form_sync_is_offered_only_for_a_serial_that_fits(
@@ -740,6 +742,27 @@ class TestVirtualChassisInventory:
             assert (first.serial, second.serial) == ("12", "")
             assert response.status_code == 302
             assert message_texts(response.wsgi_request, "error")
+
+    def test_a_chassis_serial_badge_has_no_direct_sync_tooltip(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _vc, (member,) = make_virtual_chassis_members("inventory-serial-badge", count=1)
+        member.serial = "ABC123"
+        member.save()
+        seed_mapping(member, SERVER_KEY, own=6655)
+        _register_device(librenms_server, 6655, member.name, serial="S/N ABC123")
+
+        response = logged_in_client.get(_sync_url(member))
+
+        assert response.status_code == 200
+        assert response.context["serial_stored_form_differs"] is True
+        assert response.context["vc_inventory_serials"] == []
+        badge = re.search(rb'<span class="badge text-bg-info ms-1"[^>]*>', response.content)
+        assert badge is not None
+        assert b" title=" not in badge.group()
 
     def test_junos_fpc_members_are_both_offered_in_the_serials_modal(self, logged_in_client, librenms_server):
         """A Junos VC lists every FPC member serial, not only the root chassis serial."""
