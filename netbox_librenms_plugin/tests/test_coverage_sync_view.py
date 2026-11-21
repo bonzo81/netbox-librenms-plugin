@@ -784,6 +784,30 @@ class TestVirtualChassisInventory:
         assert "12348" not in form
         assert "12351" not in form
 
+    def test_a_master_outside_its_chassis_reports_unavailable_serial_context(self, logged_in_client, librenms_server):
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+
+        chassis, (first, _second) = make_virtual_chassis_members("inventory-broken-master")
+        outside_master = make_device("inventory-outside-master")
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside_master)
+        seed_mapping(first, SERVER_KEY, own=6656)
+        inventory = _stack_inventory(
+            {"entPhysicalSerialNum": "VC-FIRST-SERIAL"}, {"entPhysicalSerialNum": "VC-SECOND-SERIAL"}
+        )
+        _register_device(librenms_server, 6656, first.name, serial="", inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(first))
+
+        assert response.status_code == 200
+        assert response.context["found_in_librenms"] is True
+        assert response.context["serial_unavailable"] == UNAVAILABLE_MASTER_LINK
+        assert response.context["vc_inventory_serials"] == []
+        assert response.context["vc_inventory_unavailable"] is False
+        assert b"data-vc-serial-unavailable" not in response.content
+        assert b"data-vc-serial-context-unavailable" in response.content
+
     @pytest.mark.parametrize("stored", [("VC-DUP", "S/N VC-DUP"), ("S/N VC-DUP", "VC-DUP")])
     def test_a_serial_that_two_members_share_assigns_neither(self, librenms_server, stored):
         """Two members normalize to one serial key, so the modal names no assigned member."""

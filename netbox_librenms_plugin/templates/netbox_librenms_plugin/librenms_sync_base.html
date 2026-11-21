@@ -628,6 +628,10 @@
                                             <span class="text-warning small" data-vc-inventory-error>
                                                 Could not read the LibreNMS inventory.
                                             </span>
+                                        {% elif object.virtual_chassis and serial_unavailable %}
+                                            <span class="text-warning small" data-vc-serial-context-unavailable>
+                                                {{ serial_unavailable }}
+                                            </span>
                                         {% elif object.virtual_chassis %}
                                             <span class="text-muted small" data-vc-serial-unavailable>
                                                 LibreNMS inventory did not identify the virtual chassis members.
