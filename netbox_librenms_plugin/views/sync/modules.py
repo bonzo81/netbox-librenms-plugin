@@ -1559,7 +1559,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             # A savepoint whose events stay only when it succeeds: a failure here won't abort the parent tx.
             with row_savepoint():
-                serial = stored_form(incoming, Module)
                 locked_bay = (
                     module_bays.select_for_update(of=("self",))
                     .select_related("installed_module")
@@ -1583,7 +1582,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     device=device,
                     module_bay=locked_bay,
                     module_type=matched_type,
-                    serial=serial,
+                    serial=stored_form(incoming, Module),
                     status="active",
                 )
                 adopted_components = _save_module_with_scoped_component_adoption(module, changeable_components)

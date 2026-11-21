@@ -480,6 +480,57 @@ class TestInstallSelectedView:
         assert not Module.objects.filter(device=device).exists()
 
 
+@pytest.mark.parametrize(("action", "occupied"), [("branch", True), ("selected", True), ("selected", False)])
+def test_batch_install_checks_serial_length_only_for_creation(live_librenms, action, occupied):
+    from dcim.models import Interface, Module
+
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    device = make_device_with_module_bays("batch-serial-length", ["Slot 1"])
+    seed_mapping(device, "default", own=74)
+    module_type = make_module_type("BATCH-SERIAL-LENGTH-CARD")
+    NormalizationRule.objects.create(
+        scope="serial",
+        match_pattern=r"^TAG (ABC123) .+$",
+        replacement=r"\1",
+        manufacturer=device.device_type.manufacturer,
+    )
+    occupant = None
+    if occupied:
+        occupant = install_module(device, "Slot 1", module_type.model, serial="ABC123", child_bays=["Child Bay"])
+    interface = make_interface(device, "Te1/1/1")
+    if occupant:
+        Interface.objects.filter(pk=interface.pk).update(module=occupant)
+    serial = "TAG ABC123 " + "X" * Module._meta.get_field("serial").max_length
+    rows = [
+        _item(
+            10,
+            module_type.model,
+            "Slot 1",
+            entPhysicalSerialNum=serial,
+            _librenms_port_id=7401,
+            _librenms_ifname=interface.name,
+        )
+    ]
+
+    if action == "branch":
+        child_type = make_module_type("BATCH-SERIAL-LENGTH-CHILD")
+        rows.append(_item(11, child_type.model, "Child Bay", parent=10))
+        _post_branch(device, rows, 10, 74, live_librenms)
+    else:
+        _post_selected(device, rows, [10], 74, live_librenms)
+
+    interface.refresh_from_db()
+    if occupant:
+        occupant.refresh_from_db()
+        assert occupant.serial == "ABC123"
+        assert occupant.module_bay.name == "Slot 1"
+        assert read_mapping(interface).own_id("default") == 7401
+    else:
+        assert not Module.objects.filter(device=device).exists()
+        assert read_mapping(interface).own_id("default") is None
+
+
 class TestUpdateModuleSerialView:
     """The serial update validates its inputs before touching the module."""
 
