@@ -598,6 +598,56 @@ def test_a_failed_savepoint_without_events_keeps_the_last_saved_payload(later_sa
 
 
 @pytest.mark.django_db
+def test_row_savepoints_do_not_recheck_earlier_frozen_batch_events():
+    from sys import getprofile, setprofile
+
+    from extras.events import EventContext
+
+    from netbox_librenms_plugin.transactions import atomic_with_events, row_savepoint
+
+    sites = [_site(f"batch-site-{index}") for index in range(12)]
+    payload_checks = 0
+
+    def count_payload_checks(frame, event, _arg):
+        nonlocal payload_checks
+        if event == "call" and frame.f_code is EventContext.__contains__.__code__ and frame.f_locals["key"] == "data":
+            payload_checks += 1
+
+    with _netbox_request_context():
+        with atomic_with_events():
+            previous_profile = getprofile()
+            setprofile(count_payload_checks)
+            try:
+                for site in sites:
+                    with row_savepoint():
+                        _write_site(site, "installed")
+            finally:
+                setprofile(previous_profile)
+
+        events = _queued_events().values()
+        assert {event["object_id"] for event in events} == {site.pk for site in sites}
+        assert {event["data"]["description"] for event in events} == {"installed"}
+        assert payload_checks <= 2 * len(sites)
+
+
+@pytest.mark.django_db
+def test_a_direct_save_refreshes_an_already_frozen_event_in_the_same_queue():
+    from netbox_librenms_plugin.transactions import atomic_with_events, row_savepoint
+
+    site = _site("updated-frozen-event")
+    with _netbox_request_context():
+        with atomic_with_events():
+            _write_site(site, "first")
+            with row_savepoint():
+                pass
+            _write_site(site, "second")
+            site.description = "unsaved"
+
+        event = _the_one_event(site)
+        assert event["data"]["description"] == "second"
+
+
+@pytest.mark.django_db
 def test_a_saved_row_is_out_of_scope_for_an_action_the_user_lacks():
     from dcim.models import Site
 

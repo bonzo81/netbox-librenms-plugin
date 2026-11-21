@@ -202,6 +202,33 @@ def run_transaction(work):
             attempt += 1
 
 
+class _EventQueue(dict):
+    """Track queued events whose payloads may need to be frozen."""
+
+    def __init__(self):
+        super().__init__()
+        self._pending = set()
+
+    def __setitem__(self, key, event):
+        super().__setitem__(key, event)
+        self._pending.add(key)
+
+    def __getitem__(self, key):
+        event = super().__getitem__(key)
+        # NetBox retrieves an existing event before updating it in place.
+        self._pending.add(key)
+        return event
+
+    def freeze(self):
+        for key in tuple(self._pending):
+            event = self.get(key)
+            if event is not None and "data" not in event:
+                model = type(event["object"])
+                row = model._base_manager.get(pk=event["object_id"])
+                event.freeze_data(row)
+            self._pending.discard(key)
+
+
 def _run_attempt(work, connection):
     """Run one attempt in a durable atomic block, with its own NetBox event queue."""
     committed = False
@@ -213,7 +240,7 @@ def _run_attempt(work, connection):
     recorder = _ConflictRecorder()
     recorder_token = _active_recorder.set(recorder)
     open_queues = _open_queues.get()
-    attempt_queue = {}
+    attempt_queue = _EventQueue()
     open_token = _open_queues.set((*open_queues, attempt_queue))
     queue_token = events_queue.set(attempt_queue)
     try:
@@ -221,7 +248,8 @@ def _run_attempt(work, connection):
         with transaction.atomic(durable=True):
             transaction.on_commit(mark_committed)
             with connection.execute_wrapper(recorder):
-                _freeze_event_data(*open_queues)
+                for queue in open_queues:
+                    queue.freeze()
                 try:
                     result = work()
                 except TransactionManagementError:
@@ -243,7 +271,7 @@ def _run_attempt(work, connection):
                     )
                 # Checks deferred foreign keys now, so their lock conflicts pass the recorder too.
                 connection.check_constraints()
-                _freeze_event_data(attempt_queue)
+                attempt_queue.freeze()
         return result
     except Exception as exc:
         if committed:
@@ -280,9 +308,10 @@ def atomic_with_events():
 
     open_queues = _open_queues.get()
     if not connection.needs_rollback:
-        _freeze_event_data(*open_queues)
+        for queue in open_queues:
+            queue.freeze()
     leaves_open_blocks = not any(queue is events_queue.get() for queue in open_queues)
-    block_queue = {}
+    block_queue = _EventQueue()
     tokens = events_queue.set(block_queue), _open_queues.set((*open_queues, block_queue))
     try:
         with transaction.atomic():
@@ -292,7 +321,7 @@ def atomic_with_events():
             yield
             released = not outermost and not transaction.get_rollback()
             if leaves_open_blocks and not transaction.get_rollback():
-                _freeze_event_data(block_queue)
+                block_queue.freeze()
     except BaseException:
         _close_event_queue(tokens, keep=committed)
         raise
@@ -306,16 +335,6 @@ def _close_event_queue(tokens, *, keep):
     _open_queues.reset(open_token)
     if keep:
         _keep_events(block_events)
-
-
-def _freeze_event_data(*queues):
-    """Serialize pending event payloads inside the transaction that wrote their rows."""
-    for queue in queues:
-        for event in queue.values():
-            if "data" not in event:
-                model = type(event["object"])
-                row = model._base_manager.get(pk=event["object_id"])
-                event.freeze_data(row)
 
 
 @contextmanager
