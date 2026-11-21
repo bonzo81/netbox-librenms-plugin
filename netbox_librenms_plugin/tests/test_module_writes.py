@@ -684,16 +684,22 @@ def test_a_writer_that_keeps_module_serials_does_not_read_a_broken_serial_rule(w
 
 
 @transactional_db_with_all_apps()
-def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client, flushed_events):
+def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client, flushed_events, caplog):
     """The moved row's savepoint releases, then the commit meets a 55P03: the move rolls back with its events."""
     from dcim.models import Module
     from django.contrib.auth import get_user_model
     from django.contrib.messages import get_messages
+    from django.db import connection
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_module_bay, make_superuser
-    from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
-    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+        lock_row,
+        lock_timeout,
+        raised_sqlstates,
+        second_connection,
+    )
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, database_error_sqlstate
     from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
     if not netbox_relocates_module_subtree():
@@ -704,11 +710,17 @@ def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client,
     user = make_superuser("move-events-user")
     client.force_login(user)
     flushed_events.clear()
+    statements = []
+
+    def record(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        statements.append((sql, tuple(connection.savepoint_ids)))
+        return result
 
     # The commit checks the change record's user foreign key; the held user row gives a real 55P03.
     with second_connection() as other:
         lock_row(other, get_user_model(), user.pk)
-        with lock_timeout(200):
+        with lock_timeout(200), raised_sqlstates() as sqlstates, connection.execute_wrapper(record):
             response = client.post(
                 reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": device.pk}),
                 {
@@ -718,6 +730,18 @@ def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client,
                 },
             )
 
+    assert "55P03" not in sqlstates
+    (saved_at, savepoints) = next(
+        (index, savepoints)
+        for index, (sql, savepoints) in enumerate(statements)
+        if sql.startswith(f'UPDATE "{Module._meta.db_table}" ')
+    )
+    assert any(sql == f'RELEASE SAVEPOINT "{savepoints[-1]}"' for sql, _ in statements[saved_at + 1 :])
+    assert [
+        database_error_sqlstate(record.exc_info[1])
+        for record in caplog.records
+        if record.name == "netbox_librenms_plugin.middleware" and record.exc_info
+    ] == ["55P03"]
     assert TRY_AGAIN_MESSAGE in [str(message) for message in get_messages(response.wsgi_request)]
     assert Module.objects.get(pk=module.pk).module_bay_id != target_bay.pk
     assert flushed_events == []
