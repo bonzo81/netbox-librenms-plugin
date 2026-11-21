@@ -1028,6 +1028,6 @@ def report_rows(rules: SerialRules | None = None):
             if context.unavailable:
                 yield row, stored, "", context.unavailable
                 continue
-            key = context._key(row.serial)
+            key = context._extract(stored)
             if key != stored:
                 yield row, stored, key, "" if key else "no hardware identity under the current rules"

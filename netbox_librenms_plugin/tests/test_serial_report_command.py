@@ -91,6 +91,44 @@ class TestSerialReportCommand:
         assert "keys to 'OTHER-SN1'" in rows[f"device {decorated.pk}"]
         assert lines[-1].startswith("3 row(s)")
 
+    def test_the_report_does_not_cache_serials_from_the_scan(self):
+        from dcim.models import Device, Module, ModuleBay
+
+        from netbox_librenms_plugin.serial_identity import SerialRules, is_identity, report_rows
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_type
+
+        _rules_only(r"^S/N\s+(.+)$")
+        holder = make_device("report-scan-holder")
+        module_type = make_module_type("REPORT-SCAN-CARD")
+        Device.objects.bulk_create(
+            [
+                Device(
+                    name=f"report-scan-device-{number}",
+                    serial=f"DEVICE-SN{number}",
+                    device_type=holder.device_type,
+                    role=holder.role,
+                    site=holder.site,
+                    status=holder.status,
+                )
+                for number in range(501)
+            ]
+        )
+        bays = ModuleBay.objects.bulk_create([ModuleBay(device=holder, name=f"Slot {number}") for number in range(501)])
+        Module.objects.bulk_create(
+            [
+                Module(
+                    device=holder, module_bay=bay, module_type=module_type, serial=f"MODULE-SN{number}", status="active"
+                )
+                for number, bay in enumerate(bays)
+            ]
+        )
+        rules = SerialRules.load()
+        context = rules.for_device(holder)
+        assert is_identity("KNOWN-SN1", context)
+
+        assert list(report_rows(rules)) == []
+        assert set(context._keys) == {"KNOWN-SN1"}
+
     def test_a_rule_that_matches_its_own_output_can_stop_a_legacy_row_from_matching(self):
         """The documented limit: the original "00ABC12" no longer finds its stored rule output "0ABC12"."""
         from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
