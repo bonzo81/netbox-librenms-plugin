@@ -1033,6 +1033,38 @@ def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(logged_in_client, 
 
 
 @pytest.mark.django_db
+def test_vc_name_sync_keeps_both_pages_in_agreement_when_the_reported_serial_changes(logged_in_client, librenms_server):
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    chassis, (master, member) = make_virtual_chassis_members("rename-serial-drift")
+    chassis.master = master
+    chassis.save(update_fields=["master"])
+    member.serial = "OLD123"
+    member.save(update_fields=["serial"])
+    seed_mapping(member, SERVER_KEY, own=6652)
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
+    _register_device(librenms_server, 6652, "stack", serial="NEW456")
+    validation_url = reverse("plugins:netbox_librenms_plugin:device_validation_details", args=[6652])
+    import_action_url = reverse("plugins:netbox_librenms_plugin:device_conflict_action", args=[6652])
+    sync_action_url = reverse("plugins:netbox_librenms_plugin:update_device_name", args=[member.pk])
+    params = {"server_key": SERVER_KEY}
+
+    dialog = logged_in_client.get(validation_url, params)
+    sync_page = logged_in_client.get(_sync_url(member), params)
+    assert dialog.status_code == sync_page.status_code == 200
+    assert dialog.context["validation"]["suggested_name"] == sync_page.context["resolved_name"] == "stack-OLD123"
+
+    logged_in_client.post(import_action_url, {**params, "action": "sync_name", "existing_device_id": member.pk})
+    member.refresh_from_db()
+    assert (member.name, member.serial) == ("stack-OLD123", "OLD123")
+    sync_page = logged_in_client.get(_sync_url(member), params)
+    assert f'action="{sync_action_url}"' not in sync_page.content.decode()
+    assert logged_in_client.post(sync_action_url, params).status_code == 302
+    member.refresh_from_db()
+    assert (member.name, member.serial) == ("stack-OLD123", "OLD123")
+
+
+@pytest.mark.django_db
 class TestPlatformAndPatternHelpers:
     def test_platform_info_uses_an_exact_real_platform(self, librenms_server):
         from dcim.models import Platform

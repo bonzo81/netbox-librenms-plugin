@@ -980,9 +980,7 @@ def validate_device_for_import(  # noqa: C901
                     # The row carries the controller's hostname and serial, so it never names the host.
                     pass
                 elif hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
-                    vc_expected_name = _existing_member_name(
-                        hostname, existing_device, serial_rules, incoming_serial=incoming_serial
-                    )
+                    vc_expected_name = _existing_member_name(hostname, existing_device, serial_rules)
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True
                     elif vc_expected_name:

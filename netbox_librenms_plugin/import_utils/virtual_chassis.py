@@ -30,7 +30,6 @@ from ..serial_identity import (
     compare,
     display,
     group,
-    is_identity,
     naming_token,
     plain_context,
     resolve_devices_write,
@@ -686,7 +685,7 @@ def _member_name(master_name: str, position: int, serial, pattern: str, context)
     return _generate_vc_member_name(master_name, position, serial=naming_token(serial, context), pattern=pattern)
 
 
-def _existing_member_name(master_name, device, rules, *, incoming_serial=None) -> str | None:
+def _existing_member_name(master_name, device, rules) -> str | None:
     """Return the name to use for an existing member, or None when the suffix needs unavailable serial rules."""
     if not master_name or not getattr(device, "virtual_chassis_id", None) or not is_vc_position(device.vc_position):
         return master_name
@@ -705,8 +704,7 @@ def _existing_member_name(master_name, device, rules, *, incoming_serial=None) -
         return None
     if context.unavailable:
         return None
-    serial = incoming_serial if is_identity(incoming_serial, context) else device.serial
-    return _member_name(master_name, device.vc_position, serial, pattern, context)
+    return _member_name(master_name, device.vc_position, device.serial, pattern, context)
 
 
 def update_vc_member_suggested_names(vc_data: dict, master_name: str, context) -> dict:
