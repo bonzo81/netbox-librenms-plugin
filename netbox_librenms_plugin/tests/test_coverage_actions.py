@@ -2019,7 +2019,8 @@ class TestDeviceValidationDetailsView:
         assert response.status_code == 200
         assert b'value="sync_serial"' not in response.content
 
-    def test_linking_a_chassis_member_preserves_its_name_and_serial(self):
+    @pytest.mark.parametrize("match_type", ["hostname", "serial", "primary_ip"])
+    def test_linking_a_chassis_member_preserves_its_name_and_serial(self, match_type):
         from netbox_librenms_plugin.tests._html_helpers import open_tags
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -2027,8 +2028,13 @@ class TestDeviceValidationDetailsView:
         _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-chassis-link")
         member.name = "SW01"
         member.serial = "MEMBER-OLD"
+        hostname = "sw01" if match_type == "hostname" else "test-switch"
+        serial = member.serial if match_type == "serial" else "CHASSIS-SERIAL"
+        ip = "198.18.0.8"
+        if match_type == "primary_ip":
+            member.primary_ip4 = make_ip(f"{ip}/24", assigned_object=make_interface(member, "eth0"))
         member.save()
-        self.primary_server.device_info_response(device_id=1, hostname="sw01", serial="CHASSIS-SERIAL")
+        self.primary_server.device_info_response(device_id=1, hostname=hostname, serial=serial, ip=ip)
         self.primary_server.vc_inventory_callable(1, [], {})
 
         _view, response = self._get("default")
@@ -2039,7 +2045,12 @@ class TestDeviceValidationDetailsView:
         for form in re.findall(r"<form\b.*?</form>", response.content.decode(), re.DOTALL):
             if open_tags(form, "form")[0].get("hx-post") != action_url:
                 continue
-            data = {tag["name"]: tag["value"] for tag in open_tags(form, "input") if tag.get("type") == "hidden"}
+            controls = open_tags(form, "input") + open_tags(form, "button")
+            data = {
+                tag["name"]: tag["value"]
+                for tag in controls
+                if tag.get("type") in {"hidden", "submit"} and "name" in tag and "disabled" not in tag
+            }
             if data.get("action") in {"link", "update", "update_serial"}:
                 link_forms.append(data)
         assert [form["action"] for form in link_forms] == ["link"]
