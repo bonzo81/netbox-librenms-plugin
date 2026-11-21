@@ -535,6 +535,44 @@ def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client,
         assert messages_on(response.wsgi_request) == [("error", "Failed to import 1 device")]
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("holder_count", [1, 2])
+def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms, caplog, holder_count):
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    serials = ["TAKEN-STACK-AAA", "TAKEN-STACK-BBB", "TAKEN-STACK-CCC"]
+    members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
+    device_id = 96314
+    prerequisites, row = _importable_row(live_librenms, device_id, "stack-taken-member", members=members)
+    holders = {make_device(f"stack-taken-holder-{index}", serial=serials[-1]).pk for index in range(holder_count)}
+
+    result = bulk_import_devices_shared(
+        [device_id],
+        server_key="default",
+        manual_mappings_per_device={device_id: prerequisites},
+        libre_devices_cache={device_id: row},
+        user=make_superuser("stack-taken-member-user"),
+    )
+
+    assert result["failed"] == []
+    assert [entry["device_id"] for entry in result["success"]] == [device_id]
+    assert result["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
+    assert stored_mapping_for_test(chassis.master) == {"default": device_id}
+    assert set(chassis.members.values_list("serial", flat=True)) == set(serials[:-1])
+    assert set(Device.objects.filter(serial=serials[-1]).values_list("pk", flat=True)) == holders
+    assert any(
+        record.name == "netbox_librenms_plugin.import_utils.virtual_chassis"
+        and record.levelname == "WARNING"
+        and serials[-1] in record.getMessage()
+        for record in caplog.records
+    )
+
+
 MASTER_UNKNOWN = "Imported device {} without a virtual chassis: the stack master could not be identified by serial."
 
 
