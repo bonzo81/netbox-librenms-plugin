@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 
 from django.core.exceptions import ValidationError
 from django.db.models import BooleanField, CharField, F, Func
+from django.utils.functional import cached_property
 
 from netbox_librenms_plugin.constants import is_librenms_placeholder
 
@@ -229,7 +230,7 @@ class SerialRules:
             self._chains = chains
         return self._chains
 
-    @property
+    @cached_property
     def digest(self) -> str:
         """Return a hash of every serial rule row; a rule edit changes it, so a cached derived result keys on it."""
         return _rules_digest(rule for chain in self._chains_by_manufacturer().values() for rule in chain)

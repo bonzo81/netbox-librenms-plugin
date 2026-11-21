@@ -916,6 +916,34 @@ def _cached_search(caching_librenms, serial):
 class TestCachedSearchResults:
     """S5: a cached search result shows the serial match that the current rules and rows give."""
 
+    def test_cache_keys_serialize_each_rule_snapshot_once(self, caching_librenms):
+        from cProfile import Profile
+
+        from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+        from netbox_librenms_plugin.serial_identity import _rules_digest
+
+        _, api = caching_librenms
+        (rule,) = _rules_only((SEEDED, r"\1", None))
+        rules = SerialRules.load()
+
+        def keys(device_id, snapshot):
+            return (
+                get_validated_device_cache_key(api.server_key, {}, device_id, True, serial_rules=snapshot),
+                _vc_cache_key(api, device_id, snapshot),
+            )
+
+        with Profile() as profile:
+            before = keys(1, rules)
+            keys(2, rules)
+        assert [entry.callcount for entry in profile.getstats() if entry.code == _rules_digest.__code__] == [1]
+
+        rule.match_pattern = r"^Serial (.+)$"
+        rule.save()
+        after = keys(1, SerialRules.load())
+        assert all(old != new for old, new in zip(before, after, strict=True))
+        assert keys(1, rules) == before
+
     def test_a_rule_deletion_drops_a_cached_serial_match(self, caching_librenms):
         _rules_only((SEEDED, r"\1", None))
         holder = make_device("cache-rule-holder", serial="S/N CACHE-SN1")
