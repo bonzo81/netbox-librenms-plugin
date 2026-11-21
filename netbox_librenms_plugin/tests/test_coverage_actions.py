@@ -2424,6 +2424,44 @@ class TestDeviceVCDetailsView:
         assert response.status_code == 200
         assert response.context["vc_data"]["detection_failed"] is True
 
+    def test_a_standalone_device_renders_with_a_broken_manufacturer_serial_rule(self, client, live_librenms):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        device = make_device("vc-details-standalone")
+        rule = NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_SERIAL,
+            manufacturer=device.device_type.manufacturer,
+            match_pattern=r"^PREFIX:(.+)$",
+            replacement=r"\1",
+        )
+        NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern="(")
+        device_id = 45
+        server = live_librenms.server
+        server.device_info_response(
+            device_id=device_id, hostname=device.name, hardware=device.device_type.model, serial="PREFIX:STANDALONE-1"
+        )
+        server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "chassis", "entPhysicalIndex": 100}],
+            {100: [{"entPhysicalClass": "module", "entPhysicalIndex": 101}]},
+        )
+        client.force_login(make_superuser("vc-details-standalone-user"))
+
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_vc_details", kwargs={"device_id": device_id}),
+            {"server_key": "default"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert response.context is not None
+        vc_data = response.context["vc_data"]
+        assert vc_data["is_stack"] is False
+        assert vc_data["detection_failed"] is False
+        assert vc_data["detection_error"] is None
+
     def test_zero_based_stack_renders_member_zero(self, settings, librenms_server):
         server_key = "vc-details-zero"
         device_id = 43
