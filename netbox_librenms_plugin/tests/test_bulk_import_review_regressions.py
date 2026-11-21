@@ -364,6 +364,15 @@ def test_bulk_import_reports_duplicate_serial_as_terminal_ambiguity(live_librenm
     assert len(hostname_conflict["failed"]) == 1
     assert serial_conflict["failed"] == hostname_conflict["failed"]
 
+    Device.objects.filter(serial=serial).update(serial="")
+    resolved = import_row({**row, "serial": serial})
+
+    assert resolved["failed"] == []
+    assert [entry["device_id"] for entry in resolved["success"]] == [device_id]
+    imported = Device.objects.get(name=row["hostname"])
+    assert imported.serial == serial
+    assert imported.role_id == prerequisites["device_role_id"]
+
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("kind", ["device", "stack", "vm", "missing-os"])
