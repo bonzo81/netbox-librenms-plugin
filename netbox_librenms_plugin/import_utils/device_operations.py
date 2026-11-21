@@ -110,6 +110,8 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
+# Refresh removes a stale duplicate serial blocker by this start.
+SERIAL_DUPLICATE_ISSUE_MARKER = "Multiple NetBox devices share serial"
 # The start and end of the blocker of a row whose serial no lookup can read; the serial text lies between them.
 SERIAL_UNAVAILABLE_ISSUE_START = "Serial '"
 SERIAL_UNAVAILABLE_ISSUE_END = f"' cannot be matched: {UNAVAILABLE_MASTER_LINK}"
@@ -1575,9 +1577,10 @@ def _match_and_validate(  # noqa: C901
                         return result
                     if discovery.kind is ResolutionKind.AMBIGUOUS:
                         # Leave the row unbound before the weaker IP lookup.
+                        result["existing_match_type"] = "ambiguous_hostname_or_serial"
                         result["serial_duplicate"] = True
                         result["issues"].append(
-                            f"Multiple NetBox devices share serial '{page_text(serial)}'; resolve the duplicate "
+                            f"{SERIAL_DUPLICATE_ISSUE_MARKER} '{page_text(serial)}'; resolve the duplicate "
                             "serial before importing."
                         )
                         result["can_import"] = False

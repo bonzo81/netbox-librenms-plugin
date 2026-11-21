@@ -57,6 +57,7 @@ from .cache import (
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
+    SERIAL_DUPLICATE_ISSUE_MARKER,
     NAME_MATCH_TYPES,
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
@@ -100,13 +101,9 @@ NETBOX_SERIAL_UNVERIFIED = "NetBox could not verify the serial"
 # _refresh_existing_device) so a resolved duplicate's stale message is reliably removed
 # regardless of which librenms_id value was interpolated into it.
 _AMBIGUOUS_LIBRENMS_ID_MARKER = "matches more than one existing NetBox record"
-# Substrings of the ambiguity blockers that carry the "ambiguous_hostname_or_serial" match type,
-# used to strip a stale instance once the duplicate is resolved (mirrors the librenms_id marker
-# above). The blocker can be appended by either the refresh serial/IP fallback below ("serial or
-# management IP") or validate_device_for_import's duplicate name/serial guard ("hostname/serial"),
-# so the cleanup must recognise either wording — otherwise a hostname/serial blocker survives the
-# match_type reset and keeps the row blocked until cache expiry.
+# Refresh removes these ambiguity blockers before checking the current matches.
 _AMBIGUOUS_SERIAL_IP_MARKERS = (
+    SERIAL_DUPLICATE_ISSUE_MARKER,
     "serial or management IP",
     "hostname/serial",
 )
@@ -1124,6 +1121,7 @@ def _refresh_match(  # noqa: C901
         # the row blocked until cache expiry. Clear it so the row is re-evaluated under current rules.
         if validation.get("existing_match_type") == "ambiguous_hostname_or_serial":
             validation["existing_match_type"] = None
+            validation["serial_duplicate"] = False
             for _key in ("issues", "warnings"):
                 msgs = validation.get(_key)
                 if isinstance(msgs, list):
@@ -1298,6 +1296,7 @@ def _refresh_match(  # noqa: C901
                     return
                 if serial_match.kind is ResolutionKind.AMBIGUOUS:
                     ambiguous_fallback = True
+                    validation["serial_duplicate"] = True
                 elif serial_match.kind is ResolutionKind.UNIQUE:
                     new_device, match_type = serial_match.object, "serial"
 

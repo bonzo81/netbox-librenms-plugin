@@ -1715,7 +1715,7 @@ class TestDeviceValidationDetailsView:
         assert validation["serial_duplicate"] is ambiguous
         if ambiguous:
             assert validation["existing_device"] is None
-            assert validation["existing_match_type"] is None
+            assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
             assert validation["oob_candidate"] is None
             assert validation["row_is_oob_controller"] is False
             assert validation["can_import"] is False
