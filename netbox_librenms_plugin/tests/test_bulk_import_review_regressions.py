@@ -500,6 +500,40 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("stray_first", [False, True], ids=["holders-first", "stray-first"])
+def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders(client, live_librenms, stray_first):
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+    device_id = 96315
+    serial = "STACK-MEMBER-BBB"
+    members = [_chassis(100, "STACK-MASTER-AAA", position=1), _chassis(200, serial, position=2)]
+    prerequisites, _ = _importable_row(live_librenms, device_id, "stack-ambiguous-member-link", members=members)
+    if stray_first:
+        stray = _stray_chassis_member("stack-stray", serial)
+    holders = [make_device(f"stack-holder-{index}", serial=serial) for index in range(2)]
+    if not stray_first:
+        stray = _stray_chassis_member("stack-stray", serial)
+    assert (stray.pk < holders[0].pk) if stray_first else (stray.pk > holders[-1].pk)
+    before = {model: set(model.objects.values_list("pk", flat=True)) for model in (Device, VirtualChassis)}
+    client.force_login(make_superuser("stack-ambiguous-member-link-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "server_key": "default",
+            "select": [str(device_id)],
+            f"role_{device_id}": str(prerequisites["device_role_id"]),
+        },
+    )
+
+    assert response.status_code == 302
+    assert {model: set(model.objects.values_list("pk", flat=True)) for model in before} == before
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client, live_librenms, htmx):
     """The failed chassis rolls the device back, so the answer reports a failed row and no import."""

@@ -488,7 +488,13 @@ def _row_candidates(stored, context, by_key, by_own_key, writer) -> tuple:
     return tuple(dict.fromkeys(candidates))
 
 
-def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None):
+def _mark_unavailable(unavailable, values, probes, stored, reason):
+    for value in values:
+        if stored == value or any(key in stored for key in probes[value]):
+            unavailable.setdefault(value, reason)
+
+
+def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None, stop_at_ambiguity=False):
     """
     Read the candidate rows of *values* once and confirm each row under its own context.
 
@@ -519,7 +525,7 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
     for row in queryset:
         context = row_context(row)
         stored = _text(row.serial)
-        candidates = _row_candidates(stored, context, by_key, by_own_key, writer)
+        candidates = _row_candidates(stored, context, by_key, by_own_key, writer) if complete else ()
         if lock and any(_matches_serial(stored, value, context, writer) for value in candidates):
             # A substring candidate can name unrelated hardware. Lock only confirmed matches,
             # then read their identity again after the lock to exclude a concurrent change.
@@ -530,10 +536,8 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
             stored = _text(row.serial)
             candidates = _row_candidates(stored, context, by_key, by_own_key, writer)
         if context.unavailable:
-            for value in open_values:
-                if any(key in stored for key in probes[value]) or stored == value:
-                    unavailable.setdefault(value, context.unavailable)
-        else:
+            _mark_unavailable(unavailable, open_values, probes, stored, context.unavailable)
+        elif complete:
             for value in candidates:
                 if _matches_serial(stored, value, context, writer):
                     matches[value].append(row)
@@ -542,9 +546,10 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
             for value in by_own_key.get(stored, ()):
                 if row.pk not in matched_pks[value]:
                     uncertain[value].append(row)
-        if not unavailable and saturated == len(open_values):
-            complete = False
-            break
+            complete = saturated < len(open_values)
+            # Device contexts can be unavailable even after the match count is settled.
+            if stop_at_ambiguity and not complete:
+                break
     for value in open_values:
         if value in unavailable:
             results[value] = Resolution(ResolutionKind.UNAVAILABLE, reason=unavailable[value])
@@ -652,6 +657,7 @@ def resolve_modules(
         row_context=lambda module: rules.for_module_target(module.device),
         lock=lock,
         spare=spare,
+        stop_at_ambiguity=True,
     )
 
 
