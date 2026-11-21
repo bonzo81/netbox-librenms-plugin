@@ -1693,7 +1693,7 @@ def validate_device_for_import(  # noqa: C901
                             )
                             device_type = effective_import_device_type(result["device_type"].get("device_type"))
                             result["virtual_chassis"] = update_vc_member_suggested_names(
-                                vc_detection, hostname, serial_rules.for_device_type(device_type)
+                                vc_detection, hostname, serial_rules=serial_rules, device_type=device_type
                             )
                 except Exception as e:
                     logger.exception("Exception during VC detection for device %s: %s", hostname, e)

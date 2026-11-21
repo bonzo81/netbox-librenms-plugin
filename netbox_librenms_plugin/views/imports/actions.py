@@ -1270,12 +1270,11 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if validation.get("virtual_chassis", {}).get("is_stack"):
                 # Preview the names and the master the way import makes them: with the resolved DeviceType's rules.
                 device_type = effective_import_device_type((validation.get("device_type") or {}).get("device_type"))
-                master_context = serial_rules.for_device_type(device_type)
                 validation["virtual_chassis"] = update_vc_member_suggested_names(
-                    validation["virtual_chassis"], device_name, master_context
+                    validation["virtual_chassis"], device_name, serial_rules=serial_rules, device_type=device_type
                 )
                 validation["virtual_chassis"] = vc_master_view(
-                    validation["virtual_chassis"], libre_device.get("serial"), master_context
+                    validation["virtual_chassis"], libre_device.get("serial"), serial_rules.for_device_type(device_type)
                 )
 
             from dcim.models import DeviceRole, Rack

@@ -596,26 +596,21 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, s
         if not members:
             return None
 
-        if master_name:
-            vc_name_pattern = _load_vc_member_name_pattern()
-            context = serial_rules.context(None) if _vc_name_uses_serial(vc_name_pattern) else plain_context()
-            for member in members:
-                member["suggested_name"] = _member_name(
-                    master_name, member["position"], member["serial"], vc_name_pattern, context
-                )
-        else:
-            for member in members:
-                member["suggested_name"] = f"Member-{member['position']}"
-
-        logger.info(f"Detected stack with {len(members)} members for device {device_id}")
-
-        return {
+        result = {
             "is_stack": True,
             "member_count": len(members),
             "members": members,
             "detection_failed": False,
             "detection_error": None,
         }
+        if master_name:
+            update_vc_member_suggested_names(result, master_name, serial_rules=serial_rules)
+        else:
+            for member in members:
+                member["suggested_name"] = f"Member-{member['position']}"
+
+        logger.info(f"Detected stack with {len(members)} members for device {device_id}")
+        return result
 
     except Exception as e:
         logger.exception("Error detecting virtual chassis for device %s: %s", device_id, e)
@@ -719,7 +714,7 @@ def _existing_member_name(master_name, device, rules) -> str | None:
     return _member_name(master_name, device.vc_position, device.serial, pattern, context)
 
 
-def update_vc_member_suggested_names(vc_data: dict, master_name: str, context) -> dict:
+def update_vc_member_suggested_names(vc_data: dict, master_name: str, *, serial_rules, device_type=None) -> dict:
     """
     Regenerate suggested VC member names using the actual master device name.
 
@@ -729,7 +724,8 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str, context) -
     Args:
         vc_data: Virtual chassis detection data dict
         master_name: The actual name that will be used for master device in NetBox
-        context: The serial context of the DeviceType the device imports as.
+        serial_rules: The batch's serial rules.
+        device_type: The DeviceType the device imports as. None uses global rules.
 
     Returns:
         Updated vc_data dict with corrected suggested_name for each member
@@ -740,6 +736,7 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str, context) -
 
     # Load naming pattern once to avoid a DB query per member
     vc_pattern = _load_vc_member_name_pattern()
+    context = serial_rules.for_device_type(device_type) if _vc_name_uses_serial(vc_pattern) else plain_context()
     members = vc_data.get("members", [])
     for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
         member["position"] = position

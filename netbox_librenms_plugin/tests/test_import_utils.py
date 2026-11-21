@@ -1410,7 +1410,7 @@ class TestVCPositionHandling:
         expected_names,
     ):
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
-        from netbox_librenms_plugin.serial_identity import plain_context
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         settings_row = LibreNMSSettings.objects.order_by("pk").first()
@@ -1426,7 +1426,7 @@ class TestVCPositionHandling:
             ],
         }
 
-        result = update_vc_member_suggested_names(vc_data, master_name, plain_context())
+        result = update_vc_member_suggested_names(vc_data, master_name, serial_rules=SerialRules())
 
         assert [member["suggested_name"] for member in result["members"]] == expected_names
         # One invalid position numbers the whole stack in row order from 1.
@@ -1744,31 +1744,31 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
     def test_not_stack_returns_vc_data_unchanged(self):
         """When is_stack=False, the function returns immediately without modifying members."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
-        from netbox_librenms_plugin.serial_identity import plain_context
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         vc_data = {
             "is_stack": False,
             "members": [{"serial": "S1", "position": 1, "suggested_name": "old-name"}],
         }
-        result = update_vc_member_suggested_names(vc_data, "sw", plain_context())
+        result = update_vc_member_suggested_names(vc_data, "sw", serial_rules=SerialRules())
         # suggested_name must not be regenerated
         assert result["members"][0]["suggested_name"] == "old-name"
 
     def test_none_vc_data_returns_none(self):
         """None input is returned as-is (falsy guard)."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
-        from netbox_librenms_plugin.serial_identity import plain_context
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        result = update_vc_member_suggested_names(None, "sw", plain_context())
+        result = update_vc_member_suggested_names(None, "sw", serial_rules=SerialRules())
         assert result is None
 
     def test_no_members_returns_empty_members(self):
         """is_stack=True with empty members list processes without error."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
-        from netbox_librenms_plugin.serial_identity import plain_context
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         vc_data = {"is_stack": True, "members": []}
-        result = update_vc_member_suggested_names(vc_data, "sw", plain_context())
+        result = update_vc_member_suggested_names(vc_data, "sw", serial_rules=SerialRules())
 
         assert result["members"] == []
 

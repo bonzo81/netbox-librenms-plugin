@@ -403,8 +403,11 @@ class TestDetectVirtualChassisFailures:
         ]
 
     @pytest.mark.parametrize("pattern", ["-M{position}", "-{serial}"], ids=["position", "serial"])
-    def test_a_chassis_stack_checks_serial_rules_only_for_serial_names(self, settings, librenms_server, pattern):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    def test_import_validation_checks_serial_rules_only_for_serial_names(self, settings, librenms_server, pattern):
+        from netbox_librenms_plugin.import_utils.device_operations import (
+            get_librenms_device_by_id,
+            validate_device_for_import,
+        )
         from netbox_librenms_plugin.models import NormalizationRule
 
         api = _api(settings, librenms_server, "vc_detect_blank_serials")
@@ -414,8 +417,10 @@ class TestDetectVirtualChassisFailures:
         rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)$", replacement=r"\1")
         NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
 
-        result = get_virtual_chassis_data(api, device_id, force_refresh=True)
+        device = get_librenms_device_by_id(api, device_id, use_cache=False)
+        validation = validate_device_for_import(device, api=api, server_key=api.server_key, force_vc_refresh=True)
 
+        result = validation["virtual_chassis"]
         assert result["detection_failed"] is (pattern == "-{serial}")
         if pattern == "-M{position}":
             assert result["is_stack"] is True
@@ -482,7 +487,7 @@ class TestUpdateVcMemberSuggestedNames:
             ],
         }
 
-        result = update_vc_member_suggested_names(vc_data, "sw1", SerialRules.load().context(None))
+        result = update_vc_member_suggested_names(vc_data, "sw1", serial_rules=SerialRules.load())
 
         assert [member["position"] for member in result["members"]] == [1, 2]
         assert [member["suggested_name"] for member in result["members"]] == ["sw1-M1", "sw1-M2"]
