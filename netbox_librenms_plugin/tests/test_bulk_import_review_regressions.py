@@ -679,7 +679,7 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
 
 
 @pytest.mark.django_db
-def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved():
+def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved(live_librenms):
     """The scan cannot check a serial whose lookup is Unavailable, so the precheck must skip that row."""
     from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck, detect_collisions_for_device_ids
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
@@ -697,16 +697,15 @@ def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved()
         }
     }
 
-    collisions, unresolved = detect_collisions_for_device_ids(
-        [96401], _LibreNMSBoundary(rows), libre_devices_cache=rows
-    )
+    collisions, unresolved = detect_collisions_for_device_ids([96401], live_librenms.api, libre_devices_cache=rows)
 
     assert (collisions, unresolved) == ([], [96401])
     assert classify_bulk_precheck(collisions, unresolved, [96401], {}).importable_device_ids == []
+    assert not live_librenms.server.requests
 
 
 @pytest.mark.django_db
-def test_collision_precheck_reads_the_serial_rules_once_for_the_batch():
+def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_librenms):
     """Each Device row with a real serial needs the serial rules, so the batch must share one read of them."""
     from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
     from netbox_librenms_plugin.models import NormalizationRule
@@ -717,17 +716,29 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch():
     rows[96212].update(hostname="serial-rules-once-b", sysName="serial-rules-once-b")
     rows[96211]["serial"] = "SERIAL-RULES-ONCE-A"
     rows[96212]["serial"] = "SERIAL-RULES-ONCE-B"
+    for device_id, row in rows.items():
+        live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+        live_librenms.server.vc_inventory_callable(device_id, [], {})
 
     with CaptureQueriesContext(connection) as reference:
         list(NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL))
     (serial_only_query,) = (query["sql"] for query in reference.captured_queries)
     with CaptureQueriesContext(connection) as captured:
         collisions, unresolved = detect_collisions_for_device_ids(
-            [96211, 96212], _LibreNMSBoundary(rows), libre_devices_cache=rows, sync_options={"use_sysname": True}
+            [96211, 96212], live_librenms.api, libre_devices_cache=rows, sync_options={"use_sysname": True}
         )
 
     assert (collisions, unresolved) == ([], [])
     assert [query["sql"] for query in captured.captured_queries].count(serial_only_query) == 1
+    assert [
+        (request["path"], request["query"])
+        for request in live_librenms.server.requests
+        if request["path"].startswith("/api/v0/inventory/")
+    ] == [
+        (f"/api/v0/inventory/{device_id}{suffix}", query)
+        for device_id in rows
+        for suffix, query in [("", {"entPhysicalContainedIn": ["0"]}), ("/all", {})]
+    ]
 
 
 @pytest.mark.django_db
