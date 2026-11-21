@@ -30,10 +30,34 @@ class MoveModuleView(View):
         assignment_lock([serial for _pk, serial in (*moving, *removing)], model=Module, rules=rules)
         # ruleid: module-writer-claims-released-identities
         lock_module_write(observe_module_write(device_ids=[target_device.pk]), rules=rules)
+        # ruleid: module-writer-claims-released-identities
+        lock_module_write(observe_module_write(device_ids=[target_device.pk], subtree_roots=[conflict_module_id]))
+        # ruleid: module-writer-claims-released-identities
+        lock_module_write(
+            observe_module_write(
+                device_ids=[target_device.pk],
+                subtree_roots=[occupant_id] if same_device_move else [conflict_module_id],
+                observed_ids=[conflict_module_id] if same_device_move else [],
+            ),
+            rules=rules,
+        )
         # ok: module-writer-claims-released-identities
         lock_module_write(
             observe_module_write(device_ids=[target_device.pk], subtree_roots=[conflict_module_id, occupant_id]),
             rules=rules,
+        )
+        # ok: module-writer-claims-released-identities
+        lock_module_write(
+            observe_module_write(
+                device_ids=[target_device.pk],
+                subtree_roots=[occupant_id] if same_device_move else [conflict_module_id, occupant_id],
+                observed_ids=[conflict_module_id] if same_device_move else [],
+            ),
+            rules=rules,
+        )
+        # ok: module-writer-claims-released-identities
+        lock_module_write(
+            observe_module_write(device_ids=[target_device.pk], subtree_roots=[], observed_ids=[conflict_module_id])
         )
 
 

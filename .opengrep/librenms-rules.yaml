@@ -2007,6 +2007,13 @@ rules:
               class MoveModuleView(...):
                   ...
           - pattern: assignment_lock([$SERIAL for $PAIR in moving], model=Module, ...)
+      - patterns:
+          - pattern-inside: |
+              class MoveModuleView(...):
+                  ...
+          - pattern-either:
+              - pattern: lock_module_write(observe_module_write(..., subtree_roots=[conflict_module_id], ...), ...)
+              - pattern: lock_module_write(observe_module_write(..., subtree_roots=$SAME if same_device_move else [conflict_module_id], ...), ...)
       # The production helper: an observation without the changed modules claims only the incoming serial.
       - patterns:
           - pattern-either:
