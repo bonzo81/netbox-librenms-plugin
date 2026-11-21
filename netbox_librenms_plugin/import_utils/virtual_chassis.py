@@ -596,15 +596,15 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, s
         if not members:
             return None
 
-        # Load naming pattern once to avoid a DB query per member.
-        vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
-        for member in members:
-            if master_name:
-                # The DeviceType is not known yet, so the global context names the members.
+        if master_name:
+            vc_name_pattern = _load_vc_member_name_pattern()
+            context = serial_rules.context(None) if _vc_name_uses_serial(vc_name_pattern) else plain_context()
+            for member in members:
                 member["suggested_name"] = _member_name(
-                    master_name, member["position"], member["serial"], vc_name_pattern, serial_rules.context(None)
+                    master_name, member["position"], member["serial"], vc_name_pattern, context
                 )
-            else:
+        else:
+            for member in members:
                 member["suggested_name"] = f"Member-{member['position']}"
 
         logger.info(f"Detected stack with {len(members)} members for device {device_id}")
@@ -693,17 +693,21 @@ def _vc_name_fields(pattern):
             yield from _vc_name_fields(format_spec)
 
 
+def _vc_name_uses_serial(pattern):
+    try:
+        fields = list(_vc_name_fields(pattern))
+    except ValueError:
+        return False
+    return any(field == "serial" or field.startswith(("serial[", "serial.")) for field in fields)
+
+
 def _existing_member_name(master_name, device, rules) -> str | None:
     """Return the name to use for an existing member, or None when the suffix needs unavailable serial rules."""
     if not master_name or not getattr(device, "virtual_chassis_id", None) or not is_vc_position(device.vc_position):
         return master_name
 
     pattern = _load_vc_member_name_pattern()
-    try:
-        fields = list(_vc_name_fields(pattern))
-    except ValueError:
-        fields = []
-    if not any(field == "serial" or field.startswith(("serial[", "serial.")) for field in fields):
+    if not _vc_name_uses_serial(pattern):
         return _member_name(master_name, device.vc_position, None, pattern, plain_context())
 
     try:

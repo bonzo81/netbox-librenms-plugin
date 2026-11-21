@@ -402,6 +402,25 @@ class TestDetectVirtualChassisFailures:
             "sw-positions-M2",
         ]
 
+    @pytest.mark.parametrize("pattern", ["-M{position}", "-{serial}"], ids=["position", "serial"])
+    def test_a_chassis_stack_checks_serial_rules_only_for_serial_names(self, settings, librenms_server, pattern):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        api = _api(settings, librenms_server, "vc_detect_blank_serials")
+        device_id = 7307
+        _name_pattern(pattern)
+        _seed_stack(librenms_server, device_id, serials=("", ""))
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)$", replacement=r"\1")
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+
+        result = get_virtual_chassis_data(api, device_id, force_refresh=True)
+
+        assert result["detection_failed"] is (pattern == "-{serial}")
+        if pattern == "-M{position}":
+            assert result["is_stack"] is True
+            assert [member["suggested_name"] for member in result["members"]] == ["sw-7307-M1", "sw-7307-M2"]
+
     def test_a_detection_payload_cached_before_this_shape_is_not_trusted(self, settings, librenms_server):
         """A v3 payload stored a master decision; reading it now would import a stack standalone for good."""
         from django.core.cache import cache

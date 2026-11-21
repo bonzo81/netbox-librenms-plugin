@@ -422,6 +422,20 @@ def test_an_imported_stack_master_already_has_the_name_that_validation_and_the_s
     assert response.context["resolved_name"] == master.name
 
 
+def test_fpc_detection_checks_serial_rules_with_position_names(recording_server):
+    from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
+
+    LibreNMSSettings.objects.all().update(vc_member_name_pattern="-M{position}")
+    rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)$", replacement=r"\1")
+    _server, api = recording_server(load_recording(_RECORDING))
+    assert get_virtual_chassis_data(api, _DEVICE_ID, force_refresh=True)["is_stack"] is True
+
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+
+    assert get_virtual_chassis_data(api, _DEVICE_ID, force_refresh=True)["detection_failed"] is True
+
+
 def test_a_cached_no_stack_result_is_detected_again_after_a_serial_rule_change(recording_server):
     """The root "SERIAL-A" matches FPC "S/N SERIAL-A" only under the extractor that a later rule adds."""
     from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
