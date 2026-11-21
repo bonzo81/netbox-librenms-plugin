@@ -5776,8 +5776,12 @@ class TestDeviceConflictActionBranches:
         self._register_device(5440, "branches-rule-error-ctrl", serial="REAL-5440")
 
         response = post_view(self._make_view(), self._request("sync_name", member, "rule-error-user"), device_id=5440)
+        platform_response = post_view(
+            self._make_view(), self._request("sync_platform", member, "rule-error-platform-user"), device_id=5440
+        )
 
         assert response.headers.get("HX-Reswap") == "none"
+        assert response.content == platform_response.content
         assert Device.objects.get(pk=member.pk).name == "branches-rule-error-member"
 
     def test_a_merge_row_at_the_host_oob_ip_copies_nothing(self):
