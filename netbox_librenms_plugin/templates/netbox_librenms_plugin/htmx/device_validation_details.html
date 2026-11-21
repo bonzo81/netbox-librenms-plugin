@@ -814,7 +814,7 @@
             <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
             {% else %}
             <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
-              <i class="mdi mdi-pencil"></i> Update &amp; Link
+              {% if validation.existing_device.virtual_chassis_id %}<i class="mdi mdi-link-plus"></i> Link to LibreNMS{% else %}<i class="mdi mdi-pencil"></i> Update &amp; Link{% endif %}
             </button>
             {% endif %}
           </form>
@@ -1120,7 +1120,7 @@
             <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
             {% else %}
             <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
-              <i class="mdi mdi-pencil"></i> Update &amp; Link
+              {% if validation.existing_device.virtual_chassis_id %}<i class="mdi mdi-link-plus"></i> Link to LibreNMS{% else %}<i class="mdi mdi-pencil"></i> Update &amp; Link{% endif %}
             </button>
             {% endif %}
           {% endif %}
@@ -1181,7 +1181,7 @@
           <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
           {% else %}
           <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
-            <i class="mdi mdi-pencil"></i> Update &amp; Link
+            {% if validation.existing_device.virtual_chassis_id %}<i class="mdi mdi-link-plus"></i> Link to LibreNMS{% else %}<i class="mdi mdi-pencil"></i> Update &amp; Link{% endif %}
           </button>
           {% endif %}
         </form>
