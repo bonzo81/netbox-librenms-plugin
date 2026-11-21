@@ -683,6 +683,9 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
     from django.core.cache import cache
 
     from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+    from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user_model = get_user_model()
@@ -692,6 +695,9 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
     device_id = 46105
     filters = {"hostname": "private-job-result"}
     cached_device = librenms_device(device_id, "private-job-result")
+    cached_device["_validation"] = validate_device_for_import(
+        cached_device, server_key="secondary", include_vc_detection=False
+    )
     cache_key = get_validated_device_cache_key(
         server_key="secondary",
         filters=filters,
@@ -710,23 +716,25 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
             "device_ids": [device_id],
             "filters": filters,
             "server_key": "secondary",
+            "serial_rules": serial_rules_version(SerialRules.load()),
             "vc_detection_enabled": False,
             "use_sysname": True,
             "strip_domain": False,
         },
     )
-    client.force_login(requester)
-
     try:
+        client.force_login(owner)
+        owner_response = client.get(import_url, {"job_id": job.pk})
+        assert owner_response.status_code == 200
+        assert [row.record["device_id"] for row in owner_response.context["table"].rows] == [device_id]
+
+        client.force_login(requester)
         response = client.get(import_url, {"job_id": job.pk})
     finally:
         cache.delete(cache_key)
 
     assert response.status_code == 200
-    html = response.content.decode()
-    marker = "private-job-result"
-    marker_index = html.find(marker)
-    assert marker_index == -1, html[max(0, marker_index - 200) : marker_index + 200]
+    assert [row.record["device_id"] for row in response.context["table"].rows] == []
 
 
 @pytest.mark.django_db
