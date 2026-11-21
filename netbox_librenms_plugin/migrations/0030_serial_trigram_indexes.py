@@ -2,6 +2,7 @@
 
 from django.contrib.postgres.operations import TrigramExtension
 from django.db import DatabaseError, migrations, models
+from psycopg import sql
 
 # serial_identity.TRIM_CHARACTERS; a migration does not import app code, and a test compares the two.
 _SERIAL_TRIM_CHARACTERS = " \t\n\r\v\f"
@@ -87,9 +88,8 @@ def ensure_serial_trigram_indexes(apps, schema_editor):
     """Create both trigram indexes, reusing a valid copy or repairing an interrupted concurrent build."""
     del apps
     connection = schema_editor.connection
-    quote = schema_editor.quote_name
     # A literal, not a bound parameter: CREATE INDEX takes none under server-side binding.
-    trim_literal = "'" + _SERIAL_TRIM_CHARACTERS.replace("'", "''") + "'"
+    trim_literal = sql.Literal(_SERIAL_TRIM_CHARACTERS)
     for name, table in _TRIGRAM_INDEXES:
         # An index lives in the schema of its table; pg_trgm can live in another schema.
         table_namespace, table_schema, extension_namespace, extension_schema = _schemas(connection, table)
@@ -125,22 +125,28 @@ def ensure_serial_trigram_indexes(apps, schema_editor):
                 raise RuntimeError(f"Existing index {name!r} has an incompatible definition")
             if valid and ready:
                 continue
-            schema_editor.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {quote(table_schema)}.{quote(name)}")
-        schema_editor.execute(
-            f"CREATE INDEX CONCURRENTLY {quote(name)} ON {quote(table_schema)}.{quote(table)} "
-            f"USING gin ((BTRIM({quote('serial')}, {trim_literal})) {quote(extension_schema)}.gin_trgm_ops)"
+            drop = sql.SQL("DROP INDEX CONCURRENTLY IF EXISTS {}").format(sql.Identifier(table_schema, name))
+            schema_editor.execute(drop.as_string(connection.connection), params=None)
+        create = sql.SQL("CREATE INDEX CONCURRENTLY {} ON {} USING gin ((BTRIM({}, {})) {})").format(
+            sql.Identifier(name),
+            sql.Identifier(table_schema, table),
+            sql.Identifier("serial"),
+            trim_literal,
+            sql.Identifier(extension_schema, "gin_trgm_ops"),
         )
+        schema_editor.execute(create.as_string(connection.connection), params=None)
 
 
 def drop_serial_trigram_indexes(apps, schema_editor):
     """Drop the plugin-owned trigram indexes when reversing the migration."""
     del apps
-    quote = schema_editor.quote_name
+    connection = schema_editor.connection
     for name, table in _TRIGRAM_INDEXES:
-        table_schema = _schemas(schema_editor.connection, table)[1]
+        table_schema = _schemas(connection, table)[1]
         # CONCURRENTLY: a plain drop blocks new reads of the table; an enclosing transaction (a test) refuses it.
-        concurrently = "" if schema_editor.connection.in_atomic_block else " CONCURRENTLY"
-        schema_editor.execute(f"DROP INDEX{concurrently} IF EXISTS {quote(table_schema)}.{quote(name)}")
+        concurrently = sql.SQL("" if connection.in_atomic_block else " CONCURRENTLY")
+        drop = sql.SQL("DROP INDEX{} IF EXISTS {}").format(concurrently, sql.Identifier(table_schema, name))
+        schema_editor.execute(drop.as_string(connection.connection), params=None)
 
 
 class Migration(migrations.Migration):

@@ -397,6 +397,7 @@ def _trigram_index_schemas():
             JOIN pg_class AS index_class ON index_class.oid = index_state.indexrelid
             JOIN pg_opclass AS operator_class ON operator_class.oid = index_state.indclass[0]
             WHERE index_class.relname IN ('nblp_dcim_device_serial_trgm_idx', 'nblp_dcim_module_serial_trgm_idx')
+              AND pg_table_is_visible(index_class.oid)
             ORDER BY index_class.relname
             """
         )
@@ -410,6 +411,7 @@ def _trigram_index_oids():
         cursor.execute(
             "SELECT relname, oid FROM pg_class"
             " WHERE relname IN ('nblp_dcim_device_serial_trgm_idx', 'nblp_dcim_module_serial_trgm_idx')"
+            " AND pg_table_is_visible(oid)"
             " ORDER BY relname"
         )
         return cursor.fetchall()
@@ -453,9 +455,14 @@ def test_the_trigram_migration_finds_its_indexes_in_the_schema_of_their_table():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extension():
+@pytest.mark.parametrize("schema_suffix", ["ops", '"ops%'], ids=["plain", "quoted"])
+def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extension(schema_suffix):
     """pg_trgm installed in a schema outside the search path still gives the indexes their operator class."""
-    from django.db import connection
+    from django.db import OperationalError, connection
+    from psycopg import sql
+    from psycopg.errors import LockNotAvailable
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
 
     with connection.cursor() as cursor:
         cursor.execute(
@@ -465,30 +472,62 @@ def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extensio
         can_move, owner, home = cursor.fetchone()
     if not can_move:
         pytest.fail(f"Only the owner of pg_trgm can move it: run the tests as {owner!r} or as a superuser")
-    schema = _probe_schema_name()
+    extension_schema = f"{_probe_schema_name()}_trgm{schema_suffix}"
+    table_schema = f"{_probe_schema_name()}_tables{schema_suffix}"
+    extension = sql.Identifier(extension_schema)
+    tables = sql.Identifier(table_schema)
+    indexes = importlib.import_module(_TRGM_MIGRATION)._TRIGRAM_INDEXES
     moved = False
     try:
         with connection.cursor() as cursor:
-            cursor.execute(f"CREATE SCHEMA {schema}")
-            cursor.execute(f"ALTER EXTENSION pg_trgm SET SCHEMA {schema}")
-        moved = True
-        _run_index_step("drop_serial_trigram_indexes")
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(extension))
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(tables))
+            cursor.execute(sql.SQL("ALTER EXTENSION pg_trgm SET SCHEMA {}").format(extension))
+            moved = True
+            cursor.execute(sql.SQL("SET search_path = {}").format(tables))
+            cursor.execute("SELECT quote_ident(%s), quote_ident(%s)", [table_schema, extension_schema])
+            table_name, extension_name = cursor.fetchone()
+            for _, table in indexes:
+                cursor.execute(sql.SQL("CREATE TABLE {} (serial varchar(50))").format(sql.Identifier(table)))
+
+        name, table = indexes[0]
+        with second_connection() as other, other.cursor() as writer, connection.cursor() as cursor:
+            writer.execute(
+                sql.SQL("INSERT INTO {} (serial) VALUES ('ABC123')").format(sql.Identifier(table_schema, table))
+            )
+            cursor.execute("SET lock_timeout = '1s'")
+            try:
+                with pytest.raises(OperationalError) as caught:
+                    cursor.execute(
+                        sql.SQL("CREATE INDEX CONCURRENTLY {} ON {} USING gin ((btrim(serial, {})) {})").format(
+                            sql.Identifier(name),
+                            sql.Identifier(table),
+                            sql.Literal(" \t\n\r\v\f"),
+                            sql.Identifier(extension_schema, "gin_trgm_ops"),
+                        )
+                    )
+                assert isinstance(caught.value.__cause__, LockNotAvailable)
+            finally:
+                cursor.execute("RESET lock_timeout")
+        assert _trigram_index_schemas() == [(name, table_name, extension_name, False)]
+        invalid_oids = _trigram_index_oids()
+
         _run_index_step("ensure_serial_trigram_indexes")
         built, built_oids = _trigram_index_schemas(), _trigram_index_oids()
-        # A second run reuses the indexes that it built.
+        assert built_oids[0] != invalid_oids[0]
         _run_index_step("ensure_serial_trigram_indexes")
         assert _trigram_index_oids() == built_oids
+        _run_index_step("drop_serial_trigram_indexes")
+        assert _trigram_index_schemas() == []
     finally:
         with connection.cursor() as cursor:
+            cursor.execute("RESET search_path")
             if moved:
                 cursor.execute(f"ALTER EXTENSION pg_trgm SET SCHEMA {home}")
-            cursor.execute(f"DROP SCHEMA IF EXISTS {schema}")
-        _run_index_step("ensure_serial_trigram_indexes")
+            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(tables))
+            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {}").format(extension))
 
-    assert built == [
-        ("nblp_dcim_device_serial_trgm_idx", "public", schema, True),
-        ("nblp_dcim_module_serial_trgm_idx", "public", schema, True),
-    ]
+    assert built == [(name, table_name, extension_name, True) for name, _ in indexes]
 
 
 @pytest.mark.django_db(transaction=True)
