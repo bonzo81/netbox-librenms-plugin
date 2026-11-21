@@ -29,4 +29,4 @@ class Command(BaseCommand):
             )
             outcome = f"keys to {key!r}" if key else reason
             self.stdout.write(f"{kind} {row.pk} ({name}): stored {stored!r} {outcome}")
-        self.stdout.write(f"{count} row(s) change under the current serial rules.")
+        self.stdout.write(f"{count} row(s) reported.")

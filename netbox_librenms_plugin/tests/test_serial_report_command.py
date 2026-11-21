@@ -129,6 +129,20 @@ class TestSerialReportCommand:
         assert list(report_rows(rules)) == []
         assert set(context._keys) == {"KNOWN-SN1"}
 
+    def test_an_unchecked_row_counts_as_reported(self):
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        _rules_only(r"^(.+)$")
+        rule = NormalizationRule.objects.get(scope="serial")
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+        make_device("report-unchecked", serial="UNCHECKED-SN1")
+
+        lines = _report()
+
+        assert f"(ID {rule.pk})" in lines[0]
+        assert lines[-1] == "1 row(s) reported."
+
     def test_a_rule_that_matches_its_own_output_can_stop_a_legacy_row_from_matching(self):
         """The documented limit: the original "00ABC12" no longer finds its stored rule output "0ABC12"."""
         from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
