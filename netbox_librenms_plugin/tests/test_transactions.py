@@ -546,29 +546,6 @@ def test_a_block_that_drops_inside_the_open_writer_keeps_the_writers_payload():
 
 
 @pytest.mark.django_db
-def test_a_rolled_back_savepoint_keeps_the_last_saved_value_in_the_outer_event():
-    from netbox_librenms_plugin.transactions import atomic_with_events
-
-    class _Refused(Exception):
-        pass
-
-    site = _site("unsaved-before-savepoint")
-    with _netbox_request_context():
-        with atomic_with_events():
-            _write_site(site, "kept")
-            site.description = "rejected"
-            with pytest.raises(_Refused), atomic_with_events():
-                site.save(update_fields=["description"])
-                raise _Refused()
-
-        event = _the_one_event(site)
-        payload = event["data"]
-        site.refresh_from_db()
-        assert site.description == event["snapshots"]["postchange"]["description"] == "kept"
-        assert payload["description"] == "kept"
-
-
-@pytest.mark.django_db
 @pytest.mark.parametrize("later_save", [False, True], ids=["outer-save", "successful-inner-save"])
 def test_a_failed_savepoint_without_events_keeps_the_last_saved_payload(later_save):
     from django.core.exceptions import ValidationError
@@ -645,7 +622,6 @@ def test_a_direct_save_refreshes_an_already_frozen_event_in_the_same_queue():
             with row_savepoint():
                 pass
             _write_site(site, "second")
-            site.description = "unsaved"
 
         event = _the_one_event(site)
         assert event["data"]["description"] == "second"

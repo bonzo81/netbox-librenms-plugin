@@ -223,9 +223,7 @@ class _EventQueue(dict):
         for key in tuple(self._pending):
             event = self.get(key)
             if event is not None and "data" not in event:
-                model = type(event["object"])
-                row = model._base_manager.get(pk=event["object_id"])
-                event.freeze_data(row)
+                _ = event["data"]
             self._pending.discard(key)
 
 
