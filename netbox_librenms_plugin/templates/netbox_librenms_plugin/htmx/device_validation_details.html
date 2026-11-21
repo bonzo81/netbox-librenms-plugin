@@ -702,7 +702,7 @@
               </label>
             </div>
           {% endif %}
-          {% if validation.serial_action == 'update_serial' %}
+          {% if validation.serial_action == 'update_serial' and not validation.existing_device.virtual_chassis_id %}
             <input type="hidden" name="action" value="update_serial">
             <button type="submit" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
               <i class="mdi mdi-swap-horizontal"></i> Update Serial &amp; Link
@@ -810,10 +810,10 @@
                 </label>
               </div>
             {% endif %}
-            {% if sync_info.serial_fit_refusal %}
+            {% if sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
             <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
             {% else %}
-            <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+            <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
               <i class="mdi mdi-pencil"></i> Update &amp; Link
             </button>
             {% endif %}
@@ -1116,10 +1116,10 @@
               <i class="mdi mdi-link-plus"></i> Link to LibreNMS
             </button>
           {% elif validation.serial_action == 'hostname_differs' %}
-            {% if sync_info.serial_fit_refusal %}
+            {% if sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
             <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
             {% else %}
-            <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+            <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
               <i class="mdi mdi-pencil"></i> Update &amp; Link
             </button>
             {% endif %}
@@ -1177,10 +1177,10 @@
               </label>
             </div>
           {% endif %}
-          {% if sync_info.serial_fit_refusal %}
+          {% if sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
           <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
           {% else %}
-          <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+          <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
             <i class="mdi mdi-pencil"></i> Update &amp; Link
           </button>
           {% endif %}

@@ -2019,6 +2019,21 @@ class TestDeviceValidationDetailsView:
         assert response.status_code == 200
         assert b'value="sync_serial"' not in response.content
 
+    def test_an_unlinked_chassis_member_offers_link_without_serial_update(self):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-chassis-link")
+        member.serial = "MEMBER-OLD"
+        member.save()
+        self.primary_server.device_info_response(device_id=1, hostname=member.name, serial="CHASSIS-SERIAL")
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        assert b'name="action" value="update_serial"' not in response.content
+        assert b'name="action" value="link"' in response.content
+
     def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
         from dcim.models import Platform
 
@@ -5061,9 +5076,8 @@ class TestDeviceConflictActionBranches:
         assert reloaded.device_type_id == reported_type.pk
         assert reloaded.serial == "OLD-0"
 
-    @pytest.mark.parametrize(("member_serial", "written"), [("PREFIX-ABC123", True), ("ABC123", False)])
-    def test_a_forced_type_and_serial_update_checks_the_members_under_the_new_master_type(self, member_serial, written):
-        """The old master rule strips "PREFIX-", the new one does not: only a member that still keys to ABC123 refuses."""
+    @pytest.mark.parametrize(("member_serial", "linked"), [("PREFIX-OTHER123", True), ("PREFIX-ABC123", False)])
+    def test_a_forced_link_checks_member_serials_under_the_new_master_type(self, member_serial, linked):
         from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
 
         from netbox_librenms_plugin.models import NormalizationRule
@@ -5071,13 +5085,7 @@ class TestDeviceConflictActionBranches:
 
         view = self._make_view()
         tag = f"branches-projected-{member_serial}".lower()
-        target = make_device(tag, serial="BEFORE123", librenms_cf={self.server_key: 42})
-        NormalizationRule.objects.create(
-            scope="serial",
-            match_pattern=r"^PREFIX-(.+)$",
-            replacement=r"\1",
-            manufacturer=target.device_type.manufacturer,
-        )
+        target = make_device(tag, serial="ABC123")
         member = make_device(f"{tag}-member", serial=member_serial)
         chassis = make_virtual_chassis(f"{tag}-chassis", target, member)
         VirtualChassis.objects.filter(pk=chassis.pk).update(master=target)
@@ -5087,18 +5095,24 @@ class TestDeviceConflictActionBranches:
             slug=f"{tag}-type",
             part_number=f"{tag}-hw".upper(),
         )
-        self._register_device(42, target.name, serial="ABC123", hardware=reported_type.part_number)
-        request = self._request("update", target, f"{tag}-user", force="on")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^PREFIX-(.+)$", replacement=r"\1", manufacturer=reported_type.manufacturer
+        )
+        self._register_device(42, target.name, serial="CHASSIS-SERIAL", hardware=reported_type.part_number)
+        request = self._request("link", target, f"{tag}-user", force="on")
 
         response = post_view(view, request, device_id=42)
 
         reloaded = Device.objects.get(pk=target.pk)
-        if written:
+        assert reloaded.serial == "ABC123"
+        if linked:
             self._assert_success(response)
-            assert (reloaded.device_type_id, reloaded.serial) == (reported_type.pk, "ABC123")
+            assert reloaded.device_type_id == reported_type.pk
+            assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
         else:
             assert response.headers.get("HX-Reswap") == "none"
-            assert (reloaded.device_type_id, reloaded.serial) == (target.device_type_id, "BEFORE123")
+            assert reloaded.device_type_id == target.device_type_id
+            assert stored_mapping_for_test(reloaded) is None
 
     def test_update_serial_reports_a_real_serial_conflict(self):
         from dcim.models import Device
@@ -5244,6 +5258,25 @@ class TestDeviceConflictActionBranches:
         target.refresh_from_db()
         sibling.refresh_from_db()
         assert (target.serial, sibling.serial) == ("MEMBER-OLD", "")
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+
+    @pytest.mark.parametrize("action", ["update_serial", "update"])
+    def test_a_link_update_refuses_a_device_level_serial_for_a_chassis_member(self, action):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (target, sibling) = make_virtual_chassis_members("import-chassis-link-update")
+        target.serial = "MEMBER-OLD"
+        target.save()
+        self._register_device(42, target.name, serial="CHASSIS-SERIAL")
+        request = self._request(action, target, "import-chassis-link-update-user")
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        target.refresh_from_db()
+        sibling.refresh_from_db()
+        assert (target.serial, sibling.serial) == ("MEMBER-OLD", "")
+        assert stored_mapping_for_test(target) is None
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
 

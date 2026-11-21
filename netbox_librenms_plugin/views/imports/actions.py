@@ -2419,6 +2419,8 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
+                if writes_serial and (refusal := direct_serial_sync_refusal(existing_device)):
+                    return _htmx_error_response(refusal)
                 if retyped is not None:
                     # The serial decision and the retype check both read the new type's maker under its row lock.
                     librenms_device_type = locked_device_type(librenms_device_type)
