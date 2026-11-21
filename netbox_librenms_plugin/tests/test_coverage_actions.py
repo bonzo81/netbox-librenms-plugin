@@ -8584,9 +8584,19 @@ class TestSerialActionsNormalizeAndLock:
 
     @staticmethod
     def _row_locks_of(sqls, device):
-        """Return the FOR UPDATE queries that lock the row of *device*."""
-        pk_filter = re.compile(rf'"dcim_device"\."id" = {device.pk}(?!\d)')
-        return [sql for sql in sqls if "FOR UPDATE" in sql and pk_filter.search(sql.partition(" WHERE ")[2])]
+        """Return the queries that lock the row of *device*."""
+        lock_clause = re.compile(r"\bFOR (?:NO KEY UPDATE|UPDATE|KEY SHARE|SHARE)\b")
+        pk_filter = re.compile(r'"dcim_device"\."id" (?:= (\d+)|IN \(([0-9, ]+)\))')
+        return [
+            sql
+            for sql in sqls
+            if lock_clause.search(sql)
+            and any(
+                int(pk) == device.pk
+                for equality, membership in pk_filter.findall(sql.partition(" WHERE ")[2])
+                for pk in (equality or membership).split(",")
+            )
+        ]
 
     def test_update_serial_persists_trimmed_serial(self):
         """A padded LibreNMS serial is stored trimmed so the next exact lookup still matches."""
