@@ -32,6 +32,7 @@ from ..serial_identity import (
     group,
     is_identity,
     naming_token,
+    plain_context,
     resolve_devices_write,
     stored_form,
 )
@@ -696,7 +697,7 @@ def _existing_member_name(master_name, device, rules, *, incoming_serial=None) -
     except ValueError:
         fields = []
     if not any(field == "serial" or field.startswith(("serial[", "serial.")) for field in fields):
-        return _generate_vc_member_name(master_name, device.vc_position, pattern=pattern)
+        return _member_name(master_name, device.vc_position, None, pattern, plain_context())
 
     try:
         context = rules.for_device(device)

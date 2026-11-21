@@ -4647,10 +4647,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 .filter(pk__in=matched_pks, device__in=self.restricted_queryset(Device))
                 .values_list("pk", flat=True)
             )
-        serials_by_target = defaultdict(set)
+        serials_by_target = defaultdict(list)
         for row in rows:
             if row.get("can_install") and row.get("selected_device_id") is not None:
-                serials_by_target[row["selected_device_id"]].add(row["serial"])
+                serials_by_target[row["selected_device_id"]].append(row["serial"])
         target_matches = {
             device_id: resolve_modules(serials, rules=serial_rules, device_ids=[device_id], spare=1)
             for device_id, serials in serials_by_target.items()
