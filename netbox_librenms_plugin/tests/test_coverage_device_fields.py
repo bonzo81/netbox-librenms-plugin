@@ -180,6 +180,27 @@ class TestUpdateDeviceNameView:
         assert device.name == "name-without-live-value"
         assert any("No name could be determined" in text for text in _messages(response, "warning"))
 
+    @pytest.mark.parametrize("hostname", ["stack-a", ""], ids=["upstream-name", "no-upstream-name"])
+    def test_member_name_reports_which_name_could_not_be_resolved(self, logged_in_client, librenms_server, hostname):
+        from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
+        from netbox_librenms_plugin.views.sync.device_fields import _MEMBER_NAME_RULES_UNAVAILABLE, _NO_LIBRENMS_NAME
+
+        member = _linked_device("name-before-unavailable-rules", 6507, serial="MEMBER-SN1")
+        make_virtual_chassis("name-unavailable-chassis", make_device("name-master"), member)
+        plugin_settings, _ = LibreNMSSettings.objects.get_or_create(pk=1)
+        plugin_settings.vc_member_name_pattern = "-{serial}"
+        plugin_settings.save(update_fields=["vc_member_name_pattern"])
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)$", replacement=r"\1")
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+        librenms_server.device_info_response(device_id=6507, hostname=hostname)
+
+        response = _post(logged_in_client, "update_device_name", member)
+
+        member.refresh_from_db()
+        assert response.status_code == 302
+        assert member.name == "name-before-unavailable-rules"
+        assert _messages(response, "warning") == [_MEMBER_NAME_RULES_UNAVAILABLE if hostname else _NO_LIBRENMS_NAME]
+
     def test_real_duplicate_name_validation_rolls_the_change_back(self, logged_in_client, librenms_server):
         device = _linked_device("name-before-duplicate", 6503)
         duplicate = make_device("occupied-name")

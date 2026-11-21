@@ -77,6 +77,8 @@ logger = logging.getLogger(__name__)
 
 
 SYNC_OBJECT_TYPES = ("device", "vm")
+_NO_LIBRENMS_NAME = "No name could be determined from LibreNMS"
+_MEMBER_NAME_RULES_UNAVAILABLE = "Cannot determine the chassis member name because its serial rules are unavailable."
 
 
 def _normalize_sync_object_type(value):
@@ -322,7 +324,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # names that _determine_device_name generates (e.g. "device-42")
         # are only useful during import, not for renaming an existing device.
         if not (device_info.get("sysName") or device_info.get("hostname")):
-            messages.warning(request, "No name could be determined from LibreNMS")
+            messages.warning(request, _NO_LIBRENMS_NAME)
             return _device_sync_redirect(request, pk, server_key)
 
         use_sysname, strip_domain = resolve_naming_preferences(request)
@@ -334,8 +336,8 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         )
 
         resolved_name = _existing_member_name(resolved_name, device, SerialRules.load())
-        if not resolved_name:
-            messages.warning(request, "No name could be determined from LibreNMS")
+        if resolved_name is None:
+            messages.warning(request, _MEMBER_NAME_RULES_UNAVAILABLE)
             return _device_sync_redirect(request, pk, server_key)
 
         old_name, failed = _write_device_field(
