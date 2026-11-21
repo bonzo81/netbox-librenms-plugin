@@ -831,21 +831,28 @@ class TestEquivalentFormsAcrossDecisions:
         from dcim.models import Device
         from django.urls import reverse
 
+        from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
+        from netbox_librenms_plugin.serial_identity import Resolution
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
         _rules_only((SEEDED, r"\1", None))
         target = seed_mapping(make_device("assign-forms-target", serial="ASSIGN-OLD1"), "default", own=7802)
-        make_device("assign-forms-holder", serial="S/N ASSIGN-SN1")
-        serial_librenms.device_info_response(device_id=7802, hostname=target.name, serial="ASSIGN-SN1")
+        holder = make_device("assign-forms-holder", serial="S/N ASSIGN-SN1")
+        incoming = "ASSIGN-SN1"
+        serial_librenms.device_info_response(device_id=7802, hostname=target.name, serial=incoming)
         client.force_login(make_superuser("assign-forms-user"))
 
-        client.post(
+        response = client.post(
             reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": target.pk}),
             {"server_key": "default"},
         )
 
         assert Device.objects.get(pk=target.pk).serial == "ASSIGN-OLD1"
+        request = response.wsgi_request
+        conflict = Resolution(ResolutionKind.UNIQUE, (holder,))
+        assert message_texts(request, "error") == [serial_conflict_text(conflict, incoming, request.user)]
 
     def test_a_serial_update_refuses_a_serial_whose_key_under_the_target_rules_another_device_holds(
         self, client, serial_librenms
@@ -854,22 +861,29 @@ class TestEquivalentFormsAcrossDecisions:
         from dcim.models import Device
         from django.urls import reverse
 
+        from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
+        from netbox_librenms_plugin.serial_identity import Resolution
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
         target_maker = _manufacturer("key-write-target")
         _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", target_maker))
         target = seed_mapping(_device_of(target_maker, "key-write-target", ""), "default", own=7806)
-        make_device("key-write-holder", serial="ABC")
-        serial_librenms.device_info_response(device_id=7806, hostname=target.name, serial="XABC")
+        holder = make_device("key-write-holder", serial="ABC")
+        incoming = "XABC"
+        serial_librenms.device_info_response(device_id=7806, hostname=target.name, serial=incoming)
         client.force_login(make_superuser("key-write-user"))
 
-        client.post(
+        response = client.post(
             reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": target.pk}),
             {"server_key": "default"},
         )
 
         assert Device.objects.get(pk=target.pk).serial == ""
+        request = response.wsgi_request
+        conflict = Resolution(ResolutionKind.UNIQUE, (holder,))
+        assert message_texts(request, "error") == [serial_conflict_text(conflict, incoming, request.user)]
 
     def test_an_import_refuses_a_serial_whose_key_under_the_new_type_rules_another_device_holds(self, settings):
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
