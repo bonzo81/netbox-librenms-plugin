@@ -624,6 +624,10 @@
                                                     title="View VC member serials from inventory">
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
+                                        {% elif object.virtual_chassis %}
+                                            <span class="text-muted small" data-vc-serial-unavailable>
+                                                LibreNMS inventory did not identify the virtual chassis members.
+                                            </span>
                                         {% else %}
                                             {% if serial_admitted and not serial_unavailable %}
                                                 {% if serial_fit_refusal and not serial_matches or serial_fit_refusal and serial_stored_form_differs %}

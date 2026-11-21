@@ -942,25 +942,35 @@ def _set_master(chassis, device):
 
 
 @transactional_db_with_all_apps()
-def test_a_serial_write_on_a_member_that_becomes_master_waits_and_uses_its_new_role(librenms_server):
-    """As master, D's own rule keys "XABC" to the held "ABC", so the write refuses; as a member it would not."""
-    from dcim.models import Device, VirtualChassis
+def test_a_direct_serial_write_refuses_a_device_that_joins_a_chassis_during_the_request(librenms_server):
+    from dcim.models import Device
     from django.urls import reverse
 
-    chassis, promoted, rule_type = _promoted_member("promote-serial", 9861)
-    promoted.device_type = rule_type
-    promoted.save()
-    librenms_server.device_info_response(device_id=9861, hostname=promoted.name, serial="XABC")
-    url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": promoted.pk})
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    master = make_device("join-serial-master")
+    device = seed_mapping(make_device("join-serial-member", serial="OLD-D1"), SERVER_KEY, own=9861)
+    chassis = make_virtual_chassis("join-serial-chassis", master)
+    librenms_server.device_info_response(device_id=9861, hostname=device.name, serial="NEW-D1")
+    url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
 
     status, sqlstates = _write_during_a_chassis_change(
-        make_superuser("promote-serial-user"), url, {"server_key": SERVER_KEY}, [_set_master(chassis, promoted)]
+        make_superuser("join-serial-user"),
+        url,
+        {"server_key": SERVER_KEY},
+        [
+            (
+                f'UPDATE "{Device._meta.db_table}" SET virtual_chassis_id = %s, vc_position = %s WHERE id = %s',
+                [chassis.pk, 2, device.pk],
+            )
+        ],
     )
 
     assert {"40P01", "55P03"}.isdisjoint(sqlstates), sqlstates
     assert status == 302
-    assert VirtualChassis.objects.get(pk=chassis.pk).master_id == promoted.pk
-    assert Device.objects.get(pk=promoted.pk).serial == "OLD-D1"
+    device.refresh_from_db()
+    assert device.virtual_chassis_id == chassis.pk
+    assert device.serial == "OLD-D1"
 
 
 @transactional_db_with_all_apps()

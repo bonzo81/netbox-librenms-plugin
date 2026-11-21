@@ -708,6 +708,38 @@ _JUNOS_VC_INVENTORY = [
 
 @pytest.mark.django_db
 class TestVirtualChassisInventory:
+    @pytest.mark.parametrize("action", ["display", "write"])
+    def test_incomplete_junos_inventory_blocks_direct_serial_sync(self, logged_in_client, librenms_server, action):
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        _vc, (first, second) = make_virtual_chassis_members("inventory-junos-incomplete", count=2)
+        first.serial = "12"
+        first.save()
+        device_id = 6654
+        seed_mapping(first, SERVER_KEY, own=device_id)
+        serials = {1: "ABC123", 120: "12", 121: "ABC123"}
+        inventory = [
+            {**entry, "entPhysicalSerialNum": serials[entry["entPhysicalIndex"]]}
+            for entry in _JUNOS_VC_INVENTORY
+            if entry["entPhysicalIndex"] in serials
+        ]
+        _register_device(librenms_server, device_id, first.name, serial="ABC123", inventory=inventory)
+        direct_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": first.pk})
+
+        if action == "display":
+            response = logged_in_client.get(_sync_url(first))
+            assert response.status_code == 200
+            assert response.context["vc_inventory_serials"] == []
+            assert direct_url not in response.content.decode()
+            assert b"data-vc-serial-unavailable" in response.content
+        else:
+            response = logged_in_client.post(direct_url, {"server_key": SERVER_KEY})
+            first.refresh_from_db()
+            second.refresh_from_db()
+            assert (first.serial, second.serial) == ("12", "")
+            assert response.status_code == 302
+            assert message_texts(response.wsgi_request, "error")
+
     def test_junos_fpc_members_are_both_offered_in_the_serials_modal(self, logged_in_client, librenms_server):
         """A Junos VC lists every FPC member serial, not only the root chassis serial."""
         _vc, members = make_virtual_chassis_members("inventory-junos", count=2)

@@ -199,7 +199,7 @@ def _write_device_field(view, request, pk, server_key, field, value, action, *, 
 
 def _write_device_serial(view, request, pk, server_key, incoming):
     """
-    Write the LibreNMS serial *incoming* to the locked device, and report a refusal or failure to *request*.
+    Write the LibreNMS serial *incoming* to the locked standalone device.
 
     The serial identity locks come before the row lock, then the conflict check reads the locked row.
 
@@ -211,6 +211,8 @@ def _write_device_serial(view, request, pk, server_key, incoming):
     old_values = []
 
     def apply(row):
+        if row.virtual_chassis_id is not None:
+            raise _WriteRefused("The LibreNMS device serial cannot identify this virtual chassis member.")
         assignment = device_assignment(row, incoming, rules=serial_rules)
         if assignment.conflict is not None:
             raise _WriteRefused(serial_conflict_text(assignment.conflict, serial, request.user))
@@ -225,7 +227,6 @@ def _write_device_serial(view, request, pk, server_key, incoming):
         with atomic_with_events():
             serial_rules = SerialRules.load()
             assignment_lock([incoming], model=Device, rules=serial_rules)
-            lock_chassis_of(pk)
             update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
     except Device.DoesNotExist:
         messages.error(request, "Device no longer exists.")
