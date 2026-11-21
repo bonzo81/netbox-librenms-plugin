@@ -3625,7 +3625,7 @@ class TestDetectSerialConflicts:
         view = self._view()
         conflict = self._make_module("nobay", "NOBAY_SERIAL")
 
-        row = {"serial": "NOBAY_SERIAL", "status": "No Bay"}
+        row = {"serial": "NOBAY_SERIAL", "status": "No Bay", "_serial_context": view._row_serial_context()}
         view._detect_serial_conflicts([row])
 
         assert row.get("serial_conflict_module") == conflict
@@ -3639,6 +3639,7 @@ class TestDetectSerialConflicts:
             "can_replace": True,
             "serial": "CONFLICT_SERIAL",
             "installed_module_id": conflict.pk + 1,  # different from conflict.pk
+            "_serial_context": view._row_serial_context(),
         }
 
         view._detect_serial_conflicts([row])
@@ -3689,6 +3690,7 @@ class TestDetectSerialConflicts:
         row = {
             "can_install": True,
             "serial": "CONFLICT_SERIAL",
+            "_serial_context": view._row_serial_context(),
             # No installed_module_id — bay is empty
         }
 

@@ -430,6 +430,57 @@ def test_replace_only_removes_a_holder_when_the_target_admits_the_serial(
     ) == expected
 
 
+@pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])
+def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_server, reported_serial, admitted):
+    from dcim.models import ModuleBay
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_librenms_servers,
+        install_module as install_in_bay,
+        make_device_with_module_bays,
+    )
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    recording = _recording()
+    entities = _entities(recording)
+    entities[REAL_NIM]["entPhysicalSerialNum"] = reported_serial
+    librenms_server.load_recording(recording)
+    configure_librenms_servers(
+        settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "grants-token", "verify_ssl": False}}
+    )
+    device = c8300_device("c8300-move-serial", recording, SERVER_KEY)
+    contrib_rule(MODEL_RULE)
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=device.device_type.manufacturer
+    )
+    source = make_device_with_module_bays("move-serial-holder", ["Slot 1"])
+    holder = install_in_bay(source, "Slot 1", "MOVE-CARD", serial=reported_serial, child_bays=["Child"])
+    child = install_in_bay(source, "Child", "MOVE-CHILD", serial="CHILD123", parent_module=holder)
+    source_bay_id = holder.module_bay_id
+    bay_name = entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"]
+    target_bay = ModuleBay.objects.get(device=device, name=bay_name)
+    url = reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk])
+    forms = [form["fields"] for form in module_tab_forms(render(ui, device)).forms if form["action"] == url]
+    fields = {
+        "server_key": SERVER_KEY,
+        "selected_device_id": str(device.pk),
+        "conflict_module_id": str(holder.pk),
+        "target_bay_id": str(target_bay.pk),
+    }
+
+    response = post(ui, url, forms[0] if admitted else fields)
+
+    assert response.status_code == 302
+    holder.refresh_from_db()
+    child.refresh_from_db()
+    expected = (True, device.pk, target_bay.pk, device.pk) if admitted else (False, source.pk, source_bay_id, source.pk)
+    assert (bool(forms), holder.device_id, holder.module_bay_id, child.device_id) == expected
+
+
 def _preview_serial_form(client, device, entities):
     install_module(
         device, entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"], *_nim(entities, "OLD")

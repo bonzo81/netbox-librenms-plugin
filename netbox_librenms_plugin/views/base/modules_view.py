@@ -4615,7 +4615,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         When a single conflict is found the row gets:
 
           serial_conflict_module: the conflicting Module object (with device/module_bay loaded)
-          can_move_from: True (convenience flag for templates/tests)
+          can_move_from: True if the target admits both serials
 
         More than one match sets ``serial_conflict_ambiguous`` and picks nothing.
         A holder on the row's target Device clears ``can_install``.
@@ -4659,7 +4659,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 conflict = found.object
                 row["serial_conflict_module"] = conflict
                 row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
-                row["can_move_from"] = True
+                context = row["_serial_context"]
+                if is_identity(serial, context) and is_identity(conflict.serial, context):
+                    row["can_move_from"] = True
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
             device_id = row.get("selected_device_id")

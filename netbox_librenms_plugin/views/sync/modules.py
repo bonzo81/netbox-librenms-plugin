@@ -3305,6 +3305,10 @@ class MoveModuleView(
                 same_device_empty_bay and Module.objects.filter(module_bay=target_bay).exists()
             ):
                 raise _ModuleActionRefused("The modules or module bays changed. Refresh Modules and try again.")
+            if module.device_id != target_device.pk and not is_identity(
+                module.serial, serial_rules.for_module_target(target_device)
+            ):
+                raise _ModuleActionRefused("The module serial has no identity at the destination.")
             # Remove whatever is currently in the target bay (if provided and different).
             # Scoped by "delete": the device and bay filters prove where the row sits, not that
             # the grant covers it, and the gate asked has_perm without an instance.
