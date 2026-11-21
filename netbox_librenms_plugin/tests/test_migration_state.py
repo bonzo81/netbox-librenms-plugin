@@ -531,6 +531,47 @@ def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extensio
 
 
 @pytest.mark.django_db(transaction=True)
+def test_the_trigram_migration_requires_the_serial_columns_collation():
+    from django.db import connection
+    from psycopg import sql
+
+    schema = sql.Identifier(_probe_schema_name())
+    indexes = importlib.import_module(_TRGM_MIGRATION)._TRIGRAM_INDEXES
+    name, table = map(sql.Identifier, indexes[0])
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm'")
+            (extension_schema,) = cursor.fetchone()
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(schema))
+            cursor.execute(sql.SQL("SET search_path = {}").format(schema))
+            for _, table_name in indexes:
+                cursor.execute(
+                    sql.SQL('CREATE TABLE {} (serial varchar(50) COLLATE "POSIX")').format(sql.Identifier(table_name))
+                )
+            create = sql.SQL("CREATE INDEX {} ON {} USING gin ((btrim(serial, {})) COLLATE {} {})")
+            opclass = sql.Identifier(extension_schema, "gin_trgm_ops")
+            trim = sql.Literal(" \t\n\r\v\f")
+            cursor.execute(create.format(name, table, trim, sql.Identifier("C"), opclass))
+
+        with pytest.raises(RuntimeError, match="incompatible definition"):
+            _run_index_step("ensure_serial_trigram_indexes")
+
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP INDEX {}").format(name))
+            cursor.execute(create.format(name, table, trim, sql.Identifier("POSIX"), opclass))
+        (staged,) = _trigram_index_oids()
+
+        _run_index_step("ensure_serial_trigram_indexes")
+
+        assert staged in _trigram_index_oids()
+        assert len(_trigram_index_oids()) == len(indexes)
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("RESET search_path")
+            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(schema))
+
+
+@pytest.mark.django_db(transaction=True)
 def test_the_trigram_migration_reverse_does_not_block_new_reads_behind_an_open_read():
     """A plain DROP INDEX queues for ACCESS EXCLUSIVE behind an open read, and a new read waits behind it."""
     import threading

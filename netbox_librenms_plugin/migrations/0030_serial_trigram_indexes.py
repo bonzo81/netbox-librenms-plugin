@@ -69,11 +69,14 @@ def _existing_index(connection, table, name, table_namespace, extension_namespac
                 index_state.indnkeyatts = 1 AND index_state.indkey[0] = 0,
                 operator_class.opcname,
                 operator_class.opcnamespace = %s::oid,
+                index_state.indcollation[0] = serial_column.attcollation,
                 pg_get_expr(index_state.indexprs, index_state.indrelid)
             FROM pg_index AS index_state
             JOIN pg_class AS index_class ON index_class.oid = index_state.indexrelid
             JOIN pg_am AS access_method ON access_method.oid = index_class.relam
             LEFT JOIN pg_opclass AS operator_class ON operator_class.oid = index_state.indclass[0]
+            LEFT JOIN pg_attribute AS serial_column
+                ON serial_column.attrelid = index_state.indrelid AND serial_column.attname = 'serial'
             WHERE index_class.relname = %s
               AND index_class.relnamespace = %s::oid
             """,
@@ -108,6 +111,7 @@ def ensure_serial_trigram_indexes(apps, schema_editor):
                 one_expression,
                 opclass,
                 opclass_of_extension,
+                collation_matches,
                 expression,
             ) = existing
             expected_shape = (
@@ -119,6 +123,7 @@ def ensure_serial_trigram_indexes(apps, schema_editor):
                 and one_expression
                 and opclass == "gin_trgm_ops"
                 and opclass_of_extension
+                and collation_matches
                 and expression == f"btrim((serial)::text, '{_SERIAL_TRIM_CHARACTERS}'::text)"
             )
             if not expected_shape:
