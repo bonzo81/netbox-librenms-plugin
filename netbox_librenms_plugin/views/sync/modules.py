@@ -3076,7 +3076,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 old_type_name = installed_module.module_type.model
                 old_bay_name = target_bay.name
                 serial_context = locked_type_context(target_device, rules=serial_rules)
-                serial = stored_form(incoming, Module) if is_identity(incoming, serial_context) else ""
+                serial = stored_form(incoming, Module)
                 new_module = Module(
                     device=target_device,
                     module_bay=target_bay,

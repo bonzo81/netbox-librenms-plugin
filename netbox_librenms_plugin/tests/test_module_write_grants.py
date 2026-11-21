@@ -381,12 +381,12 @@ def test_replace_refuses_a_serial_conflict_that_appeared_after_its_preview(ui, c
 
 
 @pytest.mark.parametrize(
-    ("reported_serial", "replacement_serial"),
-    [("TAG 12", ""), ("TAG CARD123", "TAG CARD123")],
+    ("reported_serial", "admitted"),
+    [("TAG 12", False), ("TAG CARD123", True)],
     ids=["unadmitted", "admitted"],
 )
 def test_replace_only_removes_a_holder_when_the_target_admits_the_serial(
-    ui, settings, librenms_server, reported_serial, replacement_serial
+    ui, settings, librenms_server, reported_serial, admitted
 ):
     from dcim.models import Module
 
@@ -422,12 +422,10 @@ def test_replace_only_removes_a_holder_when_the_target_admits_the_serial(
     assert replacement.pk != installed.pk
     assert replacement.module_type.model == _nim(entities)[0]
     remote_pks = {holder.pk, child.pk}
-    expected = (str(holder.pk), replacement_serial, set()) if replacement_serial else (None, "", remote_pks)
-    assert (
-        fields.get("conflict_module_id"),
-        replacement.serial,
-        set(Module.objects.filter(pk__in=remote_pks).values_list("pk", flat=True)),
-    ) == expected
+    remaining_pks = set(Module.objects.filter(pk__in=remote_pks).values_list("pk", flat=True))
+    assert fields.get("conflict_module_id") == (str(holder.pk) if admitted else None)
+    assert remaining_pks == (set() if admitted else remote_pks)
+    assert replacement.serial == reported_serial
 
 
 @pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])
