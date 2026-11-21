@@ -685,6 +685,14 @@ def _member_name(master_name: str, position: int, serial, pattern: str, context)
     return _generate_vc_member_name(master_name, position, serial=naming_token(serial, context), pattern=pattern)
 
 
+def _vc_name_fields(pattern):
+    for _, field, format_spec, _ in Formatter().parse(pattern):
+        if field:
+            yield field
+        if format_spec:
+            yield from _vc_name_fields(format_spec)
+
+
 def _existing_member_name(master_name, device, rules) -> str | None:
     """Return the name to use for an existing member, or None when the suffix needs unavailable serial rules."""
     if not master_name or not getattr(device, "virtual_chassis_id", None) or not is_vc_position(device.vc_position):
@@ -692,7 +700,7 @@ def _existing_member_name(master_name, device, rules) -> str | None:
 
     pattern = _load_vc_member_name_pattern()
     try:
-        fields = [field for _, field, _, _ in Formatter().parse(pattern) if field]
+        fields = list(_vc_name_fields(pattern))
     except ValueError:
         fields = []
     if not any(field == "serial" or field.startswith(("serial[", "serial.")) for field in fields):
