@@ -313,7 +313,9 @@ def _freeze_event_data(*queues):
     for queue in queues:
         for event in queue.values():
             if "data" not in event:
-                _ = event["data"]
+                model = type(event["object"])
+                row = model._base_manager.get(pk=event["object_id"])
+                event.freeze_data(row)
 
 
 @contextmanager
