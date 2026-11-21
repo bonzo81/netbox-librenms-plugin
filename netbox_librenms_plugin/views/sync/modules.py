@@ -3285,15 +3285,13 @@ class MoveModuleView(
         movable = self.restricted_queryset(Module, "change").filter(
             pk=conflict_module_id, device__in=self.restricted_queryset(Device)
         )
-        same_device_empty_bay = (
-            movable.filter(device=target_device).exists()
-            and not Module.objects.filter(module_bay_id=target_bay_id).exists()
-        )
+        same_device_move = movable.filter(device=target_device).exists()
+        same_device_empty_bay = same_device_move and not Module.objects.filter(module_bay_id=target_bay_id).exists()
 
         def move(module):
             nonlocal occupant_removed_msg, from_device, from_bay
-            if same_device_empty_bay and (
-                module.device_id != target_device.pk or Module.objects.filter(module_bay=target_bay).exists()
+            if (same_device_move and module.device_id != target_device.pk) or (
+                same_device_empty_bay and Module.objects.filter(module_bay=target_bay).exists()
             ):
                 raise _ModuleActionRefused("The modules or module bays changed. Refresh Modules and try again.")
             # Remove whatever is currently in the target bay (if provided and different).
@@ -3316,7 +3314,7 @@ class MoveModuleView(
             module.device = target_device
 
         serial_rules = SerialRules.load()
-        moving = () if same_device_empty_bay else module_subtree_serials(conflict_module_id)
+        moving = () if same_device_move else module_subtree_serials(conflict_module_id)
         occupant_id = (
             self.restricted_queryset(Module, "delete")
             .filter(pk=module_id, device=target_device, module_bay_id=target_bay_id)
@@ -3330,8 +3328,8 @@ class MoveModuleView(
                 scope = lock_module_write(
                     observe_module_write(
                         device_ids=[target_device.pk],
-                        subtree_roots=[] if same_device_empty_bay else [conflict_module_id, occupant_id],
-                        observed_ids=[conflict_module_id] if same_device_empty_bay else [],
+                        subtree_roots=[occupant_id] if same_device_move else [conflict_module_id, occupant_id],
+                        observed_ids=[conflict_module_id] if same_device_move else [],
                     ),
                     rules=serial_rules,
                 )

@@ -724,8 +724,8 @@ def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client,
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("destination", ["same-device", "cross-device", "occupied"])
-def test_move_claims_serials_only_when_ownership_changes_or_a_module_is_removed(client, destination):
+@pytest.mark.parametrize("destination", ["same-device", "cross-device", "occupied", "occupied-without-serial"])
+def test_move_claims_serials_only_when_ownership_changes_or_a_serial_is_removed(client, destination):
     from dcim.models import Manufacturer, Module, ModuleBay
     from django.urls import reverse
 
@@ -744,8 +744,9 @@ def test_move_claims_serials_only_when_ownership_changes_or_a_module_is_removed(
     source_bay_id = moving.module_bay_id
     target_bay = ModuleBay.objects.get(device=target, name="Target Bay")
     occupant = None
-    if destination == "occupied":
-        occupant = install_module(target, target_bay.name, "MOVE-POLICY-OCCUPANT", serial="DEF456")
+    if destination in {"occupied", "occupied-without-serial"}:
+        occupant_serial = "DEF456" if destination == "occupied" else ""
+        occupant = install_module(target, target_bay.name, "MOVE-POLICY-OCCUPANT", serial=occupant_serial)
     other_maker = Manufacturer.objects.create(name="Move Policy Other Maker", slug="move-policy-other-maker")
     rule = NormalizationRule.objects.create(
         scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=other_maker
@@ -761,8 +762,10 @@ def test_move_claims_serials_only_when_ownership_changes_or_a_module_is_removed(
     assert response.status_code == 302
     moving.refresh_from_db()
     assert moving.serial == serial
-    if destination == "same-device":
+    if destination in {"same-device", "occupied-without-serial"}:
         assert moving.module_bay_id == target_bay.pk
+        if occupant:
+            assert not Module.objects.filter(pk=occupant.pk).exists()
     else:
         assert moving.device_id == source.pk
         assert moving.module_bay_id == source_bay_id
