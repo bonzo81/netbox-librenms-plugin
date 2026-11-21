@@ -7639,7 +7639,8 @@ def test_a_chassis_page_without_member_serials_offers_no_module_action(client, s
 
 
 @pytest.mark.django_db
-def test_the_modules_tab_checks_missing_serials_once_across_members(client, settings, librenms_server):
+@pytest.mark.parametrize("with_holders", [False, True], ids=["missing", "unique"])
+def test_the_modules_tab_checks_complete_serials_once_across_members(client, settings, librenms_server, with_holders):
     from django.core.cache import cache
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -7647,6 +7648,7 @@ def test_the_modules_tab_checks_missing_serials_once_across_members(client, sett
 
     from netbox_librenms_plugin.tests.conftest import (
         bind_librenms_server,
+        install_module,
         make_module_bay,
         make_module_type,
         make_superuser,
@@ -7656,14 +7658,20 @@ def test_the_modules_tab_checks_missing_serials_once_across_members(client, sett
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     bind_librenms_server(settings, librenms_server, server_key="default")
-    _, members = make_virtual_chassis_members("module-missing-serial", count=3)
+    _, members = make_virtual_chassis_members("module-serial-lookup", count=3)
     owner = members[0]
-    module_type = make_module_type("MISSING-SERIAL-CARD", manufacturer=owner.device_type.manufacturer)
+    module_type = make_module_type("SERIAL-LOOKUP-CARD", manufacturer=owner.device_type.manufacturer)
     inventory = []
+    holders = {}
     for member in members:
         position = member.vc_position
         slot = f"Slot {position}"
+        serial = f"INVENTORY-CARD-{position}"
         make_module_bay(member, slot)
+        if with_holders:
+            holder_slot = f"Stored Slot {position}"
+            make_module_bay(owner, holder_slot)
+            holders[serial] = install_module(owner, holder_slot, module_type.model, serial=serial)
         inventory.append(
             {
                 "entPhysicalIndex": position,
@@ -7672,7 +7680,7 @@ def test_the_modules_tab_checks_missing_serials_once_across_members(client, sett
                 "entPhysicalContainedIn": 0,
                 "entPhysicalParentRelPos": position,
                 "entPhysicalModelName": module_type.model,
-                "entPhysicalSerialNum": f"UNASSIGNED-CARD-{position}",
+                "entPhysicalSerialNum": serial,
             }
         )
     librenms_id = 9358
@@ -7680,7 +7688,7 @@ def test_the_modules_tab_checks_missing_serials_once_across_members(client, sett
     payload = trusted_module_inventory_payload(owner, inventory, librenms_id=librenms_id)
     cache.set(DeviceModuleTableView().get_cache_key(owner, "inventory", server_key="default"), payload, 300)
     cache.set(f"librenms_device_info_default_{librenms_id}", (True, {"device_id": librenms_id}), 300)
-    client.force_login(make_superuser("missing-module-serial-user"))
+    client.force_login(make_superuser("module-serial-lookup-user"))
 
     with CaptureQueriesContext(connection) as queries:
         response = client.get(
@@ -7690,7 +7698,12 @@ def test_the_modules_tab_checks_missing_serials_once_across_members(client, sett
 
     assert response.status_code == 200
     rows = list(response.context["module_sync"]["table"].data)
-    assert {row["selected_device_id"] for row in rows if row["can_install"]} == {member.pk for member in members}
+    assert {row["selected_device_id"] for row in rows} == {member.pk for member in members}
+    installable_members = members[1:] if with_holders else members
+    assert {row["selected_device_id"] for row in rows if row["can_install"]} == {
+        member.pk for member in installable_members
+    }
+    assert {row["serial"]: row["serial_conflict_module"] for row in rows if row.get("can_move_from")} == holders
     serial_reads = [query for query in queries if 'BTRIM("dcim_module"."serial"' in query["sql"]]
     assert len(serial_reads) == 1
 

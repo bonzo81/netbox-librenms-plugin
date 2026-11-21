@@ -4647,20 +4647,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 .filter(pk__in=matched_pks, device__in=self.restricted_queryset(Device))
                 .values_list("pk", flat=True)
             )
-        serials_by_target = defaultdict(list)
-        for row in rows:
-            serial = row["serial"]
-            if (
-                row.get("can_install")
-                and row.get("selected_device_id") is not None
-                and resolutions[serial].kind is not ResolutionKind.NO_MATCH
-            ):
-                serials_by_target[row["selected_device_id"]].append(serial)
-        target_matches = {
-            device_id: resolve_modules(serials, rules=serial_rules, device_ids=[device_id], spare=1)
-            for device_id, serials in serials_by_target.items()
-        }
-
+        pending_installs = defaultdict(list)
         for row in rows:
             serial = row["serial"]
             resolution = resolutions[serial]
@@ -4675,7 +4662,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["can_move_from"] = True
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
-            if row.get("can_install") and resolution.kind is not ResolutionKind.NO_MATCH:
-                scoped = target_matches.get(row.get("selected_device_id"))
-                if scoped and scoped[serial].excluding(own_bay).matches:
+            device_id = row.get("selected_device_id")
+            if row.get("can_install") and device_id is not None:
+                if any(module.device_id == device_id for module in found.matches):
+                    row["can_install"] = False
+                elif not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE:
+                    pending_installs[device_id].append((row, own_bay))
+
+        for device_id, target_rows in pending_installs.items():
+            scoped = resolve_modules(
+                [row["serial"] for row, _ in target_rows], rules=serial_rules, device_ids=[device_id], spare=1
+            )
+            for row, own_bay in target_rows:
+                if scoped[row["serial"]].excluding(own_bay).matches:
                     row["can_install"] = False
