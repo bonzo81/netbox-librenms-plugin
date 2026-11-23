@@ -124,15 +124,22 @@ class TestBulkPrecheckDecision:
         assert outcome.block_message == ""
 
     def test_unresolved_rows_are_skipped_without_blocking_the_rest(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE, classify_bulk_precheck
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            NETBOX_SERIAL_UNVERIFIED,
+            classify_bulk_precheck,
+        )
 
-        outcome = classify_bulk_precheck([], dict.fromkeys([2, 4], LIBRENMS_ROW_UNREADABLE), [1, 2, 3], {4: {}, 5: {}})
+        unresolved = {2: LIBRENMS_ROW_UNREADABLE, 4: NETBOX_SERIAL_UNVERIFIED}
+        outcome = classify_bulk_precheck([], unresolved, [1, 2, 3], {4: {}, 5: {}})
 
         assert outcome.blocked is False
         assert outcome.skipped_ids == [2, 4]
         assert outcome.importable_device_ids == [1, 3]
         assert outcome.importable_vm_imports == {5: {}}
-        assert "id(s): 2, 4" in outcome.skip_message
+        assert f"(id(s): 2): {LIBRENMS_ROW_UNREADABLE}," in outcome.skip_message
+        assert f"(id(s): 4): {NETBOX_SERIAL_UNVERIFIED}," in outcome.skip_message
+        assert "Retry rows with unreadable LibreNMS data individually." in outcome.skip_message
 
     def test_collision_blocks_the_whole_batch_and_names_visible_targets(self):
         from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE, classify_bulk_precheck
