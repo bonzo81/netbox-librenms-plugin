@@ -2415,8 +2415,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         inv_by_index = {
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
+        # A fan, power supply or chassis that shares an optic's serial must not hide the optic.
         inv_serials = group_serials(
-            inventory_data, serial_context, serial=lambda item: item.get("entPhysicalSerialNum")
+            (item for item in inventory_data if not _never_an_optic(item)),
+            serial_context,
+            serial=lambda item: item.get("entPhysicalSerialNum"),
         )
         inv_by_ifindex = {}
         for item in inventory_data:

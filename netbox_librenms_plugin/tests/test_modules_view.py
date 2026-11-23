@@ -8427,6 +8427,59 @@ def test_the_modules_tab_checks_complete_serials_once_across_members(client, set
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("entity_class", "optic_shown"),
+    [("fan", True), ("powerSupply", True), ("chassis", True), ("port", False), ("module", False)],
+)
+def test_a_refresh_keeps_an_optic_whose_serial_only_a_non_optic_entity_shares(
+    client, settings, librenms_server, entity_class, optic_shown
+):
+    """No ifIndex identifies the optic, so only an entity that can be the optic may suppress it by serial."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_device, make_superuser
+
+    bind_librenms_server(settings, librenms_server, server_key="default")
+    device = make_device(f"optic-serial-{entity_class.lower()}", librenms_cf={"default": 9359})
+    librenms_server.inventory_response(
+        9359,
+        [
+            {
+                "entPhysicalIndex": 5,
+                "entPhysicalName": "Shared serial entity",
+                "entPhysicalClass": entity_class,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalModelName": "SHARED-PART",
+                "entPhysicalSerialNum": "SHARED-SERIAL-01",
+            }
+        ],
+    )
+    librenms_server.register(
+        "/api/v0/devices/9359/transceivers",
+        {
+            "status": "ok",
+            "transceivers": [
+                {"entity_physical_index": 20, "model": "SFP-10G-SR", "serial": "SHARED-SERIAL-01", "port_id": 9}
+            ],
+        },
+    )
+    librenms_server.register(
+        "/api/v0/devices/9359/ports", {"status": "ok", "ports": [{"port_id": 9, "ifName": "Eth9"}]}
+    )
+    client.force_login(make_superuser(f"optic-serial-{entity_class.lower()}-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[device.pk]),
+        {"server_key": "default"},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    assert ("SFP-10G-SR" in {row.get("model") for row in rows}) is optic_shown
+
+
+@pytest.mark.django_db
 def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, settings):
     """VC rows must use the attributed member's manufacturer rules and device serial."""
     from dcim.models import Manufacturer, VirtualChassis
