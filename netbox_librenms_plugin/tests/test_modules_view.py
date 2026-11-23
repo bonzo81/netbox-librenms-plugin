@@ -7604,7 +7604,9 @@ def test_the_stored_form_badge_does_not_show_the_stored_serial(client, settings)
     table = response.context["module_sync"]["table"]
     (row,) = list(table.data)
     assert row.get("serial_stored_form_differs") is True
-    assert "S/N STORED-123" not in table.as_html(response.wsgi_request)
+    table_html = table.as_html(response.wsgi_request)
+    assert "S/N STORED-123" not in table_html
+    assert re.search(r"STORED-123 <span [^>]*>stored form differs</span>", table_html)
 
 
 @pytest.mark.django_db
