@@ -538,6 +538,38 @@ class TestImportListRequest:
         assert 'class="btn btn-sm btn-warning migrate-btn" disabled>' in details
 
     @pytest.mark.django_db
+    def test_a_warm_search_drops_the_serial_confirmation_of_a_changed_stored_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """A stored serial that changed after caching confirms nothing, so the row reads neither confirmed nor shared."""
+        from dcim.models import Device
+
+        payload = _device(4122)
+        device = make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        _register_devices(librenms_server, [payload])
+        client.force_login(_create_user(django_user_model, "warm-legacy-changed-serial"))
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, cached = validation()
+        assert cached["serial_confirmed"] is True
+        assert cached["legacy_id_serial_confirmed"] is True
+
+        Device.objects.filter(pk=device.pk).update(serial="REPLACED-CHASSIS")
+        second, warm = validation()
+
+        assert second.context["from_cache"] is True
+        assert warm["serial_confirmed"] is False
+        assert warm["legacy_id_serial_confirmed"] is False
+        assert warm["legacy_id_serial_shared"] is False
+
+    @pytest.mark.django_db
     def test_a_search_shows_no_countdown_for_metadata_of_other_serial_rules(
         self,
         client,

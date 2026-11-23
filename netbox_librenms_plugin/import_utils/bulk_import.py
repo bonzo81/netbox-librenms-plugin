@@ -20,10 +20,13 @@ from ..import_validation_helpers import (
 )
 from ..librenms_api import LibreNMSAPI
 from ..librenms_ids import coerce_librenms_id
+from ..models import RuleConfigurationError
 from ..serial_identity import (
+    Comparison,
     ResolutionKind,
     SerialRules,
     assignment_lock,
+    compare,
     display,
     fingerprint,
     is_sole_holder,
@@ -875,6 +878,23 @@ def _reassert_new_import_blockers(validation: dict) -> None:
                 validation["issues"].append(msg)
 
 
+def _recheck_legacy_id_serial(validation: dict, device, incoming_serial, serial_rules) -> None:
+    """Check a cached legacy-ID serial confirmation again: the stored serial and its holders can change after caching."""
+    rules = serial_rules or SerialRules.load()
+    try:
+        same = compare(device.serial, incoming_serial, rules.for_device(device)) is Comparison.SAME
+    except RuleConfigurationError:
+        # A broken rule confirms nothing, so the migrate action stays off.
+        same = False
+    if same:
+        check_legacy_id_serial(validation, device, incoming_serial, rules)
+    else:
+        validation["serial_confirmed"] = False
+        validation["legacy_id_serial_confirmed"] = False
+        validation["legacy_id_serial_unavailable"] = False
+        validation["legacy_id_serial_shared"] = False
+
+
 def _refresh_existing_device(  # noqa: C901
     validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_rules=None
 ) -> None:
@@ -972,8 +992,7 @@ def _refresh_existing_device(  # noqa: C901
                         and validation.get("librenms_id_needs_migration")
                         and validation.get("serial_confirmed")
                     ):
-                        # Another Device can take the serial after caching, so read its holders again.
-                        check_legacy_id_serial(validation, refreshed, libre_device.get("serial"), serial_rules)
+                        _recheck_legacy_id_serial(validation, refreshed, libre_device.get("serial"), serial_rules)
                     if hasattr(refreshed, "role") and refreshed.role:
                         apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
