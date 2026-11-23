@@ -308,8 +308,9 @@ def test_a_failed_install_after_its_save_leaves_events_only_for_the_committed_si
     assert len(rolled_back) == 1 and not Module.objects.filter(pk__in=rolled_back).exists()
     assert ("module", kept.pk) in flushed_events
     assert ("module", rolled_back[0]) not in flushed_events
-    kept_interfaces = set(kept.interfaces.values_list("pk", flat=True))
-    assert {pk for model, pk in flushed_events if model == "interface"} <= kept_interfaces
+    (kept_interface,) = kept.interfaces.all()
+    assert kept_interface.name == "Ethernet1/1"
+    assert [pk for model, pk in flushed_events if model == "interface"] == [kept_interface.pk]
 
 
 @pytest.mark.django_db
