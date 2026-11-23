@@ -123,7 +123,7 @@ Alternatively, share your ideas for the plugin over in [discussions](https://git
 
 ### Database Requirement
 
-The plugin needs the PostgreSQL extension `pg_trgm`, which PostgreSQL ships. The plugin migrations create it with `CREATE EXTENSION IF NOT EXISTS pg_trgm`. `pg_trgm` is a trusted extension, so the NetBox database user needs only the `CREATE` privilege on the NetBox database. If the NetBox database user does not have this privilege, connect to the NetBox database (not the `postgres` database) as a user that has it, or as a superuser, and run this command before you run the migrations:
+The plugin needs the PostgreSQL extension `pg_trgm`. PostgreSQL ships it as a contrib module, and some distributions put the contrib modules in a separate package, for example `postgresql-contrib`. Install the package that provides `pg_trgm` on the database server before you run the migrations. Without it, `CREATE EXTENSION` fails, also for a superuser. The plugin migrations create the extension with `CREATE EXTENSION IF NOT EXISTS pg_trgm`. `pg_trgm` is a trusted extension, so the NetBox database user needs only the `CREATE` privilege on the NetBox database. If the NetBox database user does not have this privilege, connect to the NetBox database (not the `postgres` database) as a user that has it, or as a superuser, and run this command before you run the migrations:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
