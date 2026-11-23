@@ -1667,6 +1667,25 @@ class TestDeviceValidationDetailsView:
         for action in ("sync_serial", "sync_name", "sync_platform", "sync_device_type", "update_type"):
             assert f'name="action" value="{action}"' not in content, action
 
+    @pytest.mark.parametrize("role", ["own", "oob"])
+    def test_only_the_own_id_row_offers_the_stored_form_serial_sync(self, role):
+        """The row reports the host serial in another stored form; an OOB-ID row is the controller and offers no sync."""
+        _seed_decorated_serial_rule()
+        mapping = {"id": 1} if role == "own" else {"id": 5, "oob": {"id": 1, "type": "idrac9"}}
+        host = make_device(f"details-stored-form-{role}", serial="STORED-FORM-SN", librenms_cf={"default": mapping})
+        self.primary_server.device_info_response(
+            device_id=1, hostname=host.name, hardware="Unmatched hardware", os="linux", serial="S/N STORED-FORM-SN"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('<td style="padding-left: 0.75rem;">Serial</td>')
+        serial_row = content[start : content.index("</tr>", start)]
+        assert ('value="sync_serial"' in serial_row) is (role == "own")
+
     def test_a_detected_oob_controller_offers_add_as_oob_and_no_row_copy(self):
         """The controller answers at the host's OOB IP and has no mapping: only the OOB attach is offered."""
         host = make_device("validation-details-oob-ip-host", serial="HOST-SN-OOBIP-1")
@@ -5600,6 +5619,30 @@ class TestDeviceConflictActionBranches:
         assert stored_mapping_for_test(Device.objects.get(pk=host.pk)) == {
             self.server_key: {"id": 7, "oob": {"id": 42, "type": "idrac9"}}
         }
+
+    @pytest.mark.parametrize("role", ["own", "oob"])
+    def test_only_the_own_id_row_syncs_the_stored_form_serial(self, role):
+        """The row reports the host serial in another stored form; an OOB-ID row is the controller and is refused."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
+
+        _seed_decorated_serial_rule()
+        mapping = {"id": 42} if role == "own" else {"id": 7, "oob": {"id": 42, "type": "idrac9"}}
+        host = make_device(
+            f"branches-stored-form-{role}", serial="STORED-FORM-SN", librenms_cf={self.server_key: mapping}
+        )
+        self._register_device(42, host.name, serial="S/N STORED-FORM-SN", os="linux")
+
+        response = post_view(self._make_view(), self._request("sync_serial", host, f"{host.name}-user"), device_id=42)
+
+        if role == "own":
+            self._assert_success(response)
+            assert Device.objects.get(pk=host.pk).serial == "S/N STORED-FORM-SN"
+        else:
+            self._assert_htmx_error(response, _OOB_ROW_REFUSED)
+            assert Device.objects.get(pk=host.pk).serial == "STORED-FORM-SN"
+        assert stored_mapping_for_test(Device.objects.get(pk=host.pk)) == {self.server_key: mapping}
 
     @pytest.mark.parametrize("action", ["sync_serial", "sync_name", "sync_platform", "update"])
     def test_a_detected_oob_controller_copies_no_field_onto_the_host(self, action):
