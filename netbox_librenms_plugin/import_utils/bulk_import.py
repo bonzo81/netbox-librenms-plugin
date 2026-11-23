@@ -51,6 +51,7 @@ from .device_operations import (
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
     _describe_existing_librenms_link,
+    check_legacy_id_serial,
     effective_import_device_type,
     import_single_device,
     resolve_device_by_host_ip,
@@ -965,6 +966,14 @@ def _refresh_existing_device(  # noqa: C901
                     _reassert_new_import_blockers(validation)
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                 else:
+                    if (
+                        libre_device
+                        and validation.get("existing_match_type") == "librenms_id"
+                        and validation.get("librenms_id_needs_migration")
+                        and validation.get("serial_confirmed")
+                    ):
+                        # Another Device can take the serial after caching, so read its holders again.
+                        check_legacy_id_serial(validation, refreshed, libre_device.get("serial"), serial_rules)
                     if hasattr(refreshed, "role") and refreshed.role:
                         apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))

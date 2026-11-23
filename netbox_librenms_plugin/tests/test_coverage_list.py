@@ -499,6 +499,45 @@ class TestImportListRequest:
         assert revalidated["device_type"]["device_type"].model == "Test Router"
 
     @pytest.mark.django_db
+    def test_a_warm_search_checks_the_holders_of_a_legacy_linked_serial_again(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The cached row confirms the migration on the serial, so a Device that takes the serial later must show."""
+        from django.template.loader import render_to_string
+
+        payload = _device(4121)
+        make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        _register_devices(librenms_server, [payload])
+        client.force_login(_create_user(django_user_model, "warm-legacy-serial"))
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, cached = validation()
+        assert cached["existing_match_type"] == "librenms_id"
+        assert cached["librenms_id_needs_migration"] is True
+        assert cached["legacy_id_serial_confirmed"] is True
+
+        make_device("warm-legacy-serial-rival", serial=payload["serial"])
+        second, warm = validation()
+
+        assert second.context["from_cache"] is True
+        assert warm["legacy_id_serial_confirmed"] is False
+        assert warm["legacy_id_serial_unavailable"] is False
+        assert warm["legacy_id_serial_shared"] is True
+        details = render_to_string(
+            "netbox_librenms_plugin/htmx/device_validation_details.html",
+            {"validation": warm, "libre_device": payload, "server_key": SERVER_KEY},
+        )
+        assert 'data-serial-state="shared"' in details
+        assert 'class="btn btn-sm btn-warning migrate-btn" disabled>' in details
+
+    @pytest.mark.django_db
     def test_every_filter_reaches_the_real_search_and_client_side_matching(
         self,
         client,

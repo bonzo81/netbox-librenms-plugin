@@ -415,6 +415,32 @@ def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules
     return True
 
 
+LEGACY_HOLDERS_UNCHECKED_PREFIX = "The other holders of the serial cannot be checked:"
+
+
+def check_legacy_id_serial(result, device, incoming_serial, serial_rules) -> None:
+    """Set the ``legacy_id_serial_*`` flags of a legacy-linked *device*; validation and the warm refresh share it."""
+    # Unavailable until the lookup returns, so a failed lookup never reads as a shared serial.
+    result["legacy_id_serial_confirmed"] = False
+    result["legacy_id_serial_unavailable"] = True
+    result["legacy_id_serial_shared"] = False
+    warnings = result.setdefault("warnings", [])
+    # A cached row can carry the warning of an earlier check.
+    warnings[:] = [w for w in warnings if not (isinstance(w, str) and w.startswith(LEGACY_HOLDERS_UNCHECKED_PREFIX))]
+    try:
+        holders = resolve_device(incoming_serial, rules=serial_rules)
+    except RuleConfigurationError as exc:
+        # The legacy ID names the Device, so another maker's broken rule hides only the other holders.
+        warnings.append(f"{LEGACY_HOLDERS_UNCHECKED_PREFIX} {exception_text_for(exc, Device, None)}")
+        return
+    holder = holders.object
+    confirmed = holder is not None and holder.pk == device.pk
+    unavailable = holders.kind is ResolutionKind.UNAVAILABLE
+    result["legacy_id_serial_confirmed"] = confirmed
+    result["legacy_id_serial_unavailable"] = unavailable
+    result["legacy_id_serial_shared"] = not confirmed and not unavailable
+
+
 def serial_unavailable_issue(incoming_serial) -> str:
     """Return the blocker of a row whose serial lookup is Unavailable; validation and the refresh both add it."""
     # The constant, not the lookup's reason: the issue text must carry nothing that an unscoped lookup returned.
@@ -1011,21 +1037,7 @@ def validate_device_for_import(  # noqa: C901
                     result["serial_confirmed"] = True
                     # The legacy ID converts on the serial only for its one holder; the POST checks it again under lock.
                     if result["librenms_id_needs_migration"]:
-                        # Unavailable until the lookup returns, so a failed lookup never reads as a shared serial.
-                        result["legacy_id_serial_unavailable"] = True
-                        try:
-                            holders = resolve_device(incoming_serial, rules=serial_rules)
-                        except RuleConfigurationError as exc:
-                            # The legacy ID names the Device, so another maker's broken rule hides only the other holders.
-                            detail = exception_text_for(exc, Device, None)
-                            result["warnings"].append(f"The other holders of the serial cannot be checked: {detail}")
-                        else:
-                            holder = holders.object
-                            confirmed = holder is not None and holder.pk == existing_device.pk
-                            unavailable = holders.kind is ResolutionKind.UNAVAILABLE
-                            result["legacy_id_serial_confirmed"] = confirmed
-                            result["legacy_id_serial_unavailable"] = unavailable
-                            result["legacy_id_serial_shared"] = not confirmed and not unavailable
+                        check_legacy_id_serial(result, existing_device, incoming_serial, serial_rules)
                 elif drift is Comparison.UNAVAILABLE:
                     result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
                 elif is_identity(incoming_serial, context) and display(existing_device.serial):
