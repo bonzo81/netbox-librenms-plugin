@@ -397,8 +397,7 @@ def test_a_lock_conflict_in_the_chassis_create_fails_the_stack_row_and_a_retry_i
 @pytest.mark.django_db
 def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_imports_the_stack(live_librenms):
     """The master, the chassis and the first member are saved before the last member fails, so all of them roll back."""
-    from dcim.models import Device, Interface, VirtualChassis
-    from ipam.models import IPAddress
+    from dcim.models import Device, Interface, InterfaceTemplate, VirtualChassis
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
@@ -406,7 +405,9 @@ def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_im
     serials = ["SN-ROLLBACK-A", "SN-ROLLBACK-B", "SN-ROLLBACK-C"]
     members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
     prerequisites, row = _importable_row(live_librenms, 96312, "stack-member-rollback", members=members)
-    written = (Device, VirtualChassis, Interface, IPAddress)
+    # Each saved device gets this interface from its type, so the rollback has an interface row to remove.
+    InterfaceTemplate.objects.create(device_type_id=prerequisites["device_type_id"], name="eth0", type="1000base-t")
+    written = (Device, VirtualChassis, Interface)
     before = {model: model.objects.count() for model in written}
 
     def run():
@@ -420,12 +421,16 @@ def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_im
 
     device_insert = 'INSERT INTO "dcim_device"'
     chassis_insert = 'INSERT INTO "dcim_virtualchassis"'
+    interface_insert = 'INSERT INTO "dcim_interface"'
     inserts = []
+    interface_inserts = []
 
     def record_insert(execute, sql, params, many, context):
         result = execute(sql, params, many, context)
         if sql.startswith((device_insert, chassis_insert)):
             inserts.append((sql, params))
+        elif sql.startswith(interface_insert):
+            interface_inserts.append(len(inserts))
         return result
 
     def last_member_insert(sql, params):
@@ -439,6 +444,8 @@ def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_im
     assert master[0].startswith(device_insert) and serials[0] in master[1]
     assert chassis[0].startswith(chassis_insert)
     assert member[0].startswith(device_insert) and serials[1] in member[1]
+    # The master's interface insert ran before the last member failed.
+    assert interface_inserts and interface_inserts[0] == 1
     assert result["success"] == []
     assert [entry["device_id"] for entry in result["failed"]] == [96312]
     assert {model: model.objects.count() for model in written} == before
