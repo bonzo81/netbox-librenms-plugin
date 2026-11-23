@@ -2798,6 +2798,8 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         """The preview shows the holder, so the grant is fresh; the delete scope of the holder must refuse."""
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
         from django.core.cache import cache
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -2852,7 +2854,8 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         request = self._request(user, fields)
         view.setup(request)
         try:
-            view.post(request, pk=device.pk)
+            with CaptureQueriesContext(connection) as queries:
+                view.post(request, pk=device.pk)
         finally:
             cache.delete(cache_key)
 
@@ -2861,6 +2864,15 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert (target.serial, holder.serial) == ("OLD-KEPT", "INCOMING-KEPT")
         # The refusal of the holder's delete scope, not an earlier refusal of the preview.
         assert message_texts(request, "error") == [_SerialConflictUnavailable.MESSAGE.format(serial="INCOMING-KEPT")]
+        # The delete scope refuses before the write locks the holder's Device or walks the holder's subtree.
+        assert other_device.pk not in self._locked_device_ids(queries)
+        holder_subtree = re.compile(rf'"dcim_module"\."id" = {holder.pk}\b|"module_id" IN \({holder.pk}\)')
+        subtree_reads = [
+            query["sql"]
+            for query in queries.captured_queries
+            if '"dcim_module"."serial"' in query["sql"] and holder_subtree.search(query["sql"])
+        ]
+        assert subtree_reads == []
 
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""

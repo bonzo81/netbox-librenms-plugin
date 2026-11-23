@@ -3047,6 +3047,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     incoming, serial_rules.for_module_target(target_device), rules=serial_rules, exclude_pk=module_id
                 ).object
                 if previous is not None:
+                    # A holder that the preview can show refuses before the write walks it or locks its Device.
+                    # A hidden holder keeps the stale-grant answer after the lock, so the refusal does not disclose it.
+                    if (
+                        self.restricted_queryset(Module).filter(pk=previous.pk).exists()
+                        and not self.restricted_queryset(Module, "delete").filter(pk=previous.pk).exists()
+                    ):
+                        raise _SerialConflictUnavailable(display(incoming))
                     removals[previous.pk] = module_subtree_serials(previous.pk)
                 scope = lock_module_write(
                     observe_module_write(device_ids=[target_device.pk], subtree_roots=removals),
