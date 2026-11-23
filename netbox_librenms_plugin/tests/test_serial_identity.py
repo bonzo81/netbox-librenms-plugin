@@ -114,7 +114,10 @@ class TestSerialRuleLanguage:
     def test_another_scope_keeps_a_substitution_template(self):
         from netbox_librenms_plugin.models import NormalizationRule
 
-        NormalizationRule(scope="module_type", match_pattern=r"^(.+)-AA$", replacement=r"X\1").full_clean()
+        rule = NormalizationRule(scope="module_type", match_pattern=r"^(.+)-AA$", replacement=r"X\1")
+        rule.full_clean()
+
+        assert rule.apply("ABC-AA") == "XABC"
 
     def test_a_group_reference_reads_the_group_and_never_expands_a_template(self):
         r"""With 100 groups, the template \100 is an octal escape; \g<100> reads group 100."""
