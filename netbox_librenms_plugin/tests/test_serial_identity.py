@@ -921,6 +921,9 @@ class TestEquivalentFormsAcrossDecisions:
         )
 
         assert result["success"] is False
+        assert result["error"] == (
+            "Cannot import device 7807: a NetBox device already has serial 'XABC'. Refresh the import list."
+        )
         assert "key-import-holder" not in result["error"]
 
     def test_a_serial_update_heals_a_legacy_stored_form(self, client, serial_librenms):
