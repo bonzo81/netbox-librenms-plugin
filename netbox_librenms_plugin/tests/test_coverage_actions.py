@@ -1831,16 +1831,16 @@ class TestBuildSyncInfo:
 
         assert result["serial_synced"] is True
 
-    def test_padded_stored_serial_counts_as_synced(self):
-        """A real device whose STORED serial is legacy-padded must not report serial drift in the details modal."""
+    def test_padded_stored_serial_is_the_same_hardware_and_offers_the_sync(self):
+        """A legacy-padded stored serial names the same hardware, but the writer stores the trimmed text."""
         build_sync_info = self._get_method()
         existing = make_device("sync-info-padded-serial", serial=" SN-STORED-1 ")
         libre_device = {"serial": "SN-STORED-1", "os": "-", "hardware": "-"}
 
         result = build_sync_info(libre_device, existing, None)
 
-        assert result["serial_synced"] is True, "padded stored serial reported as drift"
-        assert result["all_synced"] is True
+        assert result["serial_same"] is True, "padded stored serial reported as drift"
+        assert result["serial_synced"] is False
 
     @pytest.mark.parametrize(("incoming", "unavailable"), [("STRAY-LIBRENMS", True), ("-", False), ("", False)])
     def test_an_unavailable_context_marks_only_a_reported_serial(self, incoming, unavailable):
