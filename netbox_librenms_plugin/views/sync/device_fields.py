@@ -716,11 +716,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.error(request, "The VC Serials dialog is out of date. Reload the page and try again.")
             return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
-        # One transaction for all members: a lock conflict or a refusal rolls back every member.
-        try:
-            assignments_made, errors = run_transaction(lambda: self._assign_serials(device, rows)), []
-        except _SerialsRefused as exc:
-            assignments_made, errors = 0, exc.errors
+        # One transaction for all members: a lock conflict rolls back every member, and the runner retries once.
+        assignments_made, errors = run_transaction(lambda: self._assign_serials(device, rows))
 
         if assignments_made > 0:
             messages.success(
@@ -738,10 +735,19 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
     def _assign_serials(self, device, rows):
-        """Run one attempt: write each posted member serial; return the count of writes.
+        """Run one attempt: write each posted member serial; return the count of writes and the error texts."""
+        try:
+            # A refusal rolls back only this savepoint, so the runner still sees a lock conflict that a member caught.
+            with atomic_with_events():
+                return self._write_serials(device, rows), []
+        except _SerialsRefused as exc:
+            return 0, exc.errors
+
+    def _write_serials(self, device, rows):
+        """Write each posted member serial; return the count of writes.
 
         Raises:
-            _SerialsRefused: A member refuses its serial; the attempt must roll back every member.
+            _SerialsRefused: A member refuses its serial; the caller rolls back every member.
 
         """
         errors = []
