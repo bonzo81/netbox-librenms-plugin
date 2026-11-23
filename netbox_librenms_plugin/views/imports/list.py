@@ -326,8 +326,8 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         from netbox_librenms_plugin.serial_identity import SerialRules
 
-        # The cache check and the cached-search links read one serial rule version.
-        serial_rules = SerialRules.load()
+        # The cache check, the synchronous search and the cached-search links read one serial rule version.
+        serial_rules = self._serial_rules = SerialRules.load()
 
         # Check if this should be processed as a background job
         # Skip if we're loading results from a completed job (job_id in URL)
@@ -553,6 +553,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 return_cache_status=True,
                 use_sysname=self._use_sysname,
                 strip_domain=self._strip_domain,
+                serial_rules=self._serial_rules,
             )
         except LibreNMSUnreachable as exc:
             # Show the reason instead of an empty table, which reads as "nothing matched".

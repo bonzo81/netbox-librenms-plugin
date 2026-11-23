@@ -770,6 +770,37 @@ class TestImportListRequest:
         assert filters not in linked_filters()
 
     @pytest.mark.django_db
+    def test_a_synchronous_search_reads_the_serial_rules_of_its_cached_search_link(
+        self, client, django_user_model, librenms_server, monkeypatch
+    ):
+        """A rule edit after the request read its rules must not split the rows from the link to them."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        _register_devices(librenms_server, [{**_device(5302), "hostname": "one-version-edge.example.test"}])
+        client.force_login(_create_user(django_user_model, "one-serial-rule-version"))
+        load = SerialRules.load
+        loads = []
+
+        def edit_after_the_first_load():
+            rules = load()
+            if not loads:
+                # The request's snapshot reads its rows before the edit commits.
+                assert rules.digest
+                NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+            loads.append(rules)
+            return rules
+
+        monkeypatch.setattr(SerialRules, "load", edit_after_the_first_load)
+
+        response = client.get(_import_url(), _search_params(librenms_hostname="one-version-edge"))
+
+        assert response.status_code == 200
+        assert loads, "precondition: the request read the serial rules"
+        assert {"hostname": "one-version-edge"} in [search["filters"] for search in response.context["cached_searches"]]
+
+    @pytest.mark.django_db
     @pytest.mark.parametrize("version", ["changed", "missing"])
     def test_job_only_results_require_the_serial_rule_version_used_by_the_job(
         self, client, django_user_model, librenms_server, version
