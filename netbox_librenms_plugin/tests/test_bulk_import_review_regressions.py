@@ -905,7 +905,7 @@ def test_bulk_import_reports_the_unverified_serial_without_netbox_details(client
         job.refresh_from_db()
         (error,) = job.data["errors"]
         assert error["device_id"] == blocked_id
-        assert NETBOX_SERIAL_UNVERIFIED in error["error"]
+        assert error["error"] == NETBOX_SERIAL_UNVERIFIED
         warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
     else:
         client.force_login(user)
