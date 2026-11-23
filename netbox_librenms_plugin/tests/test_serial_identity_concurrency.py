@@ -1,5 +1,6 @@
 """Two real database sessions that write rule-equivalent serials, and the events of a failed inner install."""
 
+import re
 import time
 from functools import partial
 from threading import Barrier
@@ -134,6 +135,7 @@ def test_opposite_module_relocations_lock_the_device_pair_in_one_order():
     ]
     start = Barrier(2, timeout=10)
     acquired = [Event(), Event()]
+    statements = [[], []]
 
     def relocate(index):
         close_old_connections()
@@ -141,6 +143,7 @@ def test_opposite_module_relocations_lock_the_device_pair_in_one_order():
 
         def observe_device_lock(execute, sql, params, many, context):
             nonlocal waited
+            statements[index].append((sql, tuple(params or ())))
             result = execute(sql, params, many, context)
             if '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql and not waited:
                 waited = True
@@ -162,6 +165,14 @@ def test_opposite_module_relocations_lock_the_device_pair_in_one_order():
             connection.close()
 
     assert run_in_threads(partial(relocate, 0), partial(relocate, 1), barriers=(start,), timeout=30) == [False, False]
+    row_lock = re.compile(r"\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b")
+    for recorded in statements:
+        locks = [(sql, params) for sql, params in recorded if row_lock.search(sql)]
+        owner = next(i for i, (sql, _) in enumerate(locks) if 'FROM "dcim_device"' in sql)
+        module_lock = next(i for i, (sql, _) in enumerate(locks) if 'FROM "dcim_module"' in sql)
+        # The owner lock holds both Devices in PK order and comes before the first Module lock.
+        assert "ORDER BY 1 ASC" in locks[owner][0] and locks[owner][1] == tuple(sorted([first.pk, second.pk])), locks
+        assert owner < module_lock, locks
 
 
 @pytest.fixture
