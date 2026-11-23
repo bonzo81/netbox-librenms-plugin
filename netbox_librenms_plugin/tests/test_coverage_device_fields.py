@@ -1016,6 +1016,40 @@ class TestAssignVCSerialView:
         assert all(f"assigned to device '{keeper.name}'" in text for text in errors), errors
         assert not any("more than one device" in text for text in errors), errors
 
+    def test_a_holder_that_appears_between_the_reads_is_not_named_as_a_member(
+        self, logged_in_client, librenms_server, monkeypatch
+    ):
+        """A device that takes the serial after the stored-holder read is a stored holder, not a member of the post."""
+        from netbox_librenms_plugin.views.sync import device_fields
+
+        first = make_device("vc-serial-late-first", serial="LATE-OLD-1")
+        second = make_device("vc-serial-late-second", serial="LATE-OLD-2")
+        make_virtual_chassis("vc-serial-late", first, second)
+        real = device_fields.written_device_conflict
+        late = []
+
+        def conflict_with_a_late_holder(member, *, rules, exclude_pks=()):
+            if not exclude_pks and not late:
+                late.append(make_device("vc-serial-late-outsider", serial="LATE-NEW"))
+            return real(member, rules=rules, exclude_pks=exclude_pks)
+
+        monkeypatch.setattr(device_fields, "written_device_conflict", conflict_with_a_late_holder)
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "LATE-NEW",
+                "member_id_1": str(first.pk),
+                "librenms_serial_2": "LATE-NEW",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        errors = _messages(response, "error")
+        assert late and errors, errors
+        assert not any("member 'vc-serial-late-outsider'" in text for text in errors), errors
+
     def test_one_member_selected_for_two_serials_changes_nothing(self, logged_in_client, librenms_server):
         first = make_device("vc-serial-twice-first", serial="TWICE-OLD")
         second = make_device("vc-serial-twice-second")

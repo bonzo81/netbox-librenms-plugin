@@ -744,7 +744,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             return 0, exc.errors
 
     def _write_serials(self, device, rows):
-        """Write each posted member serial; return the count of writes.
+        """
+        Write each posted member serial; return the count of writes.
 
         Raises:
             _SerialsRefused: A member refuses its serial; the caller rolls back every member.
@@ -788,13 +789,18 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             if (stored := written_device_conflict(member, rules=serial_rules, exclude_pks=others)) is not None:
                 errors.append(f"{member.name}: {serial_conflict_text(stored, serial, self.request.user)}")
             elif (posted := written_device_conflict(member, rules=serial_rules)) is not None:
-                errors.append(f"{member.name}: {_posted_serial_conflict_text(posted, serial)}")
+                # A holder that committed between the two reads is a stored holder, not a member of the post.
+                if all(row.pk in others for row in posted.matches):
+                    errors.append(f"{member.name}: {_posted_serial_conflict_text(posted, serial)}")
+                else:
+                    errors.append(f"{member.name}: {serial_conflict_text(posted, serial, self.request.user)}")
         if errors:
             raise _SerialsRefused(errors)
         return len(saved)
 
     def _assign_member_serial(self, device, member_id, raw_serial, serial_rules, write_set_pks):
-        """Write *raw_serial* to the locked member *member_id* of the chassis of *device*; return the saved member.
+        """
+        Write *raw_serial* to the locked member *member_id* of the chassis of *device*; return the saved member.
 
         Raises:
             _WriteRefused: The member refuses the serial; the message is for the user.
