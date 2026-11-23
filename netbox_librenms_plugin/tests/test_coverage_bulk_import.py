@@ -737,7 +737,7 @@ class TestProcessDeviceFilters:
         assert len(candidate_queries) == 1
         assert all(row["_validation"]["existing_device"] is None for row in validated[:-1])
         assert validated[-1]["_validation"]["existing_device"].pk == holder.pk
-        assert sum(visits.values()) <= len(candidates), dict(visits)
+        assert all(count <= 1 for count in visits.values()), dict(visits)
         if not rewrite:
             assert not visits
         visits.clear()
@@ -747,7 +747,7 @@ class TestProcessDeviceFilters:
         )
 
         assert len(cached) == len(validated)
-        assert sum(visits.values()) <= len(candidates), dict(visits)
+        assert all(count <= 1 for count in visits.values()), dict(visits)
         if not rewrite:
             assert not visits
 
