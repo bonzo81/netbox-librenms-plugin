@@ -1412,6 +1412,8 @@ def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holde
     )
     from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
     recording = _recording()
     entities = _entities(recording)
     entities[REAL_NIM]["entPhysicalSerialNum"] = "CARD12"
