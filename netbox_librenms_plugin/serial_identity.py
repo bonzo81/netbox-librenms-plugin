@@ -995,13 +995,13 @@ def relocation_conflict(module, target_device, moving, *, rules: SerialRules, sc
         .order_by("pk")
         .values_list("pk", flat=True)
     )
-    source = locked_type_context(module.device, rules=rules)
     target = locked_type_context(target_device, rules=rules)
     if module_subtree_serials(module.pk) != moving:
         return True
-    if _new_shared_key(moving, source, target):
-        return True
     serials = [serial for _pk, serial in moving if target._key(serial)]
+    # The destination may not hold one identity twice, also when the moved modules shared it before.
+    if len({target._key(serial) for serial in serials}) < len(serials):
+        return True
     if not serials:
         return False
     found = resolve_modules(

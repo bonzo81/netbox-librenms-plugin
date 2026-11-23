@@ -632,7 +632,7 @@ class TestMoveModuleView:
         assert moving.device == source_device
 
     @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
-    @pytest.mark.parametrize("holder", ["destination-module", "moved-child"])
+    @pytest.mark.parametrize("holder", ["destination-module", "moved-child", "moved-pair"])
     def test_a_move_refuses_a_subtree_serial_that_the_destination_rules_give_a_held_identity(self, client, holder):
         """The destination's maker keys the moved child "XABC" to "ABC", which a destination module or a moved child stores."""
         from dcim.models import Device, DeviceType, Manufacturer, ModuleBay
@@ -654,7 +654,8 @@ class TestMoveModuleView:
         target_device.refresh_from_db()
         module_type = make_module_type(f"{tag}-card".upper())
         parent = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "ROOT123")
-        children = ["XABC", "ABC"] if holder == "moved-child" else ["XABC"]
+        # A moved pair already shares "ABC" on the source; the destination may still not hold it twice.
+        children = {"moved-child": ["XABC", "ABC"], "moved-pair": ["ABC", "ABC"]}.get(holder, ["XABC"])
         for number, serial in enumerate(children, start=1):
             bay = ModuleBay.objects.create(device=source_device, module=parent, name=f"Sub {number}")
             _module(source_device, bay, module_type, serial)
