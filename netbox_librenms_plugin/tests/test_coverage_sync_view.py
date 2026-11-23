@@ -1041,6 +1041,42 @@ def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
+    ("stored", "reported", "offered"),
+    [("ABC123", "S/N ABC123", True), ("S/N ABC123", "S/N ABC123", False), ("12", "12", False)],
+    ids=["other-stored-form", "exact-stored-form", "no-identity"],
+)
+def test_the_import_dialog_offers_a_serial_sync_for_another_stored_form(
+    logged_in_client, librenms_server, stored, reported, offered
+):
+    """A stored serial that names the LibreNMS hardware in another form is healed by the sync, as on the sync page."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    device = make_device(f"import-stored-form-{offered}-{len(stored)}", serial=stored)
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", manufacturer=device.device_type.manufacturer
+    )
+    seed_mapping(device, SERVER_KEY, own=6653)
+    _register_device(librenms_server, 6653, device.name, serial=reported)
+    params = {"server_key": SERVER_KEY}
+
+    response = logged_in_client.get(
+        reverse("plugins:netbox_librenms_plugin:device_validation_details", args=[6653]), params
+    )
+
+    assert response.status_code == 200
+    assert response.context["validation"]["existing_device"] == device
+    assert (b'name="action" value="sync_serial"' in response.content) is offered
+    if offered:
+        logged_in_client.post(
+            reverse("plugins:netbox_librenms_plugin:device_conflict_action", args=[6653]),
+            {**params, "action": "sync_serial", "existing_device_id": device.pk},
+        )
+        device.refresh_from_db()
+        assert device.serial == reported
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
     ("pattern", "expected"), [("-{serial}", "stack-OLD123"), ("-M{position}-{position:{serial[0]}>3}", "stack-M2-OO2")]
 )
 def test_vc_name_sync_keeps_both_pages_in_agreement_when_the_reported_serial_changes(

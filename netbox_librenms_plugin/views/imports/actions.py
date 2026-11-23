@@ -84,6 +84,7 @@ from netbox_librenms_plugin.serial_identity import (
     retype_conflict,
     retype_lock,
     retype_scope,
+    stored_form_differs,
 )
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
@@ -2083,7 +2084,11 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                 serial_same = (
                     compare(existing_device.serial, libre_device.get("serial"), serial_context) is Comparison.SAME
                 )
-                serial_synced = not is_identity(libre_device.get("serial"), serial_context) or serial_same
+                # A legacy stored form names the same hardware; the sync action writes the LibreNMS text.
+                serial_synced = not is_identity(libre_device.get("serial"), serial_context) or (
+                    serial_same
+                    and not stored_form_differs(existing_device.serial, libre_device.get("serial"), serial_context)
+                )
 
         # Platform comparison
         platform_assessment = assess_platform(
