@@ -782,9 +782,13 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         # The final serials of the set: a swap among the members is valid, two members with one identity are not.
         written_pks = {member.pk for member, _raw_serial in saved}
         for member, raw_serial in saved:
-            if (conflict := written_device_conflict(member, rules=serial_rules)) is not None:
-                text = _final_serial_conflict_text(conflict, display(raw_serial), written_pks, self.request.user)
-                errors.append(f"{member.name}: {text}")
+            serial = display(raw_serial)
+            # The other written members hold the serial only in this post, so a stored holder is named first.
+            others = written_pks - {member.pk}
+            if (stored := written_device_conflict(member, rules=serial_rules, exclude_pks=others)) is not None:
+                errors.append(f"{member.name}: {serial_conflict_text(stored, serial, self.request.user)}")
+            elif (posted := written_device_conflict(member, rules=serial_rules)) is not None:
+                errors.append(f"{member.name}: {_posted_serial_conflict_text(posted, serial)}")
         if errors:
             raise _SerialsRefused(errors)
         return len(saved)
@@ -827,13 +831,10 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         return saved[0] if saved else None
 
 
-def _final_serial_conflict_text(conflict, serial, written_pks, user):
-    """Return the refusal text of a final VC serial check; a holder in *written_pks* got the serial in this post only."""
-    holders = conflict.matches
-    if not holders or any(row.pk not in written_pks for row in holders):
-        return serial_conflict_text(conflict, serial, user)
+def _posted_serial_conflict_text(conflict, serial):
+    """Return the refusal text of a serial that *conflict* finds only on members that the same post wrote."""
     # A written member is in the user's change scope, and the disclosure rules name an object in that scope.
-    names = ", ".join(f"member '{row.name}'" for row in holders)
+    names = ", ".join(f"member '{row.name}'" for row in conflict.matches)
     return f"Serial conflict: '{serial}' is selected for this member and for {names}. Select it for one member only."
 
 

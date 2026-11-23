@@ -987,6 +987,35 @@ class TestAssignVCSerialView:
         assert all(first.name in text and second.name in text for text in errors), errors
         assert not any("already assigned" in text for text in errors), errors
 
+    def test_a_member_that_keeps_the_serial_is_the_only_holder_named(self, logged_in_client, librenms_server):
+        """Two members take the serial that a third keeps; only the third holds it after the rollback."""
+        keeper = make_device("vc-serial-trio-keeper", serial="TRIO-SERIAL")
+        second = make_device("vc-serial-trio-second", serial="TRIO-OLD-2")
+        third = make_device("vc-serial-trio-third", serial="TRIO-OLD-3")
+        make_virtual_chassis("vc-serial-trio", keeper, second, third)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            keeper,
+            {
+                "librenms_serial_1": "TRIO-SERIAL",
+                "member_id_1": str(keeper.pk),
+                "librenms_serial_2": "TRIO-SERIAL",
+                "member_id_2": str(second.pk),
+                "librenms_serial_3": "TRIO-SERIAL",
+                "member_id_3": str(third.pk),
+            },
+        )
+
+        for member in (keeper, second, third):
+            member.refresh_from_db()
+        assert (keeper.serial, second.serial, third.serial) == ("TRIO-SERIAL", "TRIO-OLD-2", "TRIO-OLD-3")
+        errors = _messages(response, "error")
+        assert len(errors) == 2, errors
+        assert all(f"assigned to device '{keeper.name}'" in text for text in errors), errors
+        assert not any("more than one device" in text for text in errors), errors
+
     def test_one_member_selected_for_two_serials_changes_nothing(self, logged_in_client, librenms_server):
         first = make_device("vc-serial-twice-first", serial="TWICE-OLD")
         second = make_device("vc-serial-twice-second")

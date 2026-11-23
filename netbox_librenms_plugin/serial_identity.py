@@ -822,10 +822,12 @@ def device_assignment(device, incoming, *, rules: SerialRules, write_set_pks=())
     return Assignment(value)
 
 
-def written_device_conflict(device, *, rules: SerialRules) -> Resolution | None:
-    """Return the refusing Resolution of the serial that the locked *device* now stores, against every other Device."""
+def written_device_conflict(device, *, rules: SerialRules, exclude_pks=()) -> Resolution | None:
+    """Return the refusing Resolution of the serial that the locked *device* now stores; *exclude_pks* do not count."""
     context = locked_context(device, rules=rules)
-    conflict = resolve_device_write(device.serial, context, rules=rules, exclude_pks=[device.pk], master=device)
+    conflict = resolve_device_write(
+        device.serial, context, rules=rules, exclude_pks=[device.pk, *exclude_pks], master=device
+    )
     return conflict if conflict.kind in REFUSING else None
 
 
