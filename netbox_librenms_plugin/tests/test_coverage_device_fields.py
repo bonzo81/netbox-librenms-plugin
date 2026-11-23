@@ -1651,6 +1651,20 @@ class TestConvertLegacyLibreNMSIdView:
         identity_lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
         assert identity_lock < first_row_lock(statements, Device, device.pk)
 
+    def test_the_first_row_lock_includes_an_unqualified_key(self):
+        """The ordering check above must see a single-table lock that names ``id`` without the table."""
+        from dcim.models import Device
+
+        statements = [
+            'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE',
+            'SELECT "dcim_device"."id" FROM "dcim_device" WHERE "dcim_device"."id" = 7 FOR UPDATE',
+            'SELECT "dcim_device"."id" FROM "dcim_device" WHERE "dcim_device"."id" IN (3, 7) FOR UPDATE',
+        ]
+        assert first_row_lock(statements, Device, 7) == 0
+        assert first_row_lock(statements[1:], Device, 7) == 0
+        assert first_row_lock(statements[2:], Device, 7) == 0
+        assert first_row_lock(['SELECT 1 FROM "dcim_device" WHERE id = 70 FOR UPDATE', *statements], Device, 7) == 1
+
     @pytest.mark.parametrize("hidden_twin", [True, False])
     def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(
         self, client, librenms_server, hidden_twin

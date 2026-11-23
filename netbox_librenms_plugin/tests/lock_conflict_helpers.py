@@ -29,7 +29,9 @@ def second_connection():
 def first_row_lock(statements, model, pk):
     """Return the index of the first captured SQL statement that locks the *model* row *pk*, at any lock strength."""
     table = model._meta.db_table
-    target = re.compile(rf'FROM "{table}" .*"{table}"\."id" (?:= {pk}\b|IN \([^)]*\b{pk}\b)')
+    match = rf"(?:= {pk}\b|IN \([^)]*\b{pk}\b)"
+    # A single-table statement may name the key without the table, as lock_row() does.
+    target = re.compile(rf'FROM "{table}" (?:.*"{table}"\."id"|WHERE "?id"?) {match}')
     row_lock = re.compile(r"\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b")
     return next(i for i, sql in enumerate(statements) if target.search(sql) and row_lock.search(sql))
 
