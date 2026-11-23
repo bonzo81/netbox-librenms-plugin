@@ -1169,6 +1169,7 @@ def validate_device_for_import(
         strip_domain=strip_domain,
         preloaded_device_type_rules=preloaded_device_type_rules,
         serial_rules=serial_rules,
+        serial_discoveries=serial_discoveries,
         numbering_rules=numbering_rules,
     )
     # Every return path of the matcher, an early return or an error, reaches this one decision.
@@ -1189,6 +1190,7 @@ def _match_and_validate(  # noqa: C901
     strip_domain: bool = False,
     preloaded_device_type_rules: dict | None = None,
     serial_rules: SerialRules | None = None,
+    serial_discoveries: Callable[[], dict[str, Resolution]] | None = None,
     numbering_rules: tuple | None = None,
 ) -> dict:
     """Return the validation of :func:`validate_device_for_import` before the OOB-controller decision."""
