@@ -306,7 +306,8 @@ def is_identity(value, context: SerialContext) -> bool:
 
 
 def module_move_serials_admitted(incoming, stored, destination: SerialContext) -> bool:
-    return is_identity(incoming, destination) and is_identity(stored, destination)
+    """Return whether the destination rules give the stored serial of a moved module the identity of *incoming*."""
+    return compare(stored, incoming, destination) is Comparison.SAME
 
 
 def stored_form_differs(stored, incoming, context: SerialContext) -> bool:

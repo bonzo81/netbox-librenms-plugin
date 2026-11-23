@@ -481,9 +481,51 @@ def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_se
     assert (bool(forms), holder.device_id, holder.module_bay_id, child.device_id) == expected
 
 
-@pytest.mark.parametrize(("stored_serial", "admitted"), [("TAG CARD12", False), ("CARD12", True)])
+@pytest.mark.parametrize(("stored_serial", "offered"), [("TAG CARD123", False), ("CARD123", True)])
+def test_the_table_offers_move_only_when_the_destination_rules_keep_the_identity(
+    ui, settings, librenms_server, stored_serial, offered
+):
+    """The holder's own rules key "TAG CARD123" to the reported "CARD123"; the destination has no such rule."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_librenms_servers,
+        install_module as install_in_bay,
+        make_device_with_module_bays,
+    )
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    recording = _recording()
+    entities = _entities(recording)
+    entities[REAL_NIM]["entPhysicalSerialNum"] = "CARD123"
+    librenms_server.load_recording(recording)
+    configure_librenms_servers(
+        settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "grants-token", "verify_ssl": False}}
+    )
+    device = c8300_device("c8300-move-identity", recording, SERVER_KEY)
+    contrib_rule(MODEL_RULE)
+    source = make_device_with_module_bays("move-identity-holder", ["Slot 1"])
+    holder = install_in_bay(source, "Slot 1", "MOVE-IDENTITY-CARD", serial=stored_serial)
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=source.device_type.manufacturer
+    )
+    url = reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk])
+
+    forms = [form["fields"] for form in module_tab_forms(render(ui, device)).forms if form["action"] == url]
+
+    assert [fields["conflict_module_id"] for fields in forms] == ([str(holder.pk)] if offered else [])
+
+
+@pytest.mark.parametrize(
+    ("stored_serial", "destination_rule", "admitted"),
+    [("TAG CARD12", True, False), ("CARD12", True, True), ("TAG CARD12", False, False)],
+    ids=["no-destination-identity", "same-identity", "other-destination-identity"],
+)
 def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holder(
-    ui, settings, librenms_server, stored_serial, admitted
+    ui, settings, librenms_server, stored_serial, destination_rule, admitted
 ):
     from django.urls import reverse
 
@@ -508,12 +550,13 @@ def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holde
     NormalizationRule.objects.create(
         scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=source.device_type.manufacturer
     )
-    NormalizationRule.objects.create(
-        scope="serial",
-        match_pattern=r"^TAG CARD(\d+)$",
-        replacement=r"\1",
-        manufacturer=device.device_type.manufacturer,
-    )
+    if destination_rule:
+        NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^TAG CARD(\d+)$",
+            replacement=r"\1",
+            manufacturer=device.device_type.manufacturer,
+        )
     bay_name = entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"]
     install_module(device, bay_name, *_nim(entities, "OLD"))
 

@@ -4618,7 +4618,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         When a single conflict is found the row gets:
 
           serial_conflict_module: the conflicting Module object (with device/module_bay loaded)
-          can_move_from: True if the target admits both serials
+          can_move_from: True if the target rules give the stored serial the reported identity
 
         More than one match sets ``serial_conflict_ambiguous`` and picks nothing.
         A holder on the row's target Device clears ``can_install``.
