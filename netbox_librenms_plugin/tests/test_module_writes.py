@@ -1,5 +1,7 @@
 """Real owner locks and stale topology checks for participating module writers."""
 
+import re
+
 import pytest
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
@@ -191,7 +193,9 @@ def test_component_and_serialless_writers_wait_for_the_owner_before_downstream_l
     if action:
         url = reverse(f"plugins:netbox_librenms_plugin:{action}", kwargs={"pk": device.pk})
     reached = Event()
-    lock_queries, writer_pids = [], []
+    downstream, writer_pids = [], []
+    # Every write and every row lock at any strength is downstream of the owner lock.
+    downstream_sql = re.compile(r"^\s*(?:INSERT|UPDATE|DELETE)\b|\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b")
 
     def post():
         close_old_connections()
@@ -200,8 +204,8 @@ def test_component_and_serialless_writers_wait_for_the_owner_before_downstream_l
             client.force_login(user)
 
             def record(execute, sql, params, many, context):
-                if "FOR UPDATE" in sql or "FOR NO KEY UPDATE" in sql:
-                    lock_queries.append(sql)
+                if downstream_sql.search(sql):
+                    downstream.append((sql, tuple(params or ())))
                     writer_pids.append(connection.connection.info.backend_pid)
                     reached.set()
                 return execute(sql, params, many, context)
@@ -216,9 +220,11 @@ def test_component_and_serialless_writers_wait_for_the_owner_before_downstream_l
             lock_row(peer, Device, device.pk)
             pending = executor.submit(post)
             assert reached.wait(timeout=10)
-            assert '"dcim_device"' in lock_queries[0] and "FOR NO KEY UPDATE" in lock_queries[0], lock_queries
             wait_for_lock_wait(connection, writer_pids[0])
             assert not pending.done()
+            first_sql, first_params = downstream[0]
+            assert re.search(r'FROM "dcim_device" .*\bFOR NO KEY UPDATE\b', first_sql), downstream
+            assert first_params == (device.pk,), downstream
         assert pending.result(timeout=20) == 302
     if writer == "carrier":
         assert Module.objects.filter(device=device, module_bay__module=module, module_bay__name="Sub 1").exists()
