@@ -141,6 +141,15 @@ class TestBulkPrecheckDecision:
         assert f"(id(s): 4): {NETBOX_SERIAL_UNVERIFIED}," in outcome.skip_message
         assert "Retry rows with unreadable LibreNMS data individually." in outcome.skip_message
 
+    def test_only_unverified_serial_rows_get_no_retry_hint(self):
+        from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_SERIAL_UNVERIFIED, classify_bulk_precheck
+
+        outcome = classify_bulk_precheck([], {4: NETBOX_SERIAL_UNVERIFIED}, [1, 3], {})
+
+        assert outcome.skipped_ids == [4]
+        assert f"(id(s): 4): {NETBOX_SERIAL_UNVERIFIED}," in outcome.skip_message
+        assert "Retry rows" not in outcome.skip_message
+
     def test_collision_blocks_the_whole_batch_and_names_visible_targets(self):
         from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE, classify_bulk_precheck
 
