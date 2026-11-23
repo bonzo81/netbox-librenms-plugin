@@ -847,6 +847,7 @@ class TestImportListRequest:
         self, client, django_user_model, librenms_server, monkeypatch
     ):
         """A rule edit after the request read its rules must not split the rows from the link to them."""
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.serial_identity import SerialRules
 
@@ -870,8 +871,13 @@ class TestImportListRequest:
         response = client.get(_import_url(), _search_params(librenms_hostname="one-version-edge"))
 
         assert response.status_code == 200
-        assert loads, "precondition: the request read the serial rules"
-        assert {"hostname": "one-version-edge"} in [search["filters"] for search in response.context["cached_searches"]]
+        (snapshot,) = loads
+        (search,) = [
+            search
+            for search in response.context["cached_searches"]
+            if search["filters"] == {"hostname": "one-version-edge"}
+        ]
+        assert search["serial_rules"] == serial_rules_version(snapshot)
 
     @pytest.mark.django_db
     @pytest.mark.parametrize("version", ["changed", "missing"])
