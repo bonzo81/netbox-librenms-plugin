@@ -239,15 +239,21 @@ class TestCollisionDetection:
         assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {53, 54}
 
     def test_missing_live_device_is_unresolved(self, live_librenms):
-        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            detect_collisions_for_device_ids,
+        )
 
         collisions, unresolved = detect_collisions_for_device_ids([404], live_librenms.api)
 
         assert collisions == []
-        assert list(unresolved) == [404]
+        assert unresolved == {404: LIBRENMS_ROW_UNREADABLE}
 
     def test_mis_keyed_cached_row_fails_closed_without_http(self, live_librenms):
-        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            detect_collisions_for_device_ids,
+        )
 
         collisions, unresolved = detect_collisions_for_device_ids(
             [61],
@@ -256,11 +262,14 @@ class TestCollisionDetection:
         )
 
         assert collisions == []
-        assert list(unresolved) == [61]
+        assert unresolved == {61: LIBRENMS_ROW_UNREADABLE}
         assert live_librenms.server.requests == []
 
     def test_fetched_identity_mismatch_is_not_written_to_shared_cache(self, live_librenms):
-        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            detect_collisions_for_device_ids,
+        )
 
         live_librenms.server.register(
             "/api/v0/devices/71",
@@ -275,7 +284,7 @@ class TestCollisionDetection:
         )
 
         assert collisions == []
-        assert list(unresolved) == [71]
+        assert unresolved == {71: LIBRENMS_ROW_UNREADABLE}
         assert shared_cache == {}
 
 
