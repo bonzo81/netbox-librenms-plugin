@@ -538,6 +538,40 @@ class TestImportListRequest:
         assert 'class="btn btn-sm btn-warning migrate-btn" disabled>' in details
 
     @pytest.mark.django_db
+    def test_a_search_shows_no_countdown_for_metadata_of_other_serial_rules(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+        monkeypatch,
+    ):
+        """Searches under other serial rules share the metadata key, so the countdown must not use their time."""
+        from netbox_librenms_plugin.import_utils import process_device_filters
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        _register_devices(librenms_server, [_device(4131)])
+        client.force_login(_create_user(django_user_model, "countdown-other-rules"))
+
+        def search_then_other_rules_search(**kwargs):
+            result = process_device_filters(**kwargs)
+            # Another request edits a rule and runs the same search before this response reads the metadata.
+            NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+            process_device_filters(**{**kwargs, "serial_rules": SerialRules.load()})
+            return result
+
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.views.imports.list.process_device_filters", search_then_other_rules_search
+        )
+        response = client.get(_import_url(), _search_params())
+
+        assert [row["device_id"] for row in response.context["table"].data] == [4131]
+        assert response.context["cache_timestamp"] is None
+        assert response.context["cache_metadata_missing"] is False
+        assert 'id="cache-info-display"' not in response.content.decode()
+
+    @pytest.mark.django_db
     def test_every_filter_reaches_the_real_search_and_client_side_matching(
         self,
         client,

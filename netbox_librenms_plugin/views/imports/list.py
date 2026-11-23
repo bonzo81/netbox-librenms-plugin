@@ -565,30 +565,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         # Retrieve cache metadata (timestamp) for countdown display
         # This works for both new caches and existing caches
         if validated_devices:
-            from netbox_librenms_plugin.import_utils import get_cache_metadata_key
-
-            cache_metadata_key = get_cache_metadata_key(
-                server_key=self.librenms_api.server_key,
-                filters=libre_filters,
-                vc_enabled=vc_detection_enabled,
-                use_sysname=self._use_sysname,
-                strip_domain=self._strip_domain,
-            )
-            cache_metadata = cache.get(cache_metadata_key)
-            if cache_metadata:
-                self._cache_timestamp = cache_metadata.get("cached_at")
-                self._cache_timeout = cache_metadata.get("cache_timeout", 300)
-                self._cache_metadata_missing = False
-                logger.info(
-                    f"Retrieved cache metadata: timestamp={self._cache_timestamp}, "
-                    f"timeout={self._cache_timeout}, from_cache={from_cache}"
-                )
-            else:
-                self._cache_metadata_missing = True
-                logger.warning(
-                    f"Cache metadata not found for key: {cache_metadata_key}, from_cache={from_cache}. "
-                    f"This may indicate cache key mismatch or metadata expiration."
-                )
+            self._read_cache_metadata(libre_filters, vc_detection_enabled, from_cache)
 
         # Mark each device's validation with VC detection flag for downstream views
         for device in validated_devices:
@@ -596,3 +573,34 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 device["_validation"]["_vc_detection_enabled"] = vc_detection_enabled
 
         return validated_devices
+
+    def _read_cache_metadata(self, libre_filters, vc_detection_enabled, from_cache):
+        """Set the countdown fields from the search metadata that the serial rule snapshot of this request wrote."""
+        from netbox_librenms_plugin.import_utils import get_cache_metadata_key
+        from netbox_librenms_plugin.import_utils.cache import search_metadata_is_current
+
+        cache_metadata_key = get_cache_metadata_key(
+            server_key=self.librenms_api.server_key,
+            filters=libre_filters,
+            vc_enabled=vc_detection_enabled,
+            use_sysname=self._use_sysname,
+            strip_domain=self._strip_domain,
+        )
+        cache_metadata = cache.get(cache_metadata_key)
+        if search_metadata_is_current(cache_metadata, self._serial_rules):
+            self._cache_timestamp = cache_metadata.get("cached_at")
+            self._cache_timeout = cache_metadata.get("cache_timeout", 300)
+            self._cache_metadata_missing = False
+            logger.info(
+                f"Retrieved cache metadata: timestamp={self._cache_timestamp}, "
+                f"timeout={self._cache_timeout}, from_cache={from_cache}"
+            )
+        elif cache_metadata:
+            # A search under other serial rules wrote the key, so its time does not describe these rows.
+            logger.info(f"Cache metadata for key {cache_metadata_key} belongs to other serial rules")
+        else:
+            self._cache_metadata_missing = True
+            logger.warning(
+                f"Cache metadata not found for key: {cache_metadata_key}, from_cache={from_cache}. "
+                f"This may indicate cache key mismatch or metadata expiration."
+            )
