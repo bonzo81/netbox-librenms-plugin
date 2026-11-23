@@ -32,8 +32,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
 )
 
-pytestmark = pytest.mark.django_db
-
 SEEDED = r"^S/N\s+(.+)$"
 
 
@@ -67,6 +65,7 @@ def _device_of(manufacturer, name, serial):
     return device
 
 
+@pytest.mark.django_db
 class TestSerialRuleLanguage:
     """A serial rule extracts one capture group of a full match; other scopes keep substitution."""
 
@@ -189,6 +188,7 @@ class TestSerialRuleLanguage:
             NormalizationRule.objects.get(pk=rule.pk).apply("S/N ABC")
 
 
+@pytest.mark.django_db
 class TestKeyAdmission:
     """A placeholder, before or after the rules, and a key without three letters or digits are no identity."""
 
@@ -255,6 +255,7 @@ class TestKeyAdmission:
             assert re.search(r"[A-Za-z0-9]{3}", pattern), pattern
 
 
+@pytest.mark.django_db
 class TestLookup:
     """One query finds every row whose key equals the incoming key under the row's own context."""
 
@@ -493,6 +494,7 @@ class TestLookup:
         assert module._SERIAL_TRIM_CHARACTERS == TRIM_CHARACTERS
 
 
+@pytest.mark.django_db
 class TestAmbiguity:
     """Two or more equivalent rows are Ambiguous, also when the user cannot see one of them."""
 
@@ -552,6 +554,7 @@ class TestAmbiguity:
         assert validation["can_import"] is False
 
 
+@pytest.mark.django_db
 class TestGroupingAndPresentation:
     def test_a_group_of_two_equivalent_observations_is_kept_whole(self):
         from netbox_librenms_plugin.serial_identity import SerialRules
@@ -621,6 +624,7 @@ class TestGroupingAndPresentation:
         )
 
 
+@pytest.mark.django_db
 class TestWriters:
     """Every refusing outcome blocks a write; an absent incoming serial never clears a stored one."""
 
@@ -790,6 +794,7 @@ def _validate(payload):
     return validate_device_for_import(payload, api=None, server_key="default", include_vc_detection=False)
 
 
+@pytest.mark.django_db
 class TestEquivalentFormsAcrossDecisions:
     """S1: a stored "S/N X" and an incoming "X" name one device in every decision that looks a serial up."""
 
@@ -984,6 +989,7 @@ def _cached_search(caching_librenms, serial):
     return found["_validation"]
 
 
+@pytest.mark.django_db
 class TestCachedSearchResults:
     """S5: a cached search result shows the serial match that the current rules and rows give."""
 
@@ -1061,6 +1067,7 @@ class TestCachedSearchResults:
             assert validation["can_import"] is False
 
 
+@pytest.mark.django_db
 class TestCompletedSearchJobResults:
     """S5: a completed background search shows the serial match that the current rows give."""
 
