@@ -984,6 +984,28 @@ class TestAssignVCSerialView:
         errors = _messages(response, "error")
         assert any(f"assigned to device '{second.name}'" in text for text in errors), errors
 
+    def test_one_member_selected_for_two_serials_changes_nothing(self, logged_in_client, librenms_server):
+        first = make_device("vc-serial-twice-first", serial="TWICE-OLD")
+        second = make_device("vc-serial-twice-second")
+        make_virtual_chassis("vc-serial-twice", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "TWICE-NEW-1",
+                "member_id_1": str(first.pk),
+                "librenms_serial_2": "TWICE-NEW-2",
+                "member_id_2": str(first.pk),
+            },
+        )
+
+        first.refresh_from_db()
+        assert first.serial == "TWICE-OLD"
+        assert _messages(response, "success") == []
+        assert len(_messages(response, "error")) == 1
+
     @transactional_db_with_all_apps()
     def test_a_lock_conflict_wrapped_in_a_validation_error_gives_the_try_again_answer(
         self, logged_in_client, librenms_server

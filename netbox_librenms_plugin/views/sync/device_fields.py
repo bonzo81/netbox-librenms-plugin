@@ -759,12 +759,17 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                 targets.append((int(member_id), raw_serial))
             except ValueError:
                 errors.append(f"Device with ID {member_id} not found")
+        write_set_pks = [member_pk for member_pk, _raw_serial in targets]
+        if len(set(write_set_pks)) < len(write_set_pks):
+            # A later row would overwrite an earlier one, and the success count would count both rows.
+            raise _SerialsRefused(
+                [*errors, "One member is selected for more than one serial. Select each member once."]
+            )
         serial_rules = SerialRules.load()
         # One set of serial identity locks for every row of the attempt, before any member row lock.
         assignment_lock([raw_serial for _member_pk, raw_serial in targets], model=Device, rules=serial_rules)
         # Every member that the attempt writes must be in this chassis, so one chassis lock covers them.
         lock_chassis_of(device.pk)
-        write_set_pks = [member_pk for member_pk, _raw_serial in targets]
         saved = []
         for member_pk, raw_serial in targets:
             try:
