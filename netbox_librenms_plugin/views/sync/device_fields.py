@@ -780,11 +780,11 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             except _WriteRefused as exc:
                 errors.append(str(exc))
         # The final serials of the set: a swap among the members is valid, two members with one identity are not.
+        written_pks = {member.pk for member, _raw_serial in saved}
         for member, raw_serial in saved:
             if (conflict := written_device_conflict(member, rules=serial_rules)) is not None:
-                errors.append(
-                    f"{member.name}: {serial_conflict_text(conflict, display(raw_serial), self.request.user)}"
-                )
+                text = _final_serial_conflict_text(conflict, display(raw_serial), written_pks, self.request.user)
+                errors.append(f"{member.name}: {text}")
         if errors:
             raise _SerialsRefused(errors)
         return len(saved)
@@ -825,6 +825,16 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                 write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
             ) from e
         return saved[0] if saved else None
+
+
+def _final_serial_conflict_text(conflict, serial, written_pks, user):
+    """Return the refusal text of a final VC serial check; a holder in *written_pks* got the serial in this post only."""
+    holders = conflict.matches
+    if not holders or any(row.pk not in written_pks for row in holders):
+        return serial_conflict_text(conflict, serial, user)
+    # A written member is in the user's change scope, and the disclosure rules name an object in that scope.
+    names = ", ".join(f"member '{row.name}'" for row in holders)
+    return f"Serial conflict: '{serial}' is selected for this member and for {names}. Select it for one member only."
 
 
 class _SerialsRefused(Exception):

@@ -982,7 +982,10 @@ class TestAssignVCSerialView:
         assert (first.serial, second.serial) == ("SAME-OLD-1", "SAME-OLD-2")
         assert _messages(response, "success") == []
         errors = _messages(response, "error")
-        assert any(f"assigned to device '{second.name}'" in text for text in errors), errors
+        # The serial was never stored on either member, so the text names the post, not a stored holder.
+        assert len(errors) == 2, errors
+        assert all(first.name in text and second.name in text for text in errors), errors
+        assert not any("already assigned" in text for text in errors), errors
 
     def test_one_member_selected_for_two_serials_changes_nothing(self, logged_in_client, librenms_server):
         first = make_device("vc-serial-twice-first", serial="TWICE-OLD")
