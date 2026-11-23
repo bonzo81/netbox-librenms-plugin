@@ -1750,7 +1750,8 @@ class TestConvertLegacyLibreNMSIdView:
         """A list or an object is no serial: the conversion refuses it, and the resolver never reads it."""
         from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
 
-        device = make_device("legacy-malformed-serial", serial="MALFORMED-LEGACY", librenms_cf=6569)
+        # The stored text is the coerced value, so only the type check can refuse the match.
+        device = make_device("legacy-malformed-serial", serial=str(serial), librenms_cf=6569)
         librenms_server.device_info_response(device_id=6569, hostname=device.name, serial=serial)
 
         response = _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
@@ -1759,6 +1760,18 @@ class TestConvertLegacyLibreNMSIdView:
         assert response.status_code == 302
         assert stored_mapping_for_test(device) == 6569
         assert _messages(response, "error") == [_SERIAL_MISMATCH_MESSAGE]
+
+    @pytest.mark.parametrize("serial", ["['MALFORMED-LEGACY']", "{'serial': 'MALFORMED-LEGACY'}", "True"])
+    def test_the_coerced_text_as_a_serial_confirms_the_conversion(self, logged_in_client, librenms_server, serial):
+        """The control of the malformed case: the same text, sent as a string, is a serial."""
+        device = make_device("legacy-coerced-serial", serial=serial, librenms_cf=6570)
+        librenms_server.device_info_response(device_id=6570, hostname=device.name, serial=serial)
+
+        response = _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6570}
+        assert _messages(response, "error") == []
 
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")
