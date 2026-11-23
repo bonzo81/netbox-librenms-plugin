@@ -162,8 +162,10 @@ def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialC
     serial = item.get("entPhysicalSerialNum")
     if is_identity(serial, context):
         return compare(serial, transceiver.get("serial"), context) is Comparison.SAME
-    # Only a blank entity is the holder of the optic: a reported serial without an identity names a part.
-    return not display(serial) and not _clean_librenms_value(item.get("entPhysicalModelName"))
+    # The same reported text corroborates the ifIndex match; another reported text names another part.
+    if text := display(serial):
+        return text == display(transceiver.get("serial"))
+    return not _clean_librenms_value(item.get("entPhysicalModelName"))
 
 
 # Physical classes whose entities only hold hardware when they report no serial.
