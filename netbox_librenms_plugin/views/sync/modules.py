@@ -371,6 +371,12 @@ class _GrantedInventory:
         return item
 
 
+def _require_posted_module(authorized):
+    """Refuse a posted module outside *authorized* as a missing one, before the write observes or locks its device."""
+    if not authorized.exists():
+        raise _ModuleActionRefused("Module no longer exists.")
+
+
 def _authorize_module_grant(view, page_device, server_key, action, token):
     """
     Return the posted grant of *action* with the current snapshot and policy, or raise GrantRefused.
@@ -2236,6 +2242,9 @@ class UpdateModuleSerialView(
                 librenms_item = granted.row(granted.grant.ent_index)
                 incoming = librenms_item.get("entPhysicalSerialNum")
                 serial_rules = granted.policy.serial_identity_rules
+                _require_posted_module(
+                    self.restricted_queryset(Module, "change").filter(pk=module_id, device=target_device)
+                )
                 scope = lock_module_write(
                     observe_module_write(device_ids=[target_device.pk], module_ids=[module_id]),
                     incoming=[incoming],
@@ -3343,6 +3352,7 @@ class MoveModuleView(
         removing = module_subtree_serials(occupant_id)
         try:
             with atomic_with_events():
+                _require_posted_module(movable)
                 scope = lock_module_write(
                     observe_module_write(
                         device_ids=[target_device.pk],

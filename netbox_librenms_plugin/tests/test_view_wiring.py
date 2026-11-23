@@ -7,6 +7,7 @@ hierarchies and attribute presence.
 
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -2516,6 +2517,127 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert module.serial == "ORIGINAL"
         # Names the reason, so a row the view never resolved cannot pass this test.
         assert "Module no longer exists." in message_texts(request, "error")
+
+    @staticmethod
+    def _locked_device_ids(queries):
+        """Return the Device pks of the captured ``FOR NO KEY UPDATE`` Device row locks."""
+        found = set()
+        for query in queries:
+            sql = query["sql"]
+            if sql.lstrip().startswith("SELECT") and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
+                for listed in re.findall(r'"dcim_device"\."id" IN \(([^)]*)\)', sql):
+                    found.update(int(pk) for pk in listed.split(","))
+        return found
+
+    @pytest.mark.parametrize("named", ["hidden", "missing"])
+    def test_module_move_answers_a_hidden_module_as_a_missing_one(self, named):
+        """A module outside the change grant gets the answer of a missing pk, before its device is locked."""
+        from dcim.models import Device, Manufacturer, Module, ModuleBay, ModuleType
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+        from netbox_librenms_plugin.views.sync.modules import MoveModuleView
+
+        if not netbox_relocates_module_subtree():
+            pytest.skip("NetBox moves a module from 4.7.")
+        page_device = make_device("scope-move-hidden-page")
+        other_device = make_device("scope-move-hidden-other")
+        mfr, _ = Manufacturer.objects.get_or_create(name="Mfr-scope-move-hidden", slug="mfr-scope-move-hidden")
+        mtype = ModuleType.objects.create(manufacturer=mfr, model="MT-scope-move-hidden")
+        target_bay = ModuleBay.objects.create(device=page_device, name="Slot 1")
+        foreign_bay = ModuleBay.objects.create(device=other_device, name="Slot 9")
+        hidden = Module.objects.create(device=other_device, module_bay=foreign_bay, module_type=mtype)
+        module_id = hidden.pk if named == "hidden" else hidden.pk + 1000
+        user = self._user(
+            f"scope-move-{named}",
+            [
+                (Device, "view", None),
+                (ModuleBay, "view", None),
+                (Module, "change", {"device__name": "scope-move-hidden-page"}),
+                (Module, "delete", {"device__name": "scope-move-hidden-page"}),
+            ],
+        )
+        view = MoveModuleView()
+        request = self._request(user, {"conflict_module_id": str(module_id), "target_bay_id": str(target_bay.pk)})
+        view.setup(request)
+
+        with CaptureQueriesContext(connection) as queries:
+            view.post(request, pk=page_device.pk)
+
+        assert message_texts(request, "error") == ["Module no longer exists."]
+        assert other_device.pk not in self._locked_device_ids(queries)
+        hidden.refresh_from_db()
+        assert (hidden.device_id, hidden.module_bay_id) == (other_device.pk, foreign_bay.pk)
+
+    @pytest.mark.parametrize("named", ["hidden", "missing"])
+    def test_module_serial_update_answers_a_hidden_module_as_a_missing_one(self, named):
+        """A module outside the change grant gets the answer of a missing pk, before its device is locked."""
+        from dcim.models import Device, Module
+        from django.core.cache import cache
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            message_texts,
+            render_module_tab,
+            rendered_module_form,
+            trusted_module_inventory_payload,
+        )
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        page_device = make_device(f"scope-modserial-{named}-page")
+        other_device = make_device(f"scope-modserial-{named}-other")
+        mtype = make_module_type(f"MT-scope-modserial-{named}")
+        bay = make_module_bay(page_device, "Slot 1")
+        Module.objects.create(device=page_device, module_bay=bay, module_type=mtype, serial="ORIGINAL")
+        hidden = Module.objects.create(
+            device=other_device, module_bay=make_module_bay(other_device, "Slot 9"), module_type=mtype, serial="KEEP"
+        )
+        user = self._user(
+            f"scope-modserial-{named}",
+            [
+                (Device, "view", {"pk": page_device.pk}),
+                (Module, "change", {"device_id": page_device.pk}),
+            ],
+        )
+        view = UpdateModuleSerialView()
+        request = self._request(user, {"server_key": "default"})
+        view.setup(request)
+        server_key = view.resolve_posted_server_key_or_none(request.POST)
+        assert server_key is not None, "this test needs a resolvable server namespace"
+        inventory_item = {
+            "entPhysicalIndex": 4002,
+            "entPhysicalClass": "module",
+            "entPhysicalName": bay.name,
+            "entPhysicalModelName": mtype.model,
+            "entPhysicalSerialNum": "REPORTED123",
+        }
+        cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(page_device, [inventory_item], server_key=server_key, librenms_id=902),
+            timeout=300,
+        )
+        _action, fields = rendered_module_form(
+            render_module_tab(page_device, user=user, server_key=server_key), "update-module-serial", 4002
+        )
+        fields["module_id"] = str(hidden.pk if named == "hidden" else hidden.pk + 1000)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            with CaptureQueriesContext(connection) as queries:
+                view.post(request, pk=page_device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert message_texts(request, "error") == ["Module no longer exists."]
+        assert other_device.pk not in self._locked_device_ids(queries)
+        hidden.refresh_from_db()
+        assert hidden.serial == "KEEP"
 
     def test_module_replace_refuses_to_delete_the_target_outside_the_delete_grant(self):
         """Replace deletes its target, so change access alone must not authorize the operation."""
