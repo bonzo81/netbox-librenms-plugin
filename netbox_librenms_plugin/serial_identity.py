@@ -794,12 +794,14 @@ def locked_type_context(device, *, rules: SerialRules | None) -> SerialContext:
     return (rules or SerialRules.load()).context(manufacturer_id)
 
 
-def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
+def device_assignment(device, incoming, *, rules: SerialRules, write_set_pks=()) -> Assignment:
     """
     Decide the serial write of a locked Device, after ``assignment_lock``.
 
     A stored serial that names the same hardware in another form is written in the raw form (healing).
     Another Device that holds the identity, or an identity the plugin cannot read, refuses the write.
+    The Devices *write_set_pks* of the same write set do not refuse it: their serials can change in the
+    set, so the writer calls ``written_device_conflict`` for each written Device after the last write.
     """
     from dcim.models import Device
 
@@ -812,10 +814,19 @@ def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
     if _stored_text(device.serial) == value:
         return Assignment(None)
     # A master's members take the context of its type as the object holds it, also a type that the same write sets.
-    conflict = resolve_device_write(incoming, context, rules=rules, exclude_pks=[device.pk], master=device)
+    conflict = resolve_device_write(
+        incoming, context, rules=rules, exclude_pks=[device.pk, *write_set_pks], master=device
+    )
     if conflict.kind in REFUSING:
         return Assignment(None, conflict)
     return Assignment(value)
+
+
+def written_device_conflict(device, *, rules: SerialRules) -> Resolution | None:
+    """Return the refusing Resolution of the serial that the locked *device* now stores, against every other Device."""
+    context = locked_context(device, rules=rules)
+    conflict = resolve_device_write(device.serial, context, rules=rules, exclude_pks=[device.pk], master=device)
+    return conflict if conflict.kind in REFUSING else None
 
 
 def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:

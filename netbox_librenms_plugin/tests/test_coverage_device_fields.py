@@ -936,6 +936,80 @@ class TestAssignVCSerialView:
         assert _messages(response, "error") == []
         assert any("No serial assignments" in text for text in _messages(response, "info"))
 
+    def test_a_serial_swap_between_members_applies_in_one_post(self, logged_in_client, librenms_server):
+        """Each member gives up its stored serial to the other, so neither one is a holder against the swap."""
+        first = make_device("vc-serial-swap-first", serial="SWAP-BBB")
+        second = make_device("vc-serial-swap-second", serial="SWAP-AAA")
+        make_virtual_chassis("vc-serial-swap", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "SWAP-AAA",
+                "member_id_1": str(first.pk),
+                "librenms_serial_2": "SWAP-BBB",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("SWAP-AAA", "SWAP-BBB")
+        assert _messages(response, "error") == []
+        assert any("assigned 2 serial" in text for text in _messages(response, "success"))
+
+    def test_two_members_given_one_identity_change_neither(self, logged_in_client, librenms_server):
+        first = make_device("vc-serial-same-first", serial="SAME-OLD-1")
+        second = make_device("vc-serial-same-second", serial="SAME-OLD-2")
+        make_virtual_chassis("vc-serial-same", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "SAME-NEW",
+                "member_id_1": str(first.pk),
+                "librenms_serial_2": " SAME-NEW ",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("SAME-OLD-1", "SAME-OLD-2")
+        assert _messages(response, "success") == []
+        errors = _messages(response, "error")
+        assert any(f"assigned to device '{second.name}'" in text for text in errors), errors
+
+    def test_a_swap_with_a_serial_held_outside_the_chassis_changes_neither(self, logged_in_client, librenms_server):
+        """The outside holder refuses the second member, so the first member's serial is not freed either."""
+        first = make_device("vc-serial-outside-first", serial="OUTSIDE-AAA")
+        second = make_device("vc-serial-outside-second", serial="OUTSIDE-BBB")
+        holder = make_device("vc-serial-outside-holder", serial="OUTSIDE-CCC")
+        make_virtual_chassis("vc-serial-outside", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "OUTSIDE-BBB",
+                "member_id_1": str(first.pk),
+                "librenms_serial_2": "OUTSIDE-CCC",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        for member in (first, second, holder):
+            member.refresh_from_db()
+        assert (first.serial, second.serial, holder.serial) == ("OUTSIDE-AAA", "OUTSIDE-BBB", "OUTSIDE-CCC")
+        assert _messages(response, "success") == []
+        errors = _messages(response, "error")
+        assert any(f"assigned to device '{holder.name}'" in text for text in errors), errors
+
     def test_assignment_without_a_member_id_is_ignored(self, logged_in_client, librenms_server):
         device = make_device("vc-serial-no-member")
         make_virtual_chassis("vc-serial-no-member-chassis", device)

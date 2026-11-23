@@ -49,6 +49,7 @@ from netbox_librenms_plugin.serial_identity import (
     retype_conflict,
     retype_lock,
     retype_scope,
+    written_device_conflict,
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncTab
@@ -715,8 +716,11 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.error(request, "The VC Serials dialog is out of date. Reload the page and try again.")
             return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
-        # One transaction for all members: a lock conflict rolls back every member, and the runner retries once.
-        assignments_made, errors = run_transaction(lambda: self._assign_serials(device, rows))
+        # One transaction for all members: a lock conflict or a refusal rolls back every member.
+        try:
+            assignments_made, errors = run_transaction(lambda: self._assign_serials(device, rows)), []
+        except _SerialsRefused as exc:
+            assignments_made, errors = 0, exc.errors
 
         if assignments_made > 0:
             messages.success(
@@ -734,33 +738,48 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
     def _assign_serials(self, device, rows):
-        """Run one attempt: write each posted member serial; return the count of writes and the error texts."""
-        assignments_made = 0
+        """Run one attempt: write each posted member serial; return the count of writes.
+
+        Raises:
+            _SerialsRefused: A member refuses its serial; the attempt must roll back every member.
+
+        """
         errors = []
-        serial_rules = SerialRules.load()
-        # One set of serial identity locks for every row of the attempt, before any member row lock.
-        assignment_lock([raw_serial for raw_serial, member_id in rows if member_id], model=Device, rules=serial_rules)
-        # Every member that the attempt writes must be in this chassis, so one chassis lock covers them.
-        lock_chassis_of(device.pk)
+        targets = []
         for raw_serial, member_id in rows:
             if not member_id or not display(raw_serial):
                 continue
             try:
-                member_pk = int(member_id)
+                targets.append((int(member_id), raw_serial))
             except ValueError:
                 errors.append(f"Device with ID {member_id} not found")
-                continue
+        serial_rules = SerialRules.load()
+        # One set of serial identity locks for every row of the attempt, before any member row lock.
+        assignment_lock([raw_serial for _member_pk, raw_serial in targets], model=Device, rules=serial_rules)
+        # Every member that the attempt writes must be in this chassis, so one chassis lock covers them.
+        lock_chassis_of(device.pk)
+        write_set_pks = [member_pk for member_pk, _raw_serial in targets]
+        saved = []
+        for member_pk, raw_serial in targets:
             try:
-                if self._assign_member_serial(device, member_pk, raw_serial, serial_rules):
-                    assignments_made += 1
+                if member := self._assign_member_serial(device, member_pk, raw_serial, serial_rules, write_set_pks):
+                    saved.append((member, raw_serial))
             except Device.DoesNotExist:
-                errors.append(f"Device with ID {member_id} not found")
+                errors.append(f"Device with ID {member_pk} not found")
             except _WriteRefused as exc:
                 errors.append(str(exc))
-        return assignments_made, errors
+        # The final serials of the set: a swap among the members is valid, two members with one identity are not.
+        for member, raw_serial in saved:
+            if (conflict := written_device_conflict(member, rules=serial_rules)) is not None:
+                errors.append(
+                    f"{member.name}: {serial_conflict_text(conflict, display(raw_serial), self.request.user)}"
+                )
+        if errors:
+            raise _SerialsRefused(errors)
+        return len(saved)
 
-    def _assign_member_serial(self, device, member_id, raw_serial, serial_rules):
-        """Write *raw_serial* to the locked member *member_id* of the chassis of *device*; return whether it saved one.
+    def _assign_member_serial(self, device, member_id, raw_serial, serial_rules, write_set_pks):
+        """Write *raw_serial* to the locked member *member_id* of the chassis of *device*; return the saved member.
 
         Raises:
             _WriteRefused: The member refuses the serial; the message is for the user.
@@ -773,7 +792,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             locked.append(member)
             if member.virtual_chassis_id != device.virtual_chassis_id:
                 raise _WriteRefused(f"{member.name} is not part of the same virtual chassis")
-            assignment = device_assignment(member, raw_serial, rules=serial_rules)
+            assignment = device_assignment(member, raw_serial, rules=serial_rules, write_set_pks=write_set_pks)
             if assignment.conflict is not None:
                 raise _WriteRefused(
                     f"{member.name}: {serial_conflict_text(assignment.conflict, display(raw_serial), self.request.user)}"
@@ -794,7 +813,15 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             raise _WriteRefused(
                 write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
             ) from e
-        return bool(saved)
+        return saved[0] if saved else None
+
+
+class _SerialsRefused(Exception):
+    """A member of the VC Serials post refused its serial, so no member is written; the texts are for the user."""
+
+    def __init__(self, errors):
+        super().__init__(errors)
+        self.errors = errors
 
 
 _SERIAL_MISMATCH_MESSAGE = (
