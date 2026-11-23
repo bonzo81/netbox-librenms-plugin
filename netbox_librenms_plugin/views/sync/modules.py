@@ -3341,7 +3341,6 @@ class MoveModuleView(
             module.device = target_device
 
         serial_rules = SerialRules.load()
-        moving = () if same_device_move else module_subtree_serials(conflict_module_id)
         occupant_id = (
             self.restricted_queryset(Module, "delete")
             .filter(pk=module_id, device=target_device, module_bay_id=target_bay_id)
@@ -3353,6 +3352,7 @@ class MoveModuleView(
         try:
             with atomic_with_events():
                 _require_posted_module(movable)
+                moving = () if same_device_move else module_subtree_serials(conflict_module_id)
                 scope = lock_module_write(
                     observe_module_write(
                         device_ids=[target_device.pk],

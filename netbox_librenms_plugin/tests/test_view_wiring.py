@@ -2569,6 +2569,14 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
         assert message_texts(request, "error") == ["Module no longer exists."]
         assert other_device.pk not in self._locked_device_ids(queries)
+        # The serials of the posted module and its subtree are read only after the grant admits it.
+        posted_pk = re.compile(rf"\b{module_id}\b")
+        serial_reads = [
+            query["sql"]
+            for query in queries.captured_queries
+            if '"dcim_module"."serial"' in query["sql"] and posted_pk.search(query["sql"])
+        ]
+        assert serial_reads == []
         hidden.refresh_from_db()
         assert (hidden.device_id, hidden.module_bay_id) == (other_device.pk, foreign_bay.pk)
 
