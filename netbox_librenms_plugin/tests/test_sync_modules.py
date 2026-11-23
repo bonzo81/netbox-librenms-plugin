@@ -3998,8 +3998,15 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
     assert set(observed) == {(False, 0)}
 
 
-# The decorators that run a whole function in one transaction.
-_ATOMIC_DECORATORS = {"transaction.atomic", "transaction.atomic()", "atomic_with_events", "atomic_with_events()"}
+# The package's transaction helpers, as a with-statement context or a decorator.
+_TRANSACTION_HELPERS = {"transaction.atomic", "atomic_with_events", "row_savepoint"}
+
+
+def _is_transaction(expression):
+    import ast
+
+    helper = expression.func if isinstance(expression, ast.Call) else expression
+    return ast.unparse(helper) in _TRANSACTION_HELPERS
 
 
 def _responses_under_module_owner_locks(source):
@@ -4008,9 +4015,8 @@ def _responses_under_module_owner_locks(source):
 
     violations = set()
     for node in ast.walk(ast.parse(source)):
-        atomic = isinstance(node, ast.With) or (
-            isinstance(node, ast.FunctionDef)
-            and any(ast.unparse(decorator) in _ATOMIC_DECORATORS for decorator in node.decorator_list)
+        atomic = (isinstance(node, ast.With) and any(_is_transaction(item.context_expr) for item in node.items)) or (
+            isinstance(node, ast.FunctionDef) and any(_is_transaction(decorator) for decorator in node.decorator_list)
         )
         if not atomic:
             continue
@@ -4029,6 +4035,27 @@ def test_module_owner_lock_sections_do_not_render_responses():
 
     violations = _responses_under_module_owner_locks(inspect.getsource(modules))
     assert not violations, f"Response rendering holds a Module owner lock at lines {sorted(violations)}"
+
+
+@pytest.mark.parametrize(
+    ("outer", "inner", "found"),
+    [
+        ("connection.execute_wrapper(record)", "transaction.atomic()", set()),
+        ("transaction.atomic()", "connection.execute_wrapper(record)", {5}),
+    ],
+    ids=["render-after-the-transaction", "render-inside-the-transaction"],
+)
+def test_the_owner_lock_scan_reads_only_transaction_blocks(outer, inner, found):
+    """The control: only a transaction block holds the owner lock, so a response after it exits is safe."""
+    source = (
+        "def _install(self, request, page_device):\n"
+        f"    with {outer}:\n"
+        f"        with {inner}:\n"
+        "            scope = lock_module_write(observe_module_write(device_ids=[page_device.pk]))\n"
+        "        return _modules_action_response(request, page_device)\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == found
 
 
 @pytest.mark.parametrize("decorator", ["atomic_with_events()", "transaction.atomic"])
