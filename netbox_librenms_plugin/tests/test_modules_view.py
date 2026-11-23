@@ -875,7 +875,7 @@ class TestMergeTransceiverDataPortIdentity:
                     {
                         "entity_physical_index": 403,
                         "model": "SFP-10G-SR",
-                        "serial": "TX-403",
+                        "serial": "4242",
                         "type": "SFP",
                         "port_id": 11,
                     }
@@ -906,6 +906,8 @@ class TestMergeTransceiverDataPortIdentity:
         # Both existing values are real (not placeholders), so the transceiver data must not overwrite them.
         assert inventory[0]["entPhysicalModelName"] == 1000
         assert inventory[0]["entPhysicalSerialNum"] == 4242
+        # The port ID proves that the merge matched the row and reached supplementation.
+        assert inventory[0]["_librenms_port_id"] == 11
 
     def test_string_index_matches_int_transceiver_index_no_duplicate(self, settings, librenms_server):
         """LibreNMS may report the ENTITY index as a string while the transceiver API returns an int; coercing both sides matches the existing row instead of caching a duplicate."""
