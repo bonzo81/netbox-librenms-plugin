@@ -4066,6 +4066,7 @@ class TestCheckIgnoreRules:
     @pytest.mark.parametrize("parent_serial", ["AB-12", ""])
     def test_the_ancestor_walk_stops_at_the_same_parent_after_anonymization(self, parent_serial):
         from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+        from netbox_librenms_plugin.serial_identity import display, is_identity
         from netbox_librenms_plugin.views.base.modules_view import _serial_matches_an_ancestor
 
         rows = [
@@ -4088,6 +4089,9 @@ class TestCheckIgnoreRules:
 
         assert matches(live) is (parent_serial == "")
         assert matches(anonymized) is matches(live)
+        if parent_serial:
+            parent = next(iter(anonymized["responses"].values()))["inventory"][1]["entPhysicalSerialNum"]
+            assert display(parent) and not is_identity(parent, plain_context())
 
     def test_ancestor_walk_stops_at_non_matching_serial(self):
         """Ancestor walk stops at first non-empty serial; if it doesn't match → NOT skipped."""
