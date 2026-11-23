@@ -1046,8 +1046,17 @@ class TestAssignVCSerialView:
             },
         )
 
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("LATE-OLD-1", "LATE-OLD-2")
         errors = _messages(response, "error")
-        assert late and errors, errors
+        assert late, "precondition: the late holder was written"
+        (outsider,) = late
+        # The stored-holder read of the second member finds the late holder.
+        stored_refusal = (
+            f"Serial conflict: 'LATE-NEW' is already assigned to device '{outsider.name}' (ID: {outsider.pk})"
+        )
+        assert f"{second.name}: {stored_refusal}" in errors, errors
         assert not any("member 'vc-serial-late-outsider'" in text for text in errors), errors
 
     def test_one_member_selected_for_two_serials_changes_nothing(self, logged_in_client, librenms_server):
