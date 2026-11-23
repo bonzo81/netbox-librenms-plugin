@@ -540,7 +540,11 @@ def test_the_trigram_migration_requires_the_serial_columns_collation():
     name, table = map(sql.Identifier, indexes[0])
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm'")
+            # nspname is the raw name; regnamespace::text quotes it.
+            cursor.execute(
+                "SELECT nspname FROM pg_extension JOIN pg_namespace ON pg_namespace.oid = extnamespace"
+                " WHERE extname = 'pg_trgm'"
+            )
             (extension_schema,) = cursor.fetchone()
             cursor.execute(sql.SQL("CREATE SCHEMA {}").format(schema))
             cursor.execute(sql.SQL("SET search_path = {}").format(schema))
