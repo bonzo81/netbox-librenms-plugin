@@ -200,7 +200,7 @@ def test_a_serial_rule_that_removes_identity_does_not_publish_the_original_seria
     import json
 
     from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
-    from netbox_librenms_plugin.serial_identity import SerialRules, display, is_identity
+    from netbox_librenms_plugin.serial_identity import SerialRules, display, is_identity, plain_context
     from netbox_librenms_plugin.models import NormalizationRule
 
     NormalizationRule.objects.filter(scope="serial").delete()
@@ -212,7 +212,8 @@ def test_a_serial_rule_that_removes_identity_does_not_publish_the_original_seria
 
     assert "CAPTURE-A" not in json.dumps(anonymized)
     stored = anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}"]["devices"][0]["serial"]
-    assert display(stored) and not is_identity(stored, context)
+    # Replay has none of the capture rules, so the pseudonym must have no identity without them.
+    assert display(stored) and not is_identity(stored, plain_context())
     assert recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["serial"] == "CAPTURE-A"
 
 
