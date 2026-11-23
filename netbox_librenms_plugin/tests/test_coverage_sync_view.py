@@ -1042,7 +1042,7 @@ def test_import_name_sync_uses_the_same_vc_name_as_the_dialog(
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("stored", "reported", "offered"),
-    [("ABC123", "S/N ABC123", True), ("S/N ABC123", "S/N ABC123", False), ("12", "12", False)],
+    [("ABC123", "S/N ABC123", True), ("S/N ABC123", "S/N ABC123", False), ("OLD123", "12", False)],
     ids=["other-stored-form", "exact-stored-form", "no-identity"],
 )
 def test_the_import_dialog_offers_a_serial_sync_for_another_stored_form(
