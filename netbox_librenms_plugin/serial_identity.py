@@ -1031,9 +1031,8 @@ def report_rows(rules: SerialRules | None = None):
     )
     for queryset, row_context in sources:
         for row in queryset.order_by("pk").iterator(chunk_size=500):
-            stored = display(row.serial)
-            if not stored:
-                continue
+            # The exact stored text: a writer stores neither padding nor a placeholder.
+            stored = _stored_text(row.serial)
             try:
                 context = row_context(row)
             except RuleConfigurationError as exc:
@@ -1043,6 +1042,6 @@ def report_rows(rules: SerialRules | None = None):
             if context.unavailable:
                 yield row, stored, "", context.unavailable
                 continue
-            key = context._extract(stored)
+            key = context._extract(_text(stored))
             if key != stored:
                 yield row, stored, key, "" if key else "no hardware identity under the current rules"

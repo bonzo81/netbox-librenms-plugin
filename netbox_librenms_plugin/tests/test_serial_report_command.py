@@ -56,6 +56,25 @@ class TestSerialReportCommand:
         assert sorted(line.split(" (", 1)[0] for line in lines[:-1]) == sorted(expected)
         assert lines[-1].startswith(f"{len(expected)} row(s)")
 
+    def test_the_report_lists_a_padded_or_placeholder_stored_text(self):
+        """A writer stores neither padding nor a placeholder, so the key of such a stored text differs from it."""
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_device_with_module_bays
+
+        _rules_only(r"^S/N\s+(.+)$")
+        padded = make_device("report-padded", serial="  PADDED-SN1  ")
+        placeholder = make_device("report-placeholder", serial="N/A")
+        make_device("report-exact", serial="EXACT-SN1")
+        holder = make_device_with_module_bays("report-padded-holder", ["Slot 1"])
+        module = install_module(holder, "Slot 1", "REPORT-PADDED-CARD", serial="MOD-SN1 ")
+
+        lines = _report()
+
+        rows = {line.split(" (", 1)[0]: line for line in lines[:-1]}
+        assert sorted(rows) == sorted([f"device {padded.pk}", f"device {placeholder.pk}", f"module {module.pk}"])
+        assert "stored '  PADDED-SN1  ' keys to 'PADDED-SN1'" in rows[f"device {padded.pk}"]
+        assert "stored 'N/A' no hardware identity" in rows[f"device {placeholder.pk}"]
+        assert lines[-1].startswith("3 row(s)")
+
     def test_a_broken_rule_reports_the_rows_of_its_chain_and_the_scan_goes_on(self):
         from dcim.models import DeviceType, Manufacturer
 
