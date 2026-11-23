@@ -327,7 +327,9 @@ class TestLookup:
         assert resolve_device(incoming).kind is ResolutionKind.NO_MATCH
 
     def test_a_backslash_in_a_serial_matches_literally(self):
-        device = make_device("lookup-backslash", serial="ABC\\DEF")
+        # A decorated stored value is found only by the LIKE candidate read, not by the exact match.
+        _rules_only((SEEDED, r"\1", None))
+        device = make_device("lookup-backslash", serial="S/N ABC\\DEF")
 
         assert resolve_device("ABC\\DEF").object == device
         assert resolve_device("ABCXDEF").kind is ResolutionKind.NO_MATCH
