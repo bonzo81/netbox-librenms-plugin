@@ -23,7 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.lock_conflict_helpers import first_row_lock, lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     seed_mapping,
     seed_stored_mapping,
@@ -3324,7 +3324,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         # The serial identity lock comes before the row lock.
         statements = [query["sql"] for query in queries.captured_queries]
         identity_lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
-        assert identity_lock < next(i for i, sql in enumerate(statements) if "FOR UPDATE" in sql)
+        assert identity_lock < first_row_lock(statements, Device, device.pk)
         assert response.content.strip()
         assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 

@@ -18,7 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.lock_conflict_helpers import first_row_lock, lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_from_change_record,
     seed_mapping,
@@ -1426,6 +1426,8 @@ class TestConvertLegacyLibreNMSIdView:
 
     def test_a_decorated_librenms_serial_confirms_the_stored_serial(self, logged_in_client, librenms_server):
         """The serial rules key both sides, so a stored "ABC" matches LibreNMS "S/N ABC"."""
+        from dcim.models import Device
+
         from netbox_librenms_plugin.models import NormalizationRule
 
         NormalizationRule.objects.get_or_create(
@@ -1442,7 +1444,7 @@ class TestConvertLegacyLibreNMSIdView:
         # The serial identity lock comes before the row lock.
         statements = [query["sql"] for query in queries.captured_queries]
         identity_lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
-        assert identity_lock < next(i for i, sql in enumerate(statements) if "FOR UPDATE" in sql)
+        assert identity_lock < first_row_lock(statements, Device, device.pk)
 
     @pytest.mark.parametrize("hidden_twin", [True, False])
     def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(

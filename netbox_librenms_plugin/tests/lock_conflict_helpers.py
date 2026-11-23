@@ -7,6 +7,7 @@ waits (and fails with ``55P03`` under ``lock_timeout``) or fails at once with ``
 only committed rows: a test that locks a row it created itself must be transactional.
 """
 
+import re
 import time
 from contextlib import contextmanager
 
@@ -23,6 +24,14 @@ def second_connection():
     finally:
         other.rollback()
         other.close()
+
+
+def first_row_lock(statements, model, pk):
+    """Return the index of the first captured SQL statement that locks the *model* row *pk*, at any lock strength."""
+    table = model._meta.db_table
+    target = re.compile(rf'FROM "{table}" .*"{table}"\."id" (?:= {pk}\b|IN \([^)]*\b{pk}\b)')
+    row_lock = re.compile(r"\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b")
+    return next(i for i, sql in enumerate(statements) if target.search(sql) and row_lock.search(sql))
 
 
 def lock_row(other, model, pk):
