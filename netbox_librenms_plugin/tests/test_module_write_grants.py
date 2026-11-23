@@ -473,6 +473,8 @@ def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_se
     response = post(ui, url, forms[0] if admitted else fields)
 
     assert response.status_code == 302
+    if not admitted:
+        assert "The module serial has no identity at the destination." in messages_of(response)
     holder.refresh_from_db()
     child.refresh_from_db()
     expected = (True, device.pk, target_bay.pk, device.pk) if admitted else (False, source.pk, source_bay_id, source.pk)
