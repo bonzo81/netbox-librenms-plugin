@@ -2168,25 +2168,32 @@ class TestModulesActionResponse:
         return device, module
 
     @pytest.mark.parametrize(
-        ("conflict", "expected_action"),
-        [(False, "update-module-serial"), (True, "move-module")],
-        ids=["update_serial_only", "move"],
+        ("conflict", "relocates", "expected_actions"),
+        [
+            (False, True, {"update-module-serial", "replace-module"}),
+            (True, True, {"move-module", "replace-module"}),
+            (True, False, {"replace-module"}),
+        ],
+        ids=["update_serial_only", "move", "move_unsupported"],
     )
     def test_the_mismatch_preview_answers_a_whole_modal_of_bound_forms(
-        self, client, settings, monkeypatch, conflict, expected_action
+        self, client, settings, conflict, relocates, expected_actions
     ):
         """The preview fills #htmx-modal-content, so it must carry the header the JS used to build."""
+        from unittest.mock import patch
 
         from netbox_librenms_plugin.tests._html_helpers import open_tags
 
-        # The preview offers Move only from NetBox 4.7; CI also runs older NetBox versions.
-        monkeypatch.setattr("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", lambda: True)
         self._configure_server(settings)
-        suffix = "move" if conflict else "serial"
-        device, module = self._seed_serial_mismatch(suffix, conflict=conflict, librenms_id=9210 + int(conflict))
+        suffix = ("move" if relocates else "no-move") if conflict else "serial"
+        librenms_id = {"serial": 9210, "move": 9211, "no-move": 9214}[suffix]
+        device, module = self._seed_serial_mismatch(suffix, conflict=conflict, librenms_id=librenms_id)
         client.force_login(make_superuser())
 
-        response = client.get(rendered_preview_url(render_module_tab(device, server_key=self.SERVER_KEY), 8201))
+        preview_url = rendered_preview_url(render_module_tab(device, server_key=self.SERVER_KEY), 8201)
+        # NetBox before 4.7 cannot move a module subtree, so the move POST refuses there.
+        with patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=relocates):
+            response = client.get(preview_url)
 
         assert response.status_code == 200
         body = response.content.decode()
@@ -2196,10 +2203,8 @@ class TestModulesActionResponse:
         assert "closeHtmxModal()" in body
         assert 'class="modal-body"' in body
         forms = open_tags(body, "form")
-        # Both branches render the replace form plus the one the conflict state selects.
-        assert len(forms) == 2
-        assert any(expected_action in form["action"] for form in forms)
-        assert any("replace-module" in form["action"] for form in forms)
+        # Each form action ends in its route, e.g. /move-module/.
+        assert {form["action"].rstrip("/").rsplit("/", 1)[-1] for form in forms} == expected_actions
         for form in forms:
             # The forms are swapped into the modal, so their own target must be the module tab.
             assert form["hx-target"] == "#module-sync-content"
