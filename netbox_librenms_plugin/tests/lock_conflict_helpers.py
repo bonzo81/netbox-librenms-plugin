@@ -31,14 +31,18 @@ def first_row_lock(statements, model, pk):
     table = re.escape(model._meta.db_table)
     keyword = r"(?:WHERE|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ORDER|LIMIT|FOR)\b"
     source = re.compile(rf'\bFROM (?:"{table}"|{table}\b)(?: (?:AS )?(?!{keyword})("?)(\w+)\1)?')
-    row_lock = re.compile(r"\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b")
+    row_lock = re.compile(r'\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b(?: OF ("?\w+"?(?:, "?\w+"?)*))?')
 
     def locks_the_row(sql):
         read = source.search(sql)
-        if read is None or row_lock.search(sql) is None:
+        name = read.group(2) if read else None
+        locked = name or model._meta.db_table
+        # A clause without OF locks every table; OF locks only the tables it names.
+        clauses = row_lock.findall(sql)
+        if read is None or not any(not of or locked in of.replace('"', "").split(", ") for of in clauses):
             return False
-        names = [re.escape(read.group(2))] if read.group(2) else [table]
-        qualifier = "|".join(rf'"{name}"|(?<![\w"]){name}' for name in names)
+        names = [re.escape(name)] if name else [table]
+        qualifier = "|".join(rf'"{known}"|(?<![\w"]){known}' for known in names)
         # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
         key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
         return re.search(key, sql.partition(" WHERE ")[2]) is not None
