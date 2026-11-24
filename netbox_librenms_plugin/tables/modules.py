@@ -1007,13 +1007,15 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="conflict_module_id" value="{}">'
-                    '<input type="hidden" name="target_bay_id" value="{}">{}</form>',
+                    '<input type="hidden" name="target_bay_id" value="{}">'
+                    '<input type="hidden" name="move_token" value="{}">{}</form>',
                     move_url,
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     conflict_module.pk,
                     record["module_bay_id"],
+                    record.get("move_token", ""),
                     module_action_control(
                         "button",
                         "move",

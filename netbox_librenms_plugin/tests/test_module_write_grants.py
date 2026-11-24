@@ -699,6 +699,72 @@ def test_move_refuses_a_source_module_whose_serial_changed_after_its_preview(ui,
     assert Module.objects.get(pk=holder.pk).serial == "OTHER456"
 
 
+def test_the_table_move_refuses_a_source_module_whose_serial_changed_after_render(ui, c8300):
+    """The table offered to move the module that held the serial into an empty bay; a changed source is not it."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_STALE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    remote = make_device_with_module_bays("table-source-holder", ["Slot 1"])
+    holder = install_in_bay(remote, "Slot 1", "TABLE-SOURCE-CARD", serial=_nim(entities)[1])
+    (form,) = _move_forms(render(ui, device))
+    Module.objects.filter(pk=holder.pk).update(serial="OTHER456")
+    before, places = written_state(device), _module_places(holder)
+
+    response = post(ui, form["action"], dict(form["fields"]))
+
+    assert MOVE_STALE in messages_of(response)
+    assert written_state(device) == before
+    assert _module_places(holder) == places
+
+
+def test_move_refuses_a_source_and_an_occupant_taken_from_two_offers(ui, c8300):
+    """Each dialog signs one Move; the source of one offer and the occupant of another are no offer at all."""
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_STALE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    service_model = entities[SERVICE_MODULE]["entPhysicalModelName"]
+    offers = {}
+    for index in (REAL_NIM, SERVICE_MODULE):
+        remote = make_device_with_module_bays(f"paired-offer-holder-{index}", ["Slot 1"])
+        holder = install_in_bay(
+            remote, "Slot 1", f"PAIRED-CARD-{index}", serial=entities[index]["entPhysicalSerialNum"]
+        )
+        occupant = install_module(device, _bay_name(entities, index), service_model, f"OLD-{index}")
+        offers[index] = holder, occupant
+    table = render(ui, device)
+    forms = {}
+    for index in offers:
+        preview = ui.get(rendered_preview_url(table, index), HTTP_HX_REQUEST="true")
+        (form,) = _move_forms(preview.content.decode())
+        forms[index] = form
+    # The occupant and bay of the second offer, with the source and every source-side field of the first.
+    crafted = dict(forms[SERVICE_MODULE]["fields"])
+    crafted["conflict_module_id"] = str(offers[REAL_NIM][0].pk)
+    for name, value in forms[REAL_NIM]["fields"].items():
+        if name.endswith("token") and name != "occupant_tree_token":
+            crafted[name] = value
+    modules = [module for pair in offers.values() for module in pair]
+    before, places = written_state(device), _module_places(*modules)
+
+    response = post(ui, forms[SERVICE_MODULE]["action"], crafted)
+
+    assert MOVE_STALE in messages_of(response)
+    assert written_state(device) == before
+    assert _module_places(*modules) == places
+
+
 @pytest.mark.parametrize("change", ["deleted", "moved"])
 def test_move_refuses_an_occupant_that_left_the_bay_after_its_preview(ui, c8300, change):
     """The dialog signed an occupant; a bay that is empty since is not the state the operator confirmed."""
@@ -1004,6 +1070,7 @@ def test_move_refuses_a_module_into_a_bay_of_its_own_subtree(ui, c8300, depth):
 
     from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
     from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.tests.view_test_helpers import move_offer_fields
     from netbox_librenms_plugin.views.sync.modules import MOVE_INTO_OWN_SUBTREE
 
     if not netbox_relocates_module_subtree():
@@ -1029,6 +1096,7 @@ def test_move_refuses_a_module_into_a_bay_of_its_own_subtree(ui, c8300, depth):
             "module_id": str(installed.pk),
             "conflict_module_id": str(holder.pk),
             "target_bay_id": str(installed.module_bay_id),
+            **move_offer_fields(installed, holder),
         },
     )
 

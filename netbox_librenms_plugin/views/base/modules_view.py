@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from collections import Counter, defaultdict
@@ -6,6 +7,7 @@ from dataclasses import dataclass, field
 from django.contrib import messages
 from django.core.cache import cache
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
 from django.views import View
 
 from netbox_librenms_plugin.constants import (
@@ -319,6 +321,20 @@ def _admitting_rules(item: dict, rules: list) -> list:
 
     """
     return [rule for rule in rules if rule.matches_inventory_item(item)]
+
+
+def keyed_token(value):
+    """Return a positive int that a grant or form signs for *value*, so it carries no pk the viewer may not see."""
+    payload = json.dumps(value, separators=(",", ":"))
+    # Keyed by SECRET_KEY: the client can read the grant, so a plain hash would let it test a guess about pks.
+    digest = salted_hmac("netbox_librenms_plugin.module_grant_token", payload, algorithm="sha256").digest()
+    return int.from_bytes(digest[:7], "big") + 1
+
+
+def move_offer_token(source, target_bay_id, occupant_tree) -> int:
+    """Return the token of one Move offer: the *source* module's row, place and serial, the bay and the occupant tree."""
+    place = [source.pk, source.device_id, source.module_bay_id, source.serial]
+    return keyed_token(["move-offer", *place, target_bay_id, [pk for pk, _serial in occupant_tree]])
 
 
 def viewable_modules(view):
@@ -4734,6 +4750,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 and not subtree_owns_bay(trees[holder.pk], owner)
             ):
                 row["can_move_from"] = True
+                # The table Move fills an empty bay, so its offer deletes no occupant tree.
+                row["move_token"] = move_offer_token(holder, row.get("module_bay_id"), ())
 
     def _detect_serial_conflicts(self, table_data, index_map=None, *, serial_rules=None):
         """

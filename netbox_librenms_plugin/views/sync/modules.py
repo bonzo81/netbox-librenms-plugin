@@ -14,7 +14,6 @@ from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
-from django.utils.crypto import salted_hmac
 from django.utils.html import escape
 from django.views import View
 from utilities.exceptions import AbortRequest
@@ -116,6 +115,8 @@ from netbox_librenms_plugin.views.base.modules_view import (
     select_module_interface,
     subtree_owns_bay,
     tree_holds,
+    keyed_token,
+    move_offer_token,
     viewable_modules,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -2775,19 +2776,11 @@ def _resolve_replacement_holder(incoming, serial_context, *, rules, exclude_pk):
     return resolve_module(incoming, rules=rules, exclude_pks=[exclude_pk])
 
 
-def _hash_token(value):
-    """Return a positive int that a grant signs for *value*, so the grant does not carry pks the viewer may not see."""
-    payload = json.dumps(value, separators=(",", ":"))
-    # Keyed by SECRET_KEY: the client can read the grant, so a plain hash would let it test a guess about pks.
-    digest = salted_hmac("netbox_librenms_plugin.module_grant_token", payload, algorithm="sha256").digest()
-    return int.from_bytes(digest[:7], "big") + 1
-
-
 def _serial_holder_token(elsewhere):
     """Return a positive int for the other module that holds the incoming serial: none, several, or its row and place."""
     held = elsewhere.object
     place = [held.pk, held.device_id, held.module_bay_id] if held is not None else []
-    return _hash_token([elsewhere.kind.value, *place])
+    return keyed_token([elsewhere.kind.value, *place])
 
 
 def _removal_note(view, trees):
@@ -2798,20 +2791,10 @@ def _removal_note(view, trees):
     return {"count": len(pks), "names": names, "hidden": len(pks) - len(names)}
 
 
-def move_source_token(module):
-    """Return the positive int that a Move offer signs for the module it moves: its row, place and stored serial."""
-    return _hash_token(["move-source", module.pk, module.device_id, module.module_bay_id, module.serial])
-
-
-def move_occupant_token(tree):
-    """Return the positive int that a Move offer signs for the ``(pk, serial)`` tree of the occupant it deletes."""
-    return _hash_token(["move-occupant", [pk for pk, _serial in tree]])
-
-
 def _removal_trees_token(module, elsewhere):
     """Return a positive int for the module pks that a replace deletes: the subtree of *module* and of the holder."""
     roots = [module.pk] if elsewhere.object is None else [module.pk, elsewhere.object.pk]
-    return _hash_token([[pk for pk, _serial in module_subtree_serials(root)] for root in roots])
+    return keyed_token([[pk for pk, _serial in module_subtree_serials(root)] for root in roots])
 
 
 def _replace_target(module, replacement_type, serial_context, elsewhere):
@@ -3003,8 +2986,9 @@ class ModuleMismatchPreviewView(
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
-                "move_occupant_token": move_occupant_token(installed_tree),
-                "move_source_token": move_source_token(serial_conflict) if serial_conflict is not None else "",
+                "move_token": move_offer_token(serial_conflict, installed_module.module_bay_id, installed_tree)
+                if serial_conflict is not None
+                else "",
                 "move_removal": move_removal,
                 "replace_removal": replace_removal,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
@@ -3460,6 +3444,11 @@ class MoveModuleView(
                 module.serial, serial_rules.for_module_target(target_device)
             ):
                 raise _ModuleActionRefused("The module serial has no identity at the destination.")
+            # The offer signed the module it moves, the bay it fills and the occupant tree it deletes.
+            # A form that names an occupant must carry it; a scripted Move into an empty bay may leave it out.
+            token = request.POST.get("move_token")
+            if (module_id or token is not None) and token != str(move_offer_token(module, target_bay.pk, removing)):
+                raise _ModuleActionRefused(MOVE_STALE)
             moved_tree = module_subtree_serials(module.pk)
             if subtree_owns_bay(moved_tree, target_bay.module_id):
                 raise _ModuleActionRefused(MOVE_INTO_OWN_SUBTREE)
@@ -3469,9 +3458,6 @@ class MoveModuleView(
             # Scoped by "delete": the device and bay filters prove where the row sits, not that
             # the grant covers it, and the gate asked has_perm without an instance.
             if module_id and module_id != module.pk:
-                # The offer that names an occupant signed the module it moves; a changed source is not that module.
-                if request.POST.get("source_token") != str(move_source_token(module)):
-                    raise _ModuleActionRefused(MOVE_STALE)
                 occupant = (
                     self.restricted_queryset(Module, "delete")
                     .select_for_update(of=("self",))
@@ -3486,9 +3472,6 @@ class MoveModuleView(
                     raise _ModuleActionRefused(MOVE_OCCUPANT_HOLDS_MODULE)
                 if not all_trees_in_scope(self.restricted_queryset(Module, "delete"), [removing]):
                     raise _ModuleActionRefused(MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE)
-                # The offer signed the occupant tree that the operator saw; the delete removes only that tree.
-                if request.POST.get("occupant_tree_token") != str(move_occupant_token(removing)):
-                    raise _ModuleActionRefused(MOVE_STALE)
                 occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                 occupant.delete()
             _refuse_identity_move(module, target_device, moving, serial_rules, scope)
