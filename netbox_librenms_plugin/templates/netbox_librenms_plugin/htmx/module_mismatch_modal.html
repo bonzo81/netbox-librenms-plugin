@@ -87,8 +87,8 @@
             {% endif %}
             {% if can_move_from %}
             <em>Move</em> will update its location to this bay instead of creating a new entry.
-            <span data-move-removes="{{ move_removal_count }}">
-                It first deletes {{ move_removal_count }} module{{ move_removal_count|pluralize }} from this bay{% if move_removal_names %}: {{ move_removal_names|join:", " }}{% endif %}{% if move_removal_hidden %} and {{ move_removal_hidden }} that you cannot view{% endif %}.
+            <span data-move-removes="{{ move_removal.count }}">
+                It first deletes {{ move_removal.count }} module{{ move_removal.count|pluralize }}{% if move_removal.names %}: {{ move_removal.names|join:", " }}{% endif %}{% if move_removal.hidden %} and {{ move_removal.hidden }} that you cannot view{% endif %} from this bay.
             </span>
             {% endif %}
         </small>
@@ -171,6 +171,9 @@
 
     {# Replace: delete current + install fresh from LibreNMS data #}
     {% if installed_module and replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_hidden and not serial_conflict_owns_bay and not serial_fit_refusal %}
+    <span class="small text-muted w-100 text-end order-first" data-replace-removes="{{ replace_removal.count }}">
+        <em>Replace</em> deletes {{ replace_removal.count }} module{{ replace_removal.count|pluralize }}{% if replace_removal.names %}: {{ replace_removal.names|join:", " }}{% endif %}{% if replace_removal.hidden %} and {{ replace_removal.hidden }} that you cannot view{% endif %}.
+    </span>
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
           hx-post="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"

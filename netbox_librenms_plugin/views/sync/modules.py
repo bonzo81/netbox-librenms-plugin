@@ -2780,6 +2780,13 @@ def _serial_holder_token(elsewhere):
     return _hash_token([elsewhere.kind.value, *place])
 
 
+def _removal_note(view, trees):
+    """Return what the dialog states about the modules of *trees* that a write deletes; it names only viewable ones."""
+    pks = [pk for tree in trees for pk, _serial in tree]
+    names = list(viewable_modules(view).filter(pk__in=pks).order_by("pk").values_list("module_type__model", flat=True))
+    return {"count": len(pks), "names": names, "hidden": len(pks) - len(names)}
+
+
 def move_occupant_token(tree):
     """Return the positive int that a Move offer signs for the ``(pk, serial)`` tree of the occupant it deletes."""
     return _hash_token(["move-occupant", [pk for pk, _serial in tree]])
@@ -2927,13 +2934,9 @@ class ModuleMismatchPreviewView(
         installed_tree = module_subtree_serials(installed_module.pk)
         holder_trees = [] if serial_conflict is None else [module_subtree_serials(serial_conflict.pk)]
         replace_in_delete_scope = all_trees_in_scope(deletable, [installed_tree, *holder_trees])
-        # Move deletes the installed tree first; the dialog names only the modules the user may view.
-        move_removal_names = list(
-            viewable_modules(self)
-            .filter(pk__in=[pk for pk, _serial in installed_tree])
-            .order_by("pk")
-            .values_list("module_type__model", flat=True)
-        )
+        # Move deletes the installed tree first; Replace deletes it and the holder's tree.
+        move_removal = _removal_note(self, [installed_tree])
+        replace_removal = _removal_note(self, [installed_tree, *holder_trees])
         return render(
             request,
             "netbox_librenms_plugin/htmx/module_mismatch_modal.html",
@@ -2964,9 +2967,8 @@ class ModuleMismatchPreviewView(
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
                 "move_occupant_token": move_occupant_token(installed_tree),
-                "move_removal_count": len(installed_tree),
-                "move_removal_names": move_removal_names,
-                "move_removal_hidden": len(installed_tree) - len(move_removal_names),
+                "move_removal": move_removal,
+                "replace_removal": replace_removal,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,

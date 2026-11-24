@@ -622,6 +622,21 @@ def _module_places(*modules):
     )
 
 
+@pytest.mark.parametrize("viewer", ["all", "roots-only"])
+def test_the_replace_offer_states_how_many_modules_it_deletes(client, c8300, viewer):
+    """Replace deletes the installed tree and the holder's tree; the dialog counts both, naming only visible ones."""
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "holder")
+    view_scope = None if viewer == "all" else {"pk__in": [installed.pk, holder.pk]}
+    client.force_login(_module_writer(f"replace-removes-{viewer}", view_scope=view_scope))
+
+    html = _preview_html(client, device)
+
+    assert len(_replace_forms(html)) == 1
+    assert re.findall(r'data-replace-removes="(\d+)"', html) == ["3"]
+    assert (child.module_type.model in html) is (viewer == "all")
+
+
 @pytest.mark.parametrize("viewer", ["all", "occupant-only"])
 def test_the_move_offer_states_how_many_modules_it_deletes(client, c8300, viewer):
     """Move deletes the occupant and its children; the dialog counts them and names only the visible ones."""
