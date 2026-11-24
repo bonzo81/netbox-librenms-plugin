@@ -790,7 +790,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                 errors.append(f"{member.name}: {serial_conflict_text(stored, serial, self.request.user)}")
             elif (posted := written_device_conflict(member, rules=serial_rules)) is not None:
                 # A holder that committed between the two reads is a stored holder, not a member of the post.
-                if all(row.pk in others for row in posted.matches):
+                # An Unavailable read has no matches, so it keeps its own reason.
+                if posted.matches and all(row.pk in others for row in posted.matches):
                     errors.append(f"{member.name}: {_posted_serial_conflict_text(posted, serial)}")
                 else:
                     errors.append(f"{member.name}: {serial_conflict_text(posted, serial, self.request.user)}")

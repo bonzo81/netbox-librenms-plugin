@@ -1056,6 +1056,50 @@ class TestAssignVCSerialView:
         assert f"{second.name}: {stored_refusal}" in errors, errors
         assert not any("member 'vc-serial-late-outsider'" in text for text in errors), errors
 
+    def test_a_late_holder_on_a_chassis_with_an_outside_master_gives_the_unavailable_reason(
+        self, logged_in_client, librenms_server, monkeypatch
+    ):
+        """The posted read finds no match it can compare, so the refusal names the reason and no member."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+        from netbox_librenms_plugin.views.sync import device_fields
+
+        first = make_device("vc-serial-stray-first", serial="STRAY-OLD-1")
+        second = make_device("vc-serial-stray-second", serial="STRAY-OLD-2")
+        make_virtual_chassis("vc-serial-stray", first, second)
+        real = device_fields.written_device_conflict
+        late = []
+
+        def conflict_with_a_late_holder(member, *, rules, exclude_pks=()):
+            if not exclude_pks and not late:
+                late.append(make_device("vc-serial-stray-holder", serial="STRAY-NEW"))
+                chassis = make_virtual_chassis("vc-serial-stray-other", late[0])
+                VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("vc-serial-stray-master"))
+            return real(member, rules=rules, exclude_pks=exclude_pks)
+
+        monkeypatch.setattr(device_fields, "written_device_conflict", conflict_with_a_late_holder)
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "STRAY-NEW",
+                "member_id_1": str(first.pk),
+                "librenms_serial_2": "STRAY-NEW",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("STRAY-OLD-1", "STRAY-OLD-2")
+        assert late, "precondition: the late holder was written"
+        errors = _messages(response, "error")
+        # The posted read of the first member is the one that the late holder makes Unavailable.
+        assert f"{first.name}: Serial 'STRAY-NEW' cannot be matched. {UNAVAILABLE_MASTER_LINK}" in errors, errors
+        assert not any("selected for this member" in text for text in errors), errors
+
     def test_one_member_selected_for_two_serials_changes_nothing(self, logged_in_client, librenms_server):
         first = make_device("vc-serial-twice-first", serial="TWICE-OLD")
         second = make_device("vc-serial-twice-second")
