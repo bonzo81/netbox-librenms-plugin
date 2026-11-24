@@ -56,28 +56,36 @@ class TestSeedInventoryMatchesTheReaderContract:
         finally:
             cache.delete(key)
 
-    def test_the_stamp_reads_the_current_master_not_a_cached_chassis(self):
-        """A master set with QuerySet.update() leaves the loaded chassis stale; the stamp must follow the database."""
+    @staticmethod
+    def _new_master_with_a_stale_chassis(prefix):
+        """Return a new master whose loaded chassis still names the old master, and the new master's rule maker."""
         from dcim.models import Manufacturer, VirtualChassis
-        from django.core.cache import cache
 
-        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_virtual_chassis
-        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        plain_maker = Manufacturer.objects.create(name="Seed stamp plain maker", slug="seed-stamp-plain-maker")
-        rule_maker = Manufacturer.objects.create(name="Seed stamp rule maker", slug="seed-stamp-rule-maker")
+        plain_maker = Manufacturer.objects.create(name=f"{prefix} plain maker", slug=f"{prefix}-plain-maker")
+        rule_maker = Manufacturer.objects.create(name=f"{prefix} rule maker", slug=f"{prefix}-rule-maker")
         NormalizationRule.objects.create(
             scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=rule_maker
         )
-        old_master = make_device_with_module_bays("seed-stamp-old-master", [], manufacturer=plain_maker)
-        device = make_device_with_module_bays("seed-stamp-new-master", [], manufacturer=rule_maker)
-        chassis = make_virtual_chassis("seed-stamp-chassis", old_master, device)
+        old_master = make_device_with_module_bays(f"{prefix}-old-master", [], manufacturer=plain_maker)
+        device = make_device_with_module_bays(f"{prefix}-new-master", [], manufacturer=rule_maker)
+        chassis = make_virtual_chassis(f"{prefix}-chassis", old_master, device)
         VirtualChassis.objects.filter(pk=chassis.pk).update(master=old_master)
         device.virtual_chassis = VirtualChassis.objects.get(pk=chassis.pk)
         VirtualChassis.objects.filter(pk=chassis.pk).update(master=device)
+        return device, rule_maker
+
+    def test_the_stamp_reads_the_current_master_not_a_cached_chassis(self):
+        """A master set with QuerySet.update() leaves the loaded chassis stale; the stamp must follow the database."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        device, rule_maker = self._new_master_with_a_stale_chassis("seed-stamp")
         request = make_request("post", {"server_key": "default"})
         view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
 
@@ -88,6 +96,20 @@ class TestSeedInventoryMatchesTheReaderContract:
             assert cache.get(key)["serial_context"] == stamp.fingerprint
         finally:
             cache.delete(key)
+
+    def test_the_trusted_payload_stamp_reads_the_current_master_not_a_cached_chassis(self):
+        """The trusted payload helper must stamp the rules of the master that the database holds."""
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context
+        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
+        device, rule_maker = self._new_master_with_a_stale_chassis("trusted-stamp")
+
+        payload = trusted_module_inventory_payload(device, [], librenms_id=8)
+
+        stamp = module_snapshot_serial_context(load_inventory_policy(device.pk), device)
+        assert stamp.manufacturer_id == rule_maker.pk
+        assert payload["serial_context"] == stamp.fingerprint
 
     def test_the_trusted_payload_helper_leaves_cf_recomputable(self):
         """Assigning custom_field_data to cf would alias raw JSON into the cached property."""
