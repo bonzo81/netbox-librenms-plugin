@@ -35,6 +35,7 @@ from ..serial_identity import (
     other_device_holder,
     resolve_device,
     resolve_device_write,
+    resolve_devices_write,
     stored_form,
     stored_form_refusal,
 )
@@ -68,6 +69,7 @@ from .virtual_chassis import (
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
+    members_to_create,
     update_vc_member_suggested_names,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -672,14 +674,27 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     if not vc.get("is_stack"):
         return []
     device_type = effective_import_device_type(result["device_type"].get("device_type"))
-    master = identify_vc_master(vc["members"], incoming_serial, serial_rules.for_device_type(device_type))
+    context = serial_rules.for_device_type(device_type)
+    master = identify_vc_master(vc["members"], incoming_serial, context)
     # A stack without an identified master imports as one device and creates no member.
     if master is None:
         return []
+    members = [(member, member.get("position"), display(member.get("serial"))) for member in vc["members"]]
+    members = [entry for entry in members if entry[0] is not master]
+    taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
+    # An Unavailable member refuses the import itself; the check names only members the import creates.
+    members = [entry for entry in members if taken[entry[2]].kind is not ResolutionKind.UNAVAILABLE]
+    created = {
+        id(member)
+        for member, *_rest in members_to_create(
+            members, taken, context, lambda member, _position, _serial: member.get("suggested_name")
+        )
+    }
+    # The text comes from the LibreNMS members only: the lookup is unrestricted, so it selects and names nothing.
     return [
-        f"Stack member {member.get('position')}: {refusal}"
-        for member in vc["members"]
-        if member is not master and (refusal := stored_form_refusal(member.get("serial"), Device))
+        f"Stack member {position}: {refusal}"
+        for member, position, serial in members
+        if id(member) in created and (refusal := stored_form_refusal(serial, Device))
     ]
 
 

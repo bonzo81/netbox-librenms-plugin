@@ -945,16 +945,13 @@ def _create_member_devices(
     taken = resolve_devices_write(
         [serial for _member, _position, serial in members], context, rules=serial_rules, exclude_pks=[master_device.pk]
     )
-    created_members = SerialGroups(context)
     created = 0
-    for member, position, serial in members:
-        if _member_serial_taken(serial, taken[serial], created_members):
-            continue
-        member_name = _member_name(base_name, position, serial, vc_pattern, context)
-        if Device.objects.filter(name=member_name).exists():
-            logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
-            continue
-        device = Device.objects.create(
+
+    def named(_member, position, serial):
+        return _member_name(base_name, position, serial, vc_pattern, context)
+
+    for member, position, serial, member_name in members_to_create(members, taken, context, named):
+        Device.objects.create(
             name=member_name,
             device_type=master_device.device_type,
             role=master_device.role,
@@ -967,9 +964,31 @@ def _create_member_devices(
             vc_position=position,
             comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
         )
-        created_members.add(serial, device)
         created += 1
     return created
+
+
+def members_to_create(members, taken, context, name_of):
+    """
+    Yield ``(member, position, serial, name)`` for each stack member that the import creates, in order.
+
+    Args:
+        members: The ``(member, position, serial text)`` triples of the non-master members.
+        taken: The ``resolve_devices_write`` result of their serials.
+        context: The serial context of the chassis master.
+        name_of: Return the name of a member from its ``(member, position, serial)``.
+
+    """
+    created_members = SerialGroups(context)
+    for member, position, serial in members:
+        if _member_serial_taken(serial, taken[serial], created_members):
+            continue
+        member_name = name_of(member, position, serial)
+        if Device.objects.filter(name=member_name).exists():
+            logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
+            continue
+        created_members.add(serial, member)
+        yield member, position, serial, member_name
 
 
 def _member_serial_taken(serial, resolution, created_members) -> bool:

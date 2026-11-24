@@ -1108,3 +1108,41 @@ def test_the_bulk_confirmation_blocks_a_stack_whose_member_serial_does_not_fit(c
     assert entry["validation"]["virtual_chassis"]["master_identified"]
     reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
     assert (reason in entry["validation"]["issues"]) is (not fits)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("held", [True, False])
+def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_creates(client, live_librenms, held):
+    """A member serial that keys to an existing Device is skipped at import, so its length blocks nothing."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack, _seeded_serial_rule
+
+    _seeded_serial_rule()
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    if held:
+        make_device("confirm-stack-holder", serial="N" * 47)
+    device_id = 295 if held else 296
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-held-{held}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], f"S/N {'N' * 47}"))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-held-user-{held}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    assert entry["validation"]["virtual_chassis"]["master_identified"]
+    reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (reason in entry["validation"]["issues"]) is (not held)
