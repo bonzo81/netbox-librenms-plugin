@@ -4021,9 +4021,15 @@ def _responses_under_module_owner_locks(source):
         if not atomic:
             continue
         calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
-        if not any(ast.unparse(call.func) == "lock_module_write" for call in calls):
+        locks = [(call.lineno, call.col_offset) for call in calls if ast.unparse(call.func) == "lock_module_write"]
+        if not locks:
             continue
-        violations.update(call.lineno for call in calls if ast.unparse(call.func) == "_modules_action_response")
+        # Source order only: a response before the first lock is safe; a loop that locks first is not seen.
+        violations.update(
+            call.lineno
+            for call in calls
+            if ast.unparse(call.func) == "_modules_action_response" and (call.lineno, call.col_offset) > min(locks)
+        )
     return violations
 
 
@@ -4056,6 +4062,21 @@ def test_the_owner_lock_scan_reads_only_transaction_blocks(outer, inner, found):
     )
 
     assert _responses_under_module_owner_locks(source) == found
+
+
+def test_the_owner_lock_scan_allows_an_early_refusal_before_the_lock():
+    """The control: a response that returns before the transaction takes the owner lock holds no lock."""
+    source = (
+        "def _install(self, request, page_device):\n"
+        "    with transaction.atomic():\n"
+        "        if not page_device:\n"
+        "            return _modules_action_response(request, page_device)\n"
+        "        scope = lock_module_write(observe_module_write(device_ids=[page_device.pk]))\n"
+        "        if not scope:\n"
+        "            return _modules_action_response(request, page_device)\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == {7}
 
 
 @pytest.mark.parametrize("decorator", ["atomic_with_events()", "transaction.atomic"])
