@@ -221,7 +221,7 @@ def _post_serial_update(device_pk, user_pk, barrier):
                 reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device_pk}),
                 {"server_key": SERVER_KEY},
             )
-        return response.status_code
+        return response.status_code, messages_on(response.wsgi_request)
     finally:
         connection.close()
 
@@ -243,16 +243,23 @@ def test_two_sessions_that_assign_rule_equivalent_serials_store_one_of_them(libr
     user = make_superuser("race-serial-user")
     barrier = Barrier(2, timeout=10)
 
-    statuses = run_in_threads(
+    results = run_in_threads(
         partial(_post_serial_update, first.pk, user.pk, barrier),
         partial(_post_serial_update, second.pk, user.pk, barrier),
         barriers=(barrier,),
         timeout=60,
     )
 
-    assert statuses == [302, 302]
+    assert [status for status, _messages in results] == [302, 302]
     stored = sorted(Device.objects.filter(pk__in=[first.pk, second.pk]).values_list("serial", flat=True))
     assert stored in (["", "S/N RACE-SERIAL"], ["", "RACE-SERIAL"]), stored
+    devices = [Device.objects.get(pk=first.pk), Device.objects.get(pk=second.pk)]
+    (loser,) = [index for index, device in enumerate(devices) if device.serial == ""]
+    winner = devices[1 - loser]
+    # The losing writer found the serial that the winner committed.
+    reported = ("S/N RACE-SERIAL", "RACE-SERIAL")[loser]
+    conflict = f"Serial conflict: '{reported}' is already assigned to device '{winner.name}' (ID: {winner.pk})"
+    assert results[loser][1] == [("error", conflict)], results
 
 
 @pytest.mark.django_db
