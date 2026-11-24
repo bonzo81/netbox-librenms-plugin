@@ -86,6 +86,7 @@ from netbox_librenms_plugin.serial_identity import (
     retype_scope,
     stored_form_differs,
     stored_form_refusal,
+    written_device_conflict,
 )
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
@@ -657,6 +658,9 @@ def _apply_conflict_checked_serial(
     if assignment.absent and require_serial:
         return _htmx_error_response("No valid serial from LibreNMS"), False
     conflict = assignment.conflict
+    if conflict is None and assignment.value is None and not assignment.absent:
+        # An unchanged serial writes nothing, but another holder of it still refuses the action.
+        conflict = written_device_conflict(device, rules=serial_rules)
     if conflict is None:
         if assignment.value is not None:
             device.serial = assignment.value

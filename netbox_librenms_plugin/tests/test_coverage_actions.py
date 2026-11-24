@@ -4035,6 +4035,29 @@ class TestDeviceConflictActionBranches:
         assert reloaded.serial == "BRANCHES-UPDATE-CONFLICT-OLD"
         assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("shared", [True, False], ids=["other-holder", "sole-holder"])
+    @pytest.mark.parametrize("action", ["update", "update_serial"])
+    def test_an_unchanged_serial_links_a_hostname_match_only_when_no_other_device_holds_it(self, action, shared):
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device(f"branches-same-serial-{action}-{shared}".replace("_", "-"), serial="SAME-SERIAL-1")
+        if shared:
+            make_device(f"{target.name}-other", serial="SAME-SERIAL-1")
+        self._register_device(42, target.name, serial="SAME-SERIAL-1")
+        request = self._request(action, target, f"{target.name}-user")
+
+        response = post_view(view, request, device_id=42)
+
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.serial == "SAME-SERIAL-1"
+        if shared:
+            self._assert_htmx_error(response, "Serial conflict: 'SAME-SERIAL-1' is already assigned to device")
+            assert stored_mapping_for_test(reloaded) is None
+        else:
+            self._assert_success(response)
+            assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
 
@@ -4219,7 +4242,11 @@ class TestDeviceConflictActionBranches:
         response = post_view(view, request, device_id=42)
 
         assert response.headers.get("HX-Reswap") == "none"
-        assert holder.name.encode() not in response.content
+        if action in {"update", "update_serial"}:
+            # The serial check runs first under the new type and names the holder that this user can see.
+            self._assert_htmx_error(response, f"Serial conflict: 'XABC' is already assigned to device '{holder.name}'")
+        else:
+            assert holder.name.encode() not in response.content
         assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
 
     @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
