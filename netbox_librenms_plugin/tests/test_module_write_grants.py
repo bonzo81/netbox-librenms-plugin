@@ -496,6 +496,38 @@ def test_replace_refuses_a_serial_holder_that_owns_the_bay_since_its_preview(ui,
     assert Module.objects.filter(pk=holder.pk).exists()
 
 
+@pytest.mark.parametrize("parent", ["holder", "installed"])
+def test_replace_refuses_a_module_added_below_a_removal_tree_after_its_preview(ui, c8300, parent):
+    """The preview showed the removal trees; a child added since would be deleted without confirmation."""
+    from dcim.models import Module, ModuleBay
+
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device, entities = c8300
+    remote = make_device_with_module_bays("replace-tree-holder", ["Slot 1"])
+    holder = install_in_bay(remote, "Slot 1", "TREE-CARD", serial=_nim(entities)[1], child_bays=["Child"])
+    form = _replace_form(ui, device, entities)
+    assert form[1]["conflict_module_id"] == str(holder.pk)
+    if parent == "holder":
+        child = install_in_bay(remote, "Child", "TREE-CHILD", serial="TREE-CHILD-1", parent_module=holder)
+    else:
+        installed = Module.objects.get(pk=form[1]["module_id"])
+        ModuleBay.objects.create(device=device, module=installed, name="Added child")
+        child = install_in_bay(device, "Added child", "TREE-CHILD", serial="TREE-CHILD-1", parent_module=installed)
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.STALE.message in messages_of(response)
+    assert written_state(device) == before
+    assert set(Module.objects.filter(pk__in=[holder.pk, child.pk]).values_list("pk", flat=True)) == {
+        holder.pk,
+        child.pk,
+    }
+
+
 @pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])
 def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_server, reported_serial, admitted):
     from dcim.models import ModuleBay

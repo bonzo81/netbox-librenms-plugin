@@ -2753,20 +2753,31 @@ def _tree_holds(tree, module_pk):
     return any(pk == module_pk for pk, _serial in tree)
 
 
+def _hash_token(value):
+    """Return a positive int that a grant signs for *value*, so the grant does not carry pks the viewer may not see."""
+    payload = json.dumps(value, separators=(",", ":"))
+    return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:7], "big") + 1
+
+
 def _serial_holder_token(elsewhere):
     """Return a positive int for the other module that holds the incoming serial: none, several, or its row and place."""
     held = elsewhere.object
     place = [held.pk, held.device_id, held.module_bay_id] if held is not None else []
-    # A hash, so the grant does not carry the pk of a module that the viewer may not see.
-    payload = json.dumps([elsewhere.kind.value, *place], separators=(",", ":"))
-    return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:7], "big") + 1
+    return _hash_token([elsewhere.kind.value, *place])
+
+
+def _removal_trees_token(module, elsewhere):
+    """Return a positive int for the module pks that a replace deletes: the subtree of *module* and of the holder."""
+    roots = [module.pk] if elsewhere.object is None else [module.pk, elsewhere.object.pk]
+    return _hash_token([[pk for pk, _serial in module_subtree_serials(root)] for root in roots])
 
 
 def _replace_target(module, replacement_type, serial_context, elsewhere):
     """
     Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved.
 
-    It also signs the other holder of the incoming serial that the preview showed, so the replace deletes no other module.
+    It also signs the holder of the incoming serial and the modules below both.
+    The replace then deletes only the modules that the preview showed.
     """
     target = {
         **installed_module_target(module.pk, module.module_bay_id),
@@ -2774,6 +2785,8 @@ def _replace_target(module, replacement_type, serial_context, elsewhere):
         # A rule edit or a serial edit after the preview refuses the grant.
         "module_serial_token": freshness_token(module.serial, serial_context),
         "serial_holder_token": _serial_holder_token(elsewhere),
+        # A module added below a removal tree after the preview refuses the grant.
+        "removal_trees_token": _removal_trees_token(module, elsewhere),
     }
     if replacement_type is not None:
         target["replacement_module_type_id"] = replacement_type.pk
