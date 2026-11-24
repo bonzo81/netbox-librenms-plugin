@@ -503,7 +503,6 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.mixins import CacheMixin
-        from netbox_librenms_plugin.sync_cache import cached_module_inventory
         from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         device = make_device("fresh-snapshot-writer", librenms_cf={SERVER_KEY: 42})
@@ -513,12 +512,11 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
         key = sync_snapshot_key(device, "inventory", SERVER_KEY)
         real_get = self._stored_after_the_read(monkeypatch, key, {"version": -1}, fresh)
         try:
-            inventory = cached_module_inventory(
-                _get_cached_module_snapshot(device, SERVER_KEY, CacheMixin().get_cache_key)
-            )
+            # The action tests the raw snapshot for None, so an empty dict must not stand in for a miss.
+            snapshot = _get_cached_module_snapshot(device, SERVER_KEY, CacheMixin().get_cache_key)
             stored = real_get(key)
         finally:
             cache.delete(key)
 
-        assert inventory is None
+        assert snapshot is None
         assert stored == fresh
