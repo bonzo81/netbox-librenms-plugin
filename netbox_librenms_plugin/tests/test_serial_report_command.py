@@ -69,8 +69,9 @@ class TestSerialReportCommand:
 
         lines = _report()
 
+        expected = [f"device {padded.pk}", f"device {placeholder.pk}", f"module {module.pk}"]
+        assert sorted(line.split(" (", 1)[0] for line in lines[:-1]) == sorted(expected)
         rows = {line.split(" (", 1)[0]: line for line in lines[:-1]}
-        assert sorted(rows) == sorted([f"device {padded.pk}", f"device {placeholder.pk}", f"module {module.pk}"])
         assert "stored '  PADDED-SN1  ' keys to 'PADDED-SN1'" in rows[f"device {padded.pk}"]
         assert "stored 'N/A' no hardware identity" in rows[f"device {placeholder.pk}"]
         assert lines[-1].startswith("3 row(s)")
