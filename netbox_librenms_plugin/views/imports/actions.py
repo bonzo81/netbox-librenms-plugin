@@ -2400,8 +2400,9 @@ class DeviceConflictActionView(
                         fields.append("device_type")
                     if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
                         return err
-                    if existing_model is Device:
-                        incoming_serial = libre_device.get("serial")
+                    incoming_serial = libre_device.get("serial")
+                    # Without an incoming serial the link compares nothing, so it reads no serial rule.
+                    if existing_model is Device and display(incoming_serial):
                         context = locked_context(existing_device, rules=serial_rules)
                         same_serial = compare(existing_device.serial, incoming_serial, context) is Comparison.SAME
                         # The serial match selected the target, so a forced type must keep it.

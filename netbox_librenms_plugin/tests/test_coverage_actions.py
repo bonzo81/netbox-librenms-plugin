@@ -4121,6 +4121,38 @@ class TestDeviceConflictActionBranches:
             self._assert_success(response)
             assert stored_mapping_for_test(target) == {self.server_key: 42}
 
+    def test_a_hostname_link_without_an_incoming_serial_reads_no_serial_rule(self, client):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        target = make_device("branches-blank-serial-link", serial="STORED-SN-1")
+        rule = NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^(.+)$", replacement=r"\1", manufacturer=target.device_type.manufacturer
+        )
+        # A QuerySet.update() skips clean(), as an upgrade from an older release can leave the rule.
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+        self._register_device(42, target.name, serial="")
+        client.force_login(make_superuser(f"{target.name}-user"))
+        server = {"server_key": self.server_key}
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
+            server,
+            HTTP_HX_REQUEST="true",
+        )
+        assert details.context["validation"]["existing_device"] == target
+        assert b'name="action" value="link"' in details.content
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
+            {**server, "action": "link", "existing_device_id": target.pk},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.headers.get("HX-Trigger") == "closeModal"
+        target.refresh_from_db()
+        assert (target.serial, stored_mapping_for_test(target)) == ("STORED-SN-1", {self.server_key: 42})
+
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
 
