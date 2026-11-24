@@ -294,6 +294,11 @@ class TestInventoryCacheContract:
             payload = {"version": MODULE_INVENTORY_CACHE_VERSION, "serial_context": "stamp", **payload}
         assert cached_module_inventory(payload) == expected
 
+    def test_a_current_version_payload_without_a_serial_context_is_rejected(self):
+        from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION, cached_module_inventory
+
+        assert cached_module_inventory({"version": MODULE_INVENTORY_CACHE_VERSION, "inventory": []}) is None
+
     def test_current_fingerprint_returns_the_real_cached_rows(self, live_librenms):
         from netbox_librenms_plugin.sync_cache import cached_module_inventory
         from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
