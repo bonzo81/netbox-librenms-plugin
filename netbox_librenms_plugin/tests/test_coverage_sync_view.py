@@ -416,13 +416,13 @@ class TestSyncPageRouting:
 
         assert response.context["serial_matches"] is True
         assert response.context["librenms_id_is_legacy"] is True
-        assert response.context["librenms_id_serial_confirmed"] is not shared
+        assert response.context["librenms_id_serial_confirmed"] is (not shared)
         action = reverse("plugins:netbox_librenms_plugin:convert_legacy_librenms_id", kwargs={"pk": device.pk})
         (form,) = re.findall(
             rf'<form[^>]*action="{re.escape(action)}"[^>]*>(.*?)</form>', response.content.decode(), re.S
         )
         # Only the sole holder gets an enabled Convert ID button.
-        assert ('<button type="submit"' in form) is not shared
+        assert ('<button type="submit"' in form) is (not shared)
 
     @pytest.mark.parametrize(("reported", "offered"), [("12", False), ("NEW-SERIAL-12", True)])
     def test_a_librenms_serial_without_an_identity_offers_no_serial_sync(

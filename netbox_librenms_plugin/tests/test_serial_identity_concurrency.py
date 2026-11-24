@@ -417,7 +417,7 @@ def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(lib
     assert changed
     # Without the concurrent edit the same request commits, so the refusal comes from the edit.
     assert (RETYPE_HELD in response.content.decode()) is concurrent
-    assert (Device.objects.get(pk=target.pk).device_type_id == new_type.pk) is not concurrent
+    assert (Device.objects.get(pk=target.pk).device_type_id == new_type.pk) is (not concurrent)
 
 
 @transactional_db_with_all_apps()
@@ -483,7 +483,7 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
     assert changed
     # Without the concurrent edit the same request commits, so the refusal comes from the edit.
     assert refused is concurrent
-    assert (Device.objects.get(pk=target.pk).device_type_id == new_type.pk) is not concurrent
+    assert (Device.objects.get(pk=target.pk).device_type_id == new_type.pk) is (not concurrent)
 
 
 @transactional_db_with_all_apps()
