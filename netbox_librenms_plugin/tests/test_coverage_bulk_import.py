@@ -1146,3 +1146,46 @@ def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_cre
     assert entry["validation"]["virtual_chassis"]["master_identified"]
     reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
     assert (reason in entry["validation"]["issues"]) is (not held)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("unavailable", [True, False])
+def test_the_bulk_confirmation_blocks_a_stack_member_whose_serial_lookup_is_unavailable(
+    client, live_librenms, unavailable
+):
+    """The member writer refuses a member serial that a broken chassis master link hides; validation says so."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    member_serial = f"STRAY-MEMBER-{unavailable}"
+    if unavailable:
+        _stray_chassis_member("confirm-stray", member_serial)
+    device_id = 297 if unavailable else 298
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-stray-{unavailable}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-stray-user-{unavailable}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    assert entry["validation"]["virtual_chassis"]["master_identified"]
+    # The text of the member writer's refusal.
+    issue = f"Stack member 2: Cannot check VC member serial '{member_serial}': {UNAVAILABLE_MASTER_LINK}"
+    assert (issue in entry["validation"]["issues"]) is unavailable

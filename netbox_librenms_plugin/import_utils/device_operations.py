@@ -69,6 +69,7 @@ from .virtual_chassis import (
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
+    member_serial_unavailable_message,
     members_to_create,
     update_vc_member_suggested_names,
 )
@@ -682,8 +683,14 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     members = [(member, member.get("position"), display(member.get("serial"))) for member in vc["members"]]
     members = [entry for entry in members if entry[0] is not master]
     taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
-    # An Unavailable member refuses the import itself; the check names only members the import creates.
-    members = [entry for entry in members if taken[entry[2]].kind is not ResolutionKind.UNAVAILABLE]
+    # The member writer refuses the whole stack for an Unavailable member, so validation blocks it too.
+    unavailable = [
+        f"Stack member {position}: {member_serial_unavailable_message(serial)}"
+        for _member, position, serial in members
+        if taken[serial].kind is ResolutionKind.UNAVAILABLE
+    ]
+    if unavailable:
+        return unavailable
     created = {
         id(member)
         for member, *_rest in members_to_create(

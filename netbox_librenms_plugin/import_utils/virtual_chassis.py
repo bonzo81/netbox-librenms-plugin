@@ -21,6 +21,7 @@ from ..constants import (
 from ..librenms_api import LibreNMSAPI
 from ..models import RuleConfigurationError
 from ..serial_identity import (
+    UNAVAILABLE_MASTER_LINK,
     Comparison,
     MemberSerials,
     ResolutionKind,
@@ -991,6 +992,12 @@ def members_to_create(members, taken, context, name_of):
         yield member, position, serial, member_name
 
 
+def member_serial_unavailable_message(serial) -> str:
+    """Return why the member writer refuses a member serial whose lookup is Unavailable; validation reports it too."""
+    # The constant, not the lookup's reason: a Device lookup is Unavailable only for a broken master link.
+    return f"Cannot check VC member serial '{display(serial)}': {UNAVAILABLE_MASTER_LINK}"
+
+
 def _member_serial_taken(serial, resolution, created_members) -> bool:
     """
     Return whether a stack member with *serial* exists already, and log why it is skipped.
@@ -1002,7 +1009,7 @@ def _member_serial_taken(serial, resolution, created_members) -> bool:
 
     """
     if resolution.kind is ResolutionKind.UNAVAILABLE:
-        raise ValidationError(f"Cannot check VC member serial '{serial}': {resolution.reason}")
+        raise ValidationError(member_serial_unavailable_message(serial))
     if created_members.find(serial) or resolution.kind is ResolutionKind.UNIQUE:
         logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
         return True
