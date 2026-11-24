@@ -37,6 +37,7 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     module_move_serials_admitted,
     plain_context,
+    module_subtree_serials,
     resolve_modules,
     stored_form_differs,
     stored_form_refusal,
@@ -313,6 +314,11 @@ def viewable_modules(view):
     from dcim.models import Device, Module
 
     return view.restricted_queryset(Module).filter(device__in=view.restricted_queryset(Device))
+
+
+def subtree_owns_bay(tree, bay_module_id) -> bool:
+    """Return True when the ``(pk, serial)`` module *tree* holds *bay_module_id*, the module that owns a bay."""
+    return bay_module_id is not None and any(pk == bay_module_id for pk, _serial in tree)
 
 
 class _StaleInventorySnapshot(Exception):
@@ -4666,6 +4672,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             serial_rules (SerialRules | None): The page's serial rules; None reads them.
 
         """
+        from dcim.models import ModuleBay
+
         rows = self._identity_candidate_rows(table_data, index_map)
         if not rows:
             return
@@ -4681,6 +4689,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if matched_pks and getattr(self, "request", None) is not None:
             # A module is named only when the user may view it and its device.
             visible_conflict_pks = set(viewable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
+        bay_ids = {row["module_bay_id"] for row in rows if row.get("module_bay_id")}
+        bay_owners = dict(ModuleBay.objects.filter(pk__in=bay_ids).values_list("pk", "module_id")) if bay_ids else {}
         pending_installs = defaultdict(list)
         for row in rows:
             serial = row["serial"]
@@ -4694,7 +4704,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["serial_conflict_module"] = conflict
                 row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                 context = row["_serial_context"]
-                if module_move_serials_admitted(serial, conflict.serial, context):
+                # A move into a bay of the holder's own subtree always refuses, so the row offers none.
+                if module_move_serials_admitted(serial, conflict.serial, context) and not subtree_owns_bay(
+                    module_subtree_serials(conflict.pk), bay_owners.get(row.get("module_bay_id"))
+                ):
                     row["can_move_from"] = True
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True

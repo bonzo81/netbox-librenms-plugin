@@ -111,6 +111,7 @@ from netbox_librenms_plugin.views.base.modules_view import (
     built_in_candidate,
     reusable_built_in_rule,
     select_module_interface,
+    subtree_owns_bay,
     viewable_modules,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -2759,11 +2760,6 @@ def _resolve_replacement_holder(incoming, serial_context, *, rules, exclude_pk):
     return resolve_module(incoming, rules=rules, exclude_pks=[exclude_pk])
 
 
-def _tree_holds(tree, module_pk):
-    """Return True when the ``(pk, serial)`` pairs of a module subtree include the Module *module_pk*."""
-    return any(pk == module_pk for pk, _serial in tree)
-
-
 def _trees_in_delete_scope(deletable, trees):
     """Return True when the delete-scoped queryset *deletable* holds every module of the ``(pk, serial)`` *trees*."""
     pks = {pk for tree in trees for pk, _serial in tree}
@@ -2925,8 +2921,8 @@ class ModuleMismatchPreviewView(
             serial_conflict_ambiguous = True
 
         # Replace would delete the bay, and Move would put the holder into a bay of its own subtree.
-        serial_conflict_owns_bay = serial_conflict is not None and _tree_holds(
-            module_subtree_serials(serial_conflict.pk), installed_module.pk
+        serial_conflict_owns_bay = serial_conflict is not None and subtree_owns_bay(
+            module_subtree_serials(serial_conflict.pk), installed_module.module_bay.module_id
         )
         deletable = self.restricted_queryset(Module, "delete")
         installed_tree = module_subtree_serials(installed_module.pk)
@@ -3123,7 +3119,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     if visible and not self.restricted_queryset(Module, "delete").filter(pk=previous.pk).exists():
                         raise _SerialConflictUnavailable(display(incoming))
                     removals[previous.pk] = module_subtree_serials(previous.pk)
-                    if visible and _tree_holds(removals[previous.pk], installed_module.pk):
+                    if visible and subtree_owns_bay(removals[previous.pk], installed_module.module_bay.module_id):
                         raise _ModuleActionRefused(HOLDER_OWNS_BAY.format(serial=display(incoming)))
                 scope = lock_module_write(
                     observe_module_write(device_ids=[target_device.pk], subtree_roots=removals),
@@ -3413,9 +3409,7 @@ class MoveModuleView(
                 module.serial, serial_rules.for_module_target(target_device)
             ):
                 raise _ModuleActionRefused("The module serial has no identity at the destination.")
-            if target_bay.module_id is not None and _tree_holds(
-                module_subtree_serials(module.pk), target_bay.module_id
-            ):
+            if subtree_owns_bay(module_subtree_serials(module.pk), target_bay.module_id):
                 raise _ModuleActionRefused(MOVE_INTO_OWN_SUBTREE)
             # Remove whatever is currently in the target bay (if provided and different).
             # Scoped by "delete": the device and bay filters prove where the row sits, not that

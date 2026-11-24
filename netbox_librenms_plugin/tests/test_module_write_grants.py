@@ -480,6 +480,21 @@ def test_the_preview_offers_replace_only_when_the_serial_holder_does_not_own_the
         assert [form["fields"].get("conflict_module_id") for form in forms] == [str(holder.pk)]
 
 
+@pytest.mark.parametrize("owns_destination", [True, False], ids=["ancestor", "sibling"])
+def test_the_table_offers_move_only_when_the_serial_holder_does_not_own_the_bay(ui, c8300, owns_destination):
+    """The table offers the same Move as the preview: never into a bay of the holder's own subtree."""
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder = _tagged_holder(device, entities, owns_destination=owns_destination)
+
+    holders = [form["fields"].get("conflict_module_id") for form in _move_forms(render(ui, device))]
+
+    assert holders == ([] if owns_destination else [str(holder.pk)])
+
+
 def test_replace_refuses_a_serial_holder_that_owns_the_bay_since_its_preview(ui, c8300):
     from dcim.models import Module
 
