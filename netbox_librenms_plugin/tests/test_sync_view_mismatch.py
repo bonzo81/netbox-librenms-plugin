@@ -2,7 +2,13 @@
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_virtual_chassis
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_interface,
+    make_ip,
+    make_superuser,
+    make_virtual_chassis,
+)
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
 
@@ -40,11 +46,16 @@ def _device_info(view, device):
 
 
 def _view(live_librenms, librenms_id=42):
+    from django.test import RequestFactory
+
     from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
     view = object.__new__(BaseLibreNMSSyncView)
     view.librenms_id = librenms_id
     view._librenms_api = live_librenms.api
+    # The VC Serials dialog preselects only members in the change scope of the request user.
+    view.request = RequestFactory().get("/")
+    view.request.user = make_superuser("sync-mismatch-superuser")
     return view
 
 
