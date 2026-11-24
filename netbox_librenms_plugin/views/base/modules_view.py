@@ -321,6 +321,18 @@ def subtree_owns_bay(tree, bay_module_id) -> bool:
     return bay_module_id is not None and any(pk == bay_module_id for pk, _serial in tree)
 
 
+def trees_in_scope(scope, trees) -> set:
+    """Return the keys of *trees* whose ``(pk, serial)`` modules are all in the queryset *scope*; one read."""
+    pks = {pk for tree in trees.values() for pk, _serial in tree}
+    held = set(scope.filter(pk__in=pks).values_list("pk", flat=True)) if pks else set()
+    return {key for key, tree in trees.items() if all(pk in held for pk, _serial in tree)}
+
+
+def all_trees_in_scope(scope, trees) -> bool:
+    """Return True when the queryset *scope* holds every module of the ``(pk, serial)`` *trees*."""
+    return len(trees_in_scope(scope, dict(enumerate(trees)))) == len(trees)
+
+
 def movable_modules(view):
     """Return the Modules that the user of *view* may move: in the Module change scope, on a Device they may view."""
     from dcim.models import Device, Module
@@ -4692,11 +4704,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         matched_pks = {module.pk for resolution in resolutions.values() for module in resolution.matches}
         # Fail closed when there is no request to scope against: name nothing rather than risk
         # disclosing a module the operator cannot see.
-        visible_conflict_pks = movable_conflict_pks = set()
-        if matched_pks and getattr(self, "request", None) is not None:
+        visible_conflict_pks = set()
+        scoped = matched_pks and getattr(self, "request", None) is not None
+        if scoped:
             # A module is named only when the user may view it and its device.
             visible_conflict_pks = set(viewable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
-            movable_conflict_pks = set(movable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
         bay_ids = {row["module_bay_id"] for row in rows if row.get("module_bay_id")}
         bay_owners = dict(ModuleBay.objects.filter(pk__in=bay_ids).values_list("pk", "module_id")) if bay_ids else {}
         pending_installs = defaultdict(list)
@@ -4714,11 +4726,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                 context = row["_serial_context"]
                 # The table Move removes no occupant.
-                if (
-                    not installed_id
-                    and conflict.pk in movable_conflict_pks
-                    and module_move_serials_admitted(serial, conflict.serial, context)
-                ):
+                if not installed_id and module_move_serials_admitted(serial, conflict.serial, context):
                     move_candidates.append((row, conflict.pk, bay_owners.get(row.get("module_bay_id"))))
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
@@ -4729,10 +4737,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 elif not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE:
                     pending_installs[device_id].append((row, own_bay))
 
-        # A move into a bay of the holder's own subtree always refuses; a device-level bay has no owner to walk to.
-        trees = module_subtrees({holder for _row, holder, owner in move_candidates if owner is not None})
+        # A Move changes every module of the holder's tree and refuses a bay of that tree; one walk serves all rows.
+        trees = module_subtrees({holder for _row, holder, _owner in move_candidates}) if scoped else {}
+        movable = trees_in_scope(movable_modules(self), trees) if trees else set()
         for row, holder, owner in move_candidates:
-            if not subtree_owns_bay(trees.get(holder, ()), owner):
+            if holder in movable and not subtree_owns_bay(trees[holder], owner):
                 row["can_move_from"] = True
 
         for device_id, target_rows in pending_installs.items():

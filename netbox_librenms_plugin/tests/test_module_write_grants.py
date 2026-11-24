@@ -611,6 +611,67 @@ def _module_writer(name, *, device_scope=None, delete_scope=None, change_scope=N
     return user
 
 
+def _module_places(*modules):
+    from dcim.models import Module
+
+    pks = [module.pk for module in modules]
+    return dict(
+        (pk, (device, bay))
+        for pk, device, bay in Module.objects.filter(pk__in=pks).values_list("pk", "device_id", "module_bay_id")
+    )
+
+
+def test_move_refuses_a_moved_subtree_with_a_module_outside_the_change_scope(client, c8300):
+    """A cross-device Move changes the Device of every module below the holder, so the scope must cover them."""
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_OUTSIDE_CHANGE_SCOPE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "holder")
+    covering = {"pk__in": [installed.pk, holder.pk, child.pk]}
+    client.force_login(_module_writer("move-change-subtree", change_scope=covering))
+    form = _previewed_move_form(client, device)
+    # The scope now misses the child below the holder.
+    ObjectPermission.objects.filter(name__startswith="move-change-subtree-change-module").update(
+        constraints={"pk__in": [installed.pk, holder.pk]}
+    )
+    assert _move_forms(_preview_html(client, device)) == []
+    before, places = written_state(device), _module_places(holder, child, installed)
+
+    response = post(client, *form)
+
+    assert MOVE_OUTSIDE_CHANGE_SCOPE in messages_of(response)
+    assert written_state(device) == before
+    assert _module_places(holder, child, installed) == places
+
+
+def test_move_refuses_a_holder_that_the_save_takes_outside_the_change_scope(client, c8300):
+    """The change scope covers the holder on its source Device only; the saved row must still be in scope."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_OUTSIDE_CHANGE_SCOPE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "holder")
+    Module.objects.filter(pk=child.pk).delete()
+    client.force_login(_module_writer("move-change-place", change_scope={"device_id": holder.device_id}))
+    form = _previewed_move_form(client, device)
+    before, places = written_state(device), _module_places(holder, installed)
+
+    response = post(client, *form)
+
+    assert MOVE_OUTSIDE_CHANGE_SCOPE in messages_of(response)
+    assert written_state(device) == before
+    assert _module_places(holder, installed) == places
+
+
 @pytest.mark.parametrize("scope", ["covers", "misses"])
 @pytest.mark.parametrize("where", ["table", "dialog"])
 def test_move_is_offered_only_when_the_change_scope_covers_the_holder(client, c8300, where, scope):

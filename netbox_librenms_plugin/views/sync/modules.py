@@ -110,6 +110,7 @@ from netbox_librenms_plugin.views.base.modules_view import (
     _normalize_librenms_text,
     built_in_candidate,
     reusable_built_in_rule,
+    all_trees_in_scope,
     movable_modules,
     select_module_interface,
     subtree_owns_bay,
@@ -457,6 +458,7 @@ REMOVAL_OUTSIDE_DELETE_SCOPE = (
 MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE = (
     "A module that Move would delete from the destination bay is outside your delete permission. Nothing was moved."
 )
+MOVE_OUTSIDE_CHANGE_SCOPE = "A module that Move would change is outside your change permission. Nothing was moved."
 MOVE_STALE = "The modules or module bays changed. Refresh Modules and try again."
 MOVE_INTO_OWN_SUBTREE = "The destination bay belongs to the module or to a module below it. Nothing was moved."
 
@@ -2761,12 +2763,6 @@ def _resolve_replacement_holder(incoming, serial_context, *, rules, exclude_pk):
     return resolve_module(incoming, rules=rules, exclude_pks=[exclude_pk])
 
 
-def _trees_in_delete_scope(deletable, trees):
-    """Return True when the delete-scoped queryset *deletable* holds every module of the ``(pk, serial)`` *trees*."""
-    pks = {pk for tree in trees for pk, _serial in tree}
-    return deletable.filter(pk__in=pks).count() == len(pks)
-
-
 def _hash_token(value):
     """Return a positive int that a grant signs for *value*, so the grant does not carry pks the viewer may not see."""
     payload = json.dumps(value, separators=(",", ":"))
@@ -2928,7 +2924,7 @@ class ModuleMismatchPreviewView(
         deletable = self.restricted_queryset(Module, "delete")
         installed_tree = module_subtree_serials(installed_module.pk)
         holder_trees = [] if serial_conflict is None else [module_subtree_serials(serial_conflict.pk)]
-        replace_in_delete_scope = _trees_in_delete_scope(deletable, [installed_tree, *holder_trees])
+        replace_in_delete_scope = all_trees_in_scope(deletable, [installed_tree, *holder_trees])
         return render(
             request,
             "netbox_librenms_plugin/htmx/module_mismatch_modal.html",
@@ -2950,9 +2946,10 @@ class ModuleMismatchPreviewView(
                 "can_move_from": netbox_relocates_module_subtree()
                 and serial_conflict is not None
                 and not serial_conflict_owns_bay
-                and movable_modules(self).filter(pk=serial_conflict.pk).exists()
+                # A cross-device Move changes every module of the holder's tree.
+                and all_trees_in_scope(movable_modules(self), holder_trees)
                 # Move deletes the module in this bay and the modules below it.
-                and _trees_in_delete_scope(deletable, [installed_tree])
+                and all_trees_in_scope(deletable, [installed_tree])
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
@@ -3208,7 +3205,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
                 _require_unchanged_module_subtrees(removals)
                 # The delete cascades through both trees, so the delete scope must cover every module in them.
-                if not _trees_in_delete_scope(self.restricted_queryset(Module, "delete"), removals.values()):
+                if not all_trees_in_scope(self.restricted_queryset(Module, "delete"), removals.values()):
                     raise _ModuleActionRefused(REMOVAL_OUTSIDE_DELETE_SCOPE)
                 # A legacy row on the target that stores the key of the incoming serial can be the same part.
                 if resolve_module(
@@ -3411,8 +3408,11 @@ class MoveModuleView(
                 module.serial, serial_rules.for_module_target(target_device)
             ):
                 raise _ModuleActionRefused("The module serial has no identity at the destination.")
-            if subtree_owns_bay(module_subtree_serials(module.pk), target_bay.module_id):
+            moved_tree = module_subtree_serials(module.pk)
+            if subtree_owns_bay(moved_tree, target_bay.module_id):
                 raise _ModuleActionRefused(MOVE_INTO_OWN_SUBTREE)
+            if not all_trees_in_scope(movable_modules(self), [moved_tree]):
+                raise _ModuleActionRefused(MOVE_OUTSIDE_CHANGE_SCOPE)
             # Remove whatever is currently in the target bay (if provided and different).
             # Scoped by "delete": the device and bay filters prove where the row sits, not that
             # the grant covers it, and the gate asked has_perm without an instance.
@@ -3425,7 +3425,7 @@ class MoveModuleView(
                 )
                 if occupant:
                     _require_unchanged_module_subtrees({occupant.pk: removing})
-                    if not _trees_in_delete_scope(self.restricted_queryset(Module, "delete"), [removing]):
+                    if not all_trees_in_scope(self.restricted_queryset(Module, "delete"), [removing]):
                         raise _ModuleActionRefused(MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE)
                     # The offer signed the occupant tree that the operator saw; the delete removes only that tree.
                     if request.POST.get("occupant_tree_token") != str(move_occupant_token(removing)):
@@ -3479,6 +3479,9 @@ class MoveModuleView(
                     )
                 except Module.DoesNotExist:
                     raise _ModuleActionRefused("Module no longer exists.") from None
+                # A change constraint can name the old place, so the saved rows must still be in scope.
+                if not all_trees_in_scope(movable_modules(self), [module_subtree_serials(conflict_module.pk)]):
+                    raise _ModuleActionRefused(MOVE_OUTSIDE_CHANGE_SCOPE)
 
             if occupant_removed_msg:
                 messages.info(request, occupant_removed_msg)
