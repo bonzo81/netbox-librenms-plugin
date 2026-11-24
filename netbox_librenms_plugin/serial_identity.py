@@ -1009,15 +1009,27 @@ RELOCATION_HELD = (
 
 def module_subtree_serials(module_pk) -> tuple:
     """Return the sorted ``(pk, serial)`` pairs of the Module *module_pk* and of every Module below it."""
+    return module_subtrees([module_pk]).get(module_pk, ())
+
+
+def module_subtrees(module_pks) -> dict:
+    """Return, for each existing Module of *module_pks*, its ``module_subtree_serials`` value; one read per depth."""
     from dcim.models import Module
 
-    found = list(Module.objects.filter(pk=module_pk).values_list("pk", "serial"))
-    frontier = [pk for pk, _serial in found]
+    roots = [pk for pk in module_pks if pk is not None]
+    found = {pk: [(pk, serial)] for pk, serial in Module.objects.filter(pk__in=roots).values_list("pk", "serial")}
+    # Each module below a root carries that root, so one read serves every tree of a depth.
+    frontier = {pk: pk for pk in found}
     while frontier:
-        children = list(Module.objects.filter(module_bay__module_id__in=frontier).values_list("pk", "serial"))
-        found.extend(children)
-        frontier = [pk for pk, _serial in children]
-    return tuple(sorted(found))
+        children = Module.objects.filter(module_bay__module_id__in=frontier).values_list(
+            "pk", "serial", "module_bay__module_id"
+        )
+        next_frontier = {}
+        for pk, serial, parent in children:
+            found[frontier[parent]].append((pk, serial))
+            next_frontier[pk] = frontier[parent]
+        frontier = next_frontier
+    return {pk: tuple(sorted(tree)) for pk, tree in found.items()}
 
 
 def relocation_conflict(module, target_device, moving, *, rules: SerialRules, scope) -> bool:

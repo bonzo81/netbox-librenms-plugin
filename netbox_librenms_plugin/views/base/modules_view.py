@@ -37,7 +37,7 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     module_move_serials_admitted,
     plain_context,
-    module_subtree_serials,
+    module_subtrees,
     resolve_modules,
     stored_form_differs,
     stored_form_refusal,
@@ -4700,6 +4700,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         bay_ids = {row["module_bay_id"] for row in rows if row.get("module_bay_id")}
         bay_owners = dict(ModuleBay.objects.filter(pk__in=bay_ids).values_list("pk", "module_id")) if bay_ids else {}
         pending_installs = defaultdict(list)
+        move_candidates = []
         for row in rows:
             serial = row["serial"]
             resolution = resolutions[serial]
@@ -4712,16 +4713,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["serial_conflict_module"] = conflict
                 row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                 context = row["_serial_context"]
-                # The table Move removes no occupant, and a move into the holder's own subtree always refuses.
+                # The table Move removes no occupant.
                 if (
                     not installed_id
                     and conflict.pk in movable_conflict_pks
                     and module_move_serials_admitted(serial, conflict.serial, context)
-                    and not subtree_owns_bay(
-                        module_subtree_serials(conflict.pk), bay_owners.get(row.get("module_bay_id"))
-                    )
                 ):
-                    row["can_move_from"] = True
+                    move_candidates.append((row, conflict.pk, bay_owners.get(row.get("module_bay_id"))))
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
             device_id = row.get("selected_device_id")
@@ -4730,6 +4728,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     row["can_install"] = False
                 elif not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE:
                     pending_installs[device_id].append((row, own_bay))
+
+        # A move into a bay of the holder's own subtree always refuses; a device-level bay has no owner to walk to.
+        trees = module_subtrees({holder for _row, holder, owner in move_candidates if owner is not None})
+        for row, holder, owner in move_candidates:
+            if not subtree_owns_bay(trees.get(holder, ()), owner):
+                row["can_move_from"] = True
 
         for device_id, target_rows in pending_installs.items():
             scoped = resolve_modules(

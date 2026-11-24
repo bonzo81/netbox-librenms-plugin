@@ -3748,6 +3748,38 @@ class TestDetectSerialConflicts:
         assert row.get("serial_conflict_module") == conflict
         assert row.get("can_move_from") is True
 
+    def test_move_offers_for_top_level_bays_cost_no_query_per_row(self):
+        """A device-level bay has no owner module, so no holder can own it; the Move check walks no subtree per row."""
+        from dcim.models import ModuleBay
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        page = make_device_with_module_bays("move-query-page", ["Bay 1", "Bay 2", "Bay 3"])
+        for number in (1, 2, 3):
+            self._make_module(f"move-query-{number}", f"MOVE-QUERY-{number}")
+
+        def count(numbers):
+            view = self._view()
+            view.request = make_request("get", user=make_superuser("move-query-user"))
+            rows = [
+                {
+                    "can_install": True,
+                    "serial": f"MOVE-QUERY-{number}",
+                    "module_bay_id": ModuleBay.objects.get(device=page, name=f"Bay {number}").pk,
+                    "_serial_context": view._row_serial_context(),
+                }
+                for number in numbers
+            ]
+            with CaptureQueriesContext(connection) as queries:
+                view._detect_serial_conflicts(rows)
+            assert all(row.get("can_move_from") is True for row in rows)
+            return len(queries.captured_queries)
+
+        assert count([1, 2, 3]) == count([1])
+
     def test_ambiguous_when_multiple_conflicts_for_same_serial(self):
         """When multiple modules share the same serial, mark the row ambiguous instead of picking one."""
         view = self._view()
