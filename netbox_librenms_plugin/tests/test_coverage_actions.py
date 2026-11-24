@@ -8761,6 +8761,16 @@ class TestSerialActionsNormalizeAndLock:
             )
         ]
 
+    def _post_with_the_holder_locked(self, action, target, serial, holder):
+        """Post *action* while another session holds the row of *holder*; a lookup that locks it fails in 200 ms."""
+        from dcim.models import Device
+
+        with second_connection() as other:
+            lock_row(other, Device, holder.pk)
+            with lock_timeout(200), CaptureQueriesContext(connection) as ctx:
+                resp = self._post_action(action, target, serial)
+        return resp, [q["sql"] for q in ctx.captured_queries]
+
     def test_update_serial_persists_trimmed_serial(self):
         """A padded LibreNMS serial is stored trimmed so the next exact lookup still matches."""
         target = make_device("ser-act-upd")
@@ -8784,16 +8794,12 @@ class TestSerialActionsNormalizeAndLock:
         target.refresh_from_db()
         assert target.serial == ""  # nothing persisted
 
+    @transactional_db_with_all_apps()
     def test_sync_serial_uses_advisory_lock_not_conflict_row_lock(self):
         """The conflict guard serializes on an advisory lock keyed by the serial value; a second row lock would deadlock two swap-direction requests (A then B vs B then A)."""
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
-
         holder = make_device("ser-act-lock-holder", serial="SN-7700")
         target = make_device("ser-act-lock")
-        with CaptureQueriesContext(connection) as ctx:
-            resp = self._post_action("sync_serial", target, "SN-7700")
-        sqls = [q["sql"] for q in ctx.captured_queries]
+        resp, sqls = self._post_with_the_holder_locked("sync_serial", target, "SN-7700", holder)
         assert b"Serial conflict" in resp.content
         assert any("pg_advisory_xact_lock" in s for s in sqls), "advisory lock on the serial value not taken"
         # The own-row lock is expected; the conflict lookup must not lock the holder.
@@ -8821,30 +8827,22 @@ class TestSerialActionsNormalizeAndLock:
         assert "-1635233324441925838" in lock_sqls[0]
         assert all("hashtext" not in sql.lower() for sql in lock_sqls)
 
+    @transactional_db_with_all_apps()
     def test_update_action_serializes_on_the_serial_advisory_lock(self):
         """The update action's serial write takes the same advisory lock (same deadlock shape as sync_serial)."""
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
-
         holder = make_device("ser-act-upd-lock-holder", serial="SN-8800")
         target = make_device("ser-act-upd-lock")
-        with CaptureQueriesContext(connection) as ctx:
-            resp = self._post_action("update", target, "SN-8800")
-        sqls = [q["sql"] for q in ctx.captured_queries]
+        resp, sqls = self._post_with_the_holder_locked("update", target, "SN-8800", holder)
         assert b"Serial conflict" in resp.content
         assert any("pg_advisory_xact_lock" in s for s in sqls)
         assert self._row_locks_of(sqls, holder) == []
 
+    @transactional_db_with_all_apps()
     def test_update_serial_action_serializes_on_the_serial_advisory_lock(self):
         """The dedicated update_serial action takes the same serial-keyed advisory lock."""
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
-
         holder = make_device("ser-act-upd-serial-lock-holder", serial="SN-8900")
         target = make_device("ser-act-upd-serial-lock")
-        with CaptureQueriesContext(connection) as ctx:
-            resp = self._post_action("update_serial", target, "SN-8900")
-        sqls = [q["sql"] for q in ctx.captured_queries]
+        resp, sqls = self._post_with_the_holder_locked("update_serial", target, "SN-8900", holder)
         assert b"Serial conflict" in resp.content
         assert any("pg_advisory_xact_lock" in sql for sql in sqls)
         assert self._row_locks_of(sqls, holder) == []
