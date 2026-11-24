@@ -657,6 +657,33 @@ def test_move_refuses_an_occupant_tree_with_a_module_outside_the_delete_scope(cl
     assert dict(Module.objects.filter(pk__in=kept).values_list("pk", "module_bay_id")) == kept
 
 
+def test_move_refuses_an_occupant_tree_changed_after_its_preview(ui, c8300):
+    """The preview showed the occupant that Move deletes; a child added below it since must not be deleted."""
+    from dcim.models import Module, ModuleBay
+
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_STALE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "holder")
+    Module.objects.filter(pk=child.pk).delete()
+    form = _previewed_move_form(ui, device)
+    assert (form[1]["conflict_module_id"], form[1]["module_id"]) == (str(holder.pk), str(installed.pk))
+    ModuleBay.objects.create(device=device, module=installed, name="Added child")
+    added = install_in_bay(device, "Added child", "TREE-CHILD", serial="TREE-CHILD-2", parent_module=installed)
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert MOVE_STALE in messages_of(response)
+    assert written_state(device) == before
+    kept = {holder.pk: holder.module_bay_id, installed.pk: installed.module_bay_id, added.pk: added.module_bay_id}
+    assert dict(Module.objects.filter(pk__in=kept).values_list("pk", "module_bay_id")) == kept
+
+
 @pytest.mark.parametrize("parent", ["holder", "installed"])
 def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(client, c8300, parent):
     """A scope that covers both trees offers Replace; one that misses a child offers none and refuses the POST."""

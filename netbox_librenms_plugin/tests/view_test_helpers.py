@@ -269,6 +269,14 @@ def rendered_preview_query(device, ent_index, *, user=None, server_key="default"
     return dict(parse_qsl(urlsplit(url).query))
 
 
+def move_occupant_field(occupant):
+    """Return the field that the Move offer of the mismatch preview signs for the *occupant* tree that Move deletes."""
+    from netbox_librenms_plugin.serial_identity import module_subtree_serials
+    from netbox_librenms_plugin.views.sync.modules import move_occupant_token
+
+    return {"occupant_tree_token": str(move_occupant_token(module_subtree_serials(occupant.pk)))}
+
+
 def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
     """Return ``(action URL, fields)`` of a form in the modal that the rendered Replace button of row *ent_index* opens."""
     from types import SimpleNamespace

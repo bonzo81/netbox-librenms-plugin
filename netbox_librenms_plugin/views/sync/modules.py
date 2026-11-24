@@ -455,6 +455,7 @@ REMOVAL_OUTSIDE_DELETE_SCOPE = (
 MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE = (
     "A module that Move would delete from the destination bay is outside your delete permission. Nothing was moved."
 )
+MOVE_STALE = "The modules or module bays changed. Refresh Modules and try again."
 MOVE_INTO_OWN_SUBTREE = "The destination bay belongs to the module or to a module below it. Nothing was moved."
 
 
@@ -2784,6 +2785,11 @@ def _serial_holder_token(elsewhere):
     return _hash_token([elsewhere.kind.value, *place])
 
 
+def move_occupant_token(tree):
+    """Return the positive int that a Move offer signs for the ``(pk, serial)`` tree of the occupant it deletes."""
+    return _hash_token(["move-occupant", [pk for pk, _serial in tree]])
+
+
 def _removal_trees_token(module, elsewhere):
     """Return a positive int for the module pks that a replace deletes: the subtree of *module* and of the holder."""
     roots = [module.pk] if elsewhere.object is None else [module.pk, elsewhere.object.pk]
@@ -2950,6 +2956,7 @@ class ModuleMismatchPreviewView(
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
+                "move_occupant_token": move_occupant_token(installed_tree),
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,
@@ -3401,7 +3408,7 @@ class MoveModuleView(
             if (same_device_move and module.device_id != target_device.pk) or (
                 same_device_empty_bay and Module.objects.filter(module_bay=target_bay).exists()
             ):
-                raise _ModuleActionRefused("The modules or module bays changed. Refresh Modules and try again.")
+                raise _ModuleActionRefused(MOVE_STALE)
             if module.device_id != target_device.pk and not is_identity(
                 module.serial, serial_rules.for_module_target(target_device)
             ):
@@ -3424,6 +3431,9 @@ class MoveModuleView(
                     _require_unchanged_module_subtrees({occupant.pk: removing})
                     if not _trees_in_delete_scope(self.restricted_queryset(Module, "delete"), [removing]):
                         raise _ModuleActionRefused(MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE)
+                    # The offer signed the occupant tree that the operator saw; the delete removes only that tree.
+                    if request.POST.get("occupant_tree_token") != str(move_occupant_token(removing)):
+                        raise _ModuleActionRefused(MOVE_STALE)
                     occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                     occupant.delete()
             _refuse_identity_move(module, target_device, moving, serial_rules, scope)

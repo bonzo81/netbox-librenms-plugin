@@ -155,6 +155,7 @@
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk|default:'' }}">
+        <input type="hidden" name="occupant_tree_token" value="{{ move_occupant_token }}">
         <input type="hidden" name="conflict_module_id" value="{{ serial_conflict.pk }}">
         <input type="hidden" name="target_bay_id" value="{{ target_bay_id }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">

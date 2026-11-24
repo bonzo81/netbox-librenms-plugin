@@ -24,6 +24,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     make_view,
     message_texts,
+    move_occupant_field,
     post as view_post,
     rendered_modal_form,
     rendered_preview_query,
@@ -593,6 +594,7 @@ class TestMoveModuleView:
                 "module_id": str(occupant.pk),
                 "selected_device_id": str(target_device.pk),
                 "server_key": "default",
+                **move_occupant_field(occupant),
             },
         )
 
@@ -724,7 +726,7 @@ class TestMoveModuleView:
         if holder == "destination-module":
             # The move deletes the named occupant first, so the refusal must roll the delete back.
             occupant = _module(target_device, target_bay, make_module_type(f"{tag}-occupant".upper()), "OCCUPANT123")
-            fields["module_id"] = str(occupant.pk)
+            fields.update(module_id=str(occupant.pk), **move_occupant_field(occupant))
         client.force_login(make_superuser(f"{tag}-user"))
 
         response = client.post(

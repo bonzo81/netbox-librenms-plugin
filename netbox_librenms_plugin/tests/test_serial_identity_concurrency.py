@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
+    move_occupant_field,
     rendered_module_form,
     render_module_tab,
     trusted_module_inventory_payload,
@@ -1346,6 +1347,7 @@ def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms
     target = make_device_with_module_bays("occupant-lock-target", ["Target Bay"])
     moving = install_module(source, "Source Bay", "OCCUPANT-MOVE-CARD", serial="AAA")
     occupant = install_module(target, "Target Bay", "OCCUPANT-OLD-CARD", serial="BBB")
+    offer = move_occupant_field(occupant)
     user = make_superuser("occupant-lock-writer")
     mover = Client()
     mover.force_login(user)
@@ -1397,6 +1399,7 @@ def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms
                         "module_id": occupant.pk,
                         "selected_device_id": target.pk,
                         "server_key": SERVER_KEY,
+                        **offer,
                     },
                 ).status_code
         finally:
