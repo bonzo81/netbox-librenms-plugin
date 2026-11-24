@@ -1994,6 +1994,30 @@ class TestInstallRefusesADuplicateSerial:
 
         assert Module.objects.filter(module_bay=empty_bay).exists(), "a blank serial was treated as identity"
 
+    @pytest.mark.parametrize(("stored", "refused"), [("S/N LEGACY-SN1", True), ("OTHER-SN1", False)])
+    def test_a_legacy_row_that_stores_the_rule_output_refuses_the_install(self, stored, refused):
+        """An earlier release stored "S/N S/N LEGACY-SN1" as its rule output "S/N LEGACY-SN1", which keys again."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device, module_type, installed, empty_bay = self._device_with_installed_serial(
+            f"dupserial-legacy-{refused}", stored
+        )
+
+        texts = self._post_install(device, module_type, installed, empty_bay, "S/N S/N LEGACY-SN1")
+
+        if refused:
+            assert texts == ["Serial 'S/N S/N LEGACY-SN1' is already installed on this device. Nothing was installed."]
+            assert Module.objects.filter(device=device).count() == 1, "a second Module was created for one serial"
+        else:
+            assert Module.objects.get(module_bay=empty_bay).serial == "S/N S/N LEGACY-SN1"
+        installed.refresh_from_db()
+        assert installed.serial == stored
+
 
 @pytest.mark.django_db
 class TestIdentityIsNotGatedOnBayMapping:

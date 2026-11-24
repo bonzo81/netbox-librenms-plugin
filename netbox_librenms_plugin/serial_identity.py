@@ -649,7 +649,14 @@ def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> b
 
 
 def resolve_modules(
-    serials: Iterable, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False, spare=0
+    serials: Iterable,
+    *,
+    rules: SerialRules | None = None,
+    device_ids=None,
+    exclude_pks=(),
+    lock=False,
+    spare=0,
+    writer: SerialContext | None = None,
 ) -> dict:
     """
     Return ``{serial_text: Resolution}``: the Modules that hold each incoming serial, in one query.
@@ -662,6 +669,7 @@ def resolve_modules(
         lock: Lock confirmed matches ``FOR UPDATE`` and check their identity again; the caller holds a transaction.
         spare: Read this many matches past the Ambiguous count, so that ``Resolution.excluding`` can
             leave out up to this many rows per serial later.
+        writer: The target's context of a write; the result then also holds the ``uncertain`` rows of a Resolution.
 
     """
     from dcim.models import Module
@@ -680,14 +688,17 @@ def resolve_modules(
         lock=lock,
         spare=spare,
         stop_at_ambiguity=True,
+        writer=writer,
     )
 
 
-def resolve_module(serial, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False):
+def resolve_module(
+    serial, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False, writer=None
+):
     """Return the Resolution of one incoming serial among Modules; see :func:`resolve_modules`."""
-    return resolve_modules([serial], rules=rules, device_ids=device_ids, exclude_pks=exclude_pks, lock=lock)[
-        _text(serial)
-    ]
+    return resolve_modules(
+        [serial], rules=rules, device_ids=device_ids, exclude_pks=exclude_pks, lock=lock, writer=writer
+    )[_text(serial)]
 
 
 def assignment_lock(serials: Iterable, *, model, rules: SerialRules) -> None:
@@ -855,15 +866,17 @@ def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:
     from dcim.models import Module
 
     device = module.device
-    if not is_identity(incoming, locked_type_context(device, rules=rules)):
+    context = locked_type_context(device, rules=rules)
+    if not is_identity(incoming, context):
         return Assignment(None, absent=True)
     value = stored_form(incoming, Module)
     if _stored_text(module.serial) == value:
         return Assignment(None)
     # The Device lock serializes its module writers. A conflict only refuses this write,
     # so it must not wait for a Module held by a writer that is waiting for this Device.
-    conflict = resolve_module(incoming, rules=rules, device_ids=[device.pk], exclude_pks=[module.pk])
-    if conflict.kind in REFUSING:
+    conflict = resolve_module(incoming, rules=rules, device_ids=[device.pk], exclude_pks=[module.pk], writer=context)
+    # A legacy row that stores the key of the incoming serial can be the same part, so it refuses too.
+    if conflict.kind in REFUSING or conflict.uncertain:
         return Assignment(None, conflict)
     return Assignment(value)
 

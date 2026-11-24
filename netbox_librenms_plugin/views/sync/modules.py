@@ -246,11 +246,17 @@ def _module_already_on_device(device, incoming, serial_rules, *, exclude_pk=None
     see; the transaction must already hold ``assignment_lock`` for ``incoming``.
     """
     # The lookup reads the module context after the device row lock: a type change commits first.
-    locked_type_context(device, rules=serial_rules)
+    context = locked_type_context(device, rules=serial_rules)
     held = resolve_module(
-        incoming, rules=serial_rules, device_ids=[device.pk], exclude_pks=[exclude_pk] if exclude_pk else (), lock=True
+        incoming,
+        rules=serial_rules,
+        device_ids=[device.pk],
+        exclude_pks=[exclude_pk] if exclude_pk else (),
+        lock=True,
+        writer=context,
     )
-    return held.kind in REFUSING
+    # A legacy row that stores the key of the incoming serial can be the same part, so it refuses too.
+    return held.kind in REFUSING or bool(held.uncertain)
 
 
 def _get_cached_module_snapshot(sync_device, server_key, get_cache_key):

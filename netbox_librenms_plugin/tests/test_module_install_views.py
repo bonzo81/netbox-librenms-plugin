@@ -667,6 +667,41 @@ class TestUpdateModuleSerialView:
         assert response.status_code == 302
         assert "Missing or invalid module ID." in message_texts(request, "error")
 
+    @pytest.mark.parametrize(("other_serial", "refused"), [("S/N LEGACY-SN1", True), ("OTHER-SN2", False)])
+    def test_a_legacy_row_that_stores_the_rule_output_refuses_the_update(self, live_librenms, other_serial, refused):
+        """An earlier release stored "S/N S/N LEGACY-SN1" as its rule output "S/N LEGACY-SN1", which keys again."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device_with_module_bays(f"serial-legacy-holder-{refused}", ["Slot 1", "Slot 2"])
+        seed_mapping(device, "default", own=69)
+        module = install_module(device, "Slot 1", f"SERIAL-LEGACY-CARD-{refused}", serial="OLD-SN1")
+        other = install_module(device, "Slot 2", f"SERIAL-LEGACY-OTHER-{refused}", serial=other_serial)
+        view = UpdateModuleSerialView()
+        view._librenms_api = live_librenms.api
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N LEGACY-SN1")]
+        seed_inventory(view, device, rows, librenms_id=69)
+        _action, data = rendered_module_form(render_module_tab(device), "update-module-serial", 11)
+        request = make_request("post", data, user=make_superuser(), path="/modules/")
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        module.refresh_from_db()
+        other.refresh_from_db()
+        if refused:
+            assert message_texts(request, "error") == [
+                "Serial 'S/N S/N LEGACY-SN1' is already installed on this device. Nothing was changed."
+            ]
+            assert module.serial == "OLD-SN1"
+        else:
+            assert message_texts(request, "error") == []
+            assert module.serial == "S/N S/N LEGACY-SN1"
+        assert other.serial == other_serial
+
 
 class TestInventoryIgnoreRulesDuringCollection:
     """The branch list is the table's own: it honours the skip and transparent rules the table renders with."""
