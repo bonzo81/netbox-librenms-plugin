@@ -757,6 +757,7 @@ def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client,
 @pytest.mark.parametrize("destination", ["same-device", "cross-device", "occupied", "occupied-without-serial"])
 def test_move_claims_serials_only_when_ownership_changes_or_a_serial_is_removed(client, destination):
     from dcim.models import Manufacturer, Module, ModuleBay
+    from django.contrib.messages import get_messages
     from django.urls import reverse
 
     from netbox_librenms_plugin.models import NormalizationRule
@@ -797,6 +798,10 @@ def test_move_claims_serials_only_when_ownership_changes_or_a_serial_is_removed(
         if occupant:
             assert not Module.objects.filter(pk=occupant.pk).exists()
     else:
+        assert any(
+            f"(ID {rule.pk}) stores an invalid match_pattern: (." in str(message)
+            for message in get_messages(response.wsgi_request)
+        ), "the invalid serial rule did not cause the refusal"
         assert moving.device_id == source.pk
         assert moving.module_bay_id == source_bay_id
         if occupant:
