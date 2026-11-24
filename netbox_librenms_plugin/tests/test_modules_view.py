@@ -3967,13 +3967,25 @@ def test_the_ancestor_serial_guard_compares_under_the_target_module_rules():
         "entPhysicalSerialNum": "TAG ABC123",
         "entPhysicalContainedIn": 1,
     }
+    # Only the member's own maker strips "MEM ", so this pair is one part only under the member's rules.
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=member.device_type.manufacturer, match_pattern=r"^MEM (.+)$", replacement=r"\1"
+    )
+    member_card = {**card, "entPhysicalIndex": 3, "entPhysicalSerialNum": "XYZ789"}
+    member_child = {**child, "entPhysicalIndex": 4, "entPhysicalSerialNum": "MEM XYZ789", "entPhysicalContainedIn": 3}
+    items = [card, child, member_card, member_child]
+    index_map = {item["entPhysicalIndex"]: item for item in items}
     policy = load_inventory_policy(member.pk)
 
-    context, _ = BaseModuleTableView._build_inventory_ignore_contexts(policy.page_device, [card, child], [], policy)
-    action = _check_ignore_rules(child, card, context["ignore_rules"], {1: card, 2: child}, context["device_identity"])
+    context, _ = BaseModuleTableView._build_inventory_ignore_contexts(policy.page_device, items, [], policy)
+    actions = [
+        _check_ignore_rules(item, parent, context["ignore_rules"], index_map, context["device_identity"])
+        for item, parent in ((child, card), (member_child, member_card))
+    ]
 
     assert policy.chassis_serial_context().manufacturer_id == vendor.pk
-    assert action is None
+    assert member.device_type.manufacturer_id != vendor.pk
+    assert actions == [None, "skip"]
 
 
 class TestCheckIgnoreRules:
