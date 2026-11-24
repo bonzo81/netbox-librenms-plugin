@@ -470,9 +470,12 @@ def test_the_preview_offers_replace_only_when_the_serial_holder_does_not_own_the
     preview = ui.get(rendered_preview_url(render(ui, device), REAL_NIM), HTTP_HX_REQUEST="true")
 
     assert preview.status_code == 200, preview.content
-    forms = _replace_forms(preview.content.decode())
+    html = preview.content.decode()
+    forms = _replace_forms(html)
     if owns_destination:
         assert forms == []
+        # Move would put the holder into a bay of its own subtree.
+        assert [form for form in module_tab_forms(html).forms if "move-module" in form["action"]] == []
     else:
         assert [form["fields"].get("conflict_module_id") for form in forms] == [str(holder.pk)]
 
@@ -601,6 +604,47 @@ def test_the_replace_grant_tokens_are_keyed_by_the_server_secret(client, setting
 
     for name in ("serial_holder_token", "removal_trees_token"):
         assert targets[0][name] != targets[1][name], name
+
+
+@pytest.mark.parametrize("depth", ["direct", "deep"])
+def test_move_refuses_a_module_into_a_bay_of_its_own_subtree(ui, c8300, depth):
+    """The holder owns the destination bay directly or through a child; the move refuses before any write."""
+    from dcim.models import Module, ModuleBay
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_INTO_OWN_SUBTREE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder = _tagged_holder(device, entities, owns_destination=False)
+    owner = holder
+    if depth == "deep":
+        ModuleBay.objects.create(device=device, module=holder, name="Mid bay")
+        owner = install_in_bay(device, "Mid bay", "MID-CARD", serial="MID-1", parent_module=holder)
+    _own_the_nim_bay(device, entities, owner)
+    installed = install_module(
+        device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD"
+    )
+    before = written_state(device)
+
+    response = post(
+        ui,
+        reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk]),
+        {
+            "server_key": SERVER_KEY,
+            "selected_device_id": str(device.pk),
+            "module_id": str(installed.pk),
+            "conflict_module_id": str(holder.pk),
+            "target_bay_id": str(installed.module_bay_id),
+        },
+    )
+
+    assert MOVE_INTO_OWN_SUBTREE in messages_of(response)
+    assert written_state(device) == before
+    assert Module.objects.filter(pk=installed.pk).exists()
 
 
 @pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])

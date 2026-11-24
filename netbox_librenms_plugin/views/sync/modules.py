@@ -450,6 +450,7 @@ HOLDER_OWNS_BAY = (
 REMOVAL_OUTSIDE_DELETE_SCOPE = (
     "A module that Replace would also delete is outside your delete permission. Nothing was replaced."
 )
+MOVE_INTO_OWN_SUBTREE = "The destination bay belongs to the module or to a module below it. Nothing was moved."
 
 
 class _SerialConflictUnavailable(Exception):
@@ -2906,6 +2907,10 @@ class ModuleMismatchPreviewView(
         elif elsewhere.kind is ResolutionKind.AMBIGUOUS:
             serial_conflict_ambiguous = True
 
+        # Replace would delete the bay, and Move would put the holder into a bay of its own subtree.
+        serial_conflict_owns_bay = serial_conflict is not None and _tree_holds(
+            module_subtree_serials(serial_conflict.pk), installed_module.pk
+        )
         return render(
             request,
             "netbox_librenms_plugin/htmx/module_mismatch_modal.html",
@@ -2922,9 +2927,9 @@ class ModuleMismatchPreviewView(
                 "serial_mismatch": serial_mismatch,
                 "serial_conflict": serial_conflict,
                 "can_move_from": serial_conflict is not None
+                and not serial_conflict_owns_bay
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
-                "serial_conflict_owns_bay": serial_conflict is not None
-                and _tree_holds(module_subtree_serials(serial_conflict.pk), installed_module.pk),
+                "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,
@@ -3370,6 +3375,10 @@ class MoveModuleView(
                 module.serial, serial_rules.for_module_target(target_device)
             ):
                 raise _ModuleActionRefused("The module serial has no identity at the destination.")
+            if target_bay.module_id is not None and _tree_holds(
+                module_subtree_serials(module.pk), target_bay.module_id
+            ):
+                raise _ModuleActionRefused(MOVE_INTO_OWN_SUBTREE)
             # Remove whatever is currently in the target bay (if provided and different).
             # Scoped by "delete": the device and bay filters prove where the row sits, not that
             # the grant covers it, and the gate asked has_perm without an instance.
