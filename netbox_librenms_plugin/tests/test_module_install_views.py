@@ -519,7 +519,7 @@ def test_batch_install_checks_serial_length_only_for_creation(live_librenms, act
         rows.append(_item(11, child_type.model, "Child Bay", parent=10))
         _post_branch(device, rows, 10, 74, live_librenms)
     else:
-        _post_selected(device, rows, [10], 74, live_librenms)
+        request = _post_selected(device, rows, [10], 74, live_librenms)
 
     interface.refresh_from_db()
     if occupant:
@@ -528,6 +528,11 @@ def test_batch_install_checks_serial_length_only_for_creation(live_librenms, act
         assert occupant.module_bay.name == "Slot 1"
         assert read_mapping(interface).own_id("default") == 7401
     else:
+        max_length = Module._meta.get_field("serial").max_length
+        assert message_texts(request, "warning") == [
+            f"Failed 1: Slot 1: serial: The LibreNMS serial has {len(serial)} characters; "
+            f"the field holds at most {max_length}."
+        ]
         assert not Module.objects.filter(device=device).exists()
         assert read_mapping(interface).own_id("default") is None
 
