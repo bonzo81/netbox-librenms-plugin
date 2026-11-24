@@ -1033,6 +1033,52 @@ class TestVirtualChassisInventory:
         assert (holder.serial, other.serial) == ("L" * 48, "LONG-B")
         assert rendered["member_id_1"] == ""
 
+    def test_a_holder_row_whose_post_rewrites_the_stored_text_selects_no_member(
+        self, logged_in_client, librenms_server
+    ):
+        """The rules match "S/N KEEP-A" to the stored "KEEP-A", so a preselected row would rewrite the serial of A."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _vc, (holder, other) = make_virtual_chassis_members("inventory-rewrite-holder", count=2)
+        holder.serial = "KEEP-A"
+        holder.save()
+        seed_mapping(holder, SERVER_KEY, own=6657)
+        inventory = _stack_inventory({"entPhysicalSerialNum": "S/N KEEP-A"}, {"entPhysicalSerialNum": "KEEP-B"})
+        _register_device(librenms_server, 6657, holder.name, inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(holder))
+
+        items = response.context["vc_inventory_serials"]
+        assert [(item["serial"], item["assigned_member"]) for item in items] == [
+            ("S/N KEEP-A", holder),
+            ("KEEP-B", None),
+        ]
+        rendered = self._post_vc_serial_form(logged_in_client, response.content.decode(), holder, "KEEP-B", other)
+        other.refresh_from_db()
+        holder.refresh_from_db()
+        assert (holder.serial, other.serial) == ("KEEP-A", "KEEP-B")
+        assert rendered["member_id_1"] == ""
+
+    def test_a_holder_row_that_posts_no_change_selects_the_holder(self, logged_in_client, librenms_server):
+        """A holder that stores the LibreNMS text already is preselected, and posting the form keeps it."""
+        _vc, (holder, other) = make_virtual_chassis_members("inventory-noop-holder", count=2)
+        holder.serial = "NOOP-A"
+        holder.save()
+        seed_mapping(holder, SERVER_KEY, own=6658)
+        inventory = _stack_inventory({"entPhysicalSerialNum": "NOOP-A"}, {"entPhysicalSerialNum": "NOOP-B"})
+        _register_device(librenms_server, 6658, holder.name, inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(holder))
+
+        rendered = self._post_vc_serial_form(logged_in_client, response.content.decode(), holder, "NOOP-B", other)
+        other.refresh_from_db()
+        holder.refresh_from_db()
+        assert (holder.serial, other.serial) == ("NOOP-A", "NOOP-B")
+        assert rendered["member_id_1"] == str(holder.pk)
+
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""
         _vc, members = make_virtual_chassis_members("inventory-form-context", count=2)

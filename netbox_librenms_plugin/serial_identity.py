@@ -316,6 +316,14 @@ def stored_form_differs(stored, incoming, context: SerialContext) -> bool:
     return compare(stored, incoming, context) is Comparison.SAME and _stored_text(stored) != display(incoming)
 
 
+def keeps_stored_serial(stored, incoming, model) -> bool:
+    """Return whether a serial writer leaves *stored* as it is for *incoming*: it stores that text already."""
+    try:
+        return _stored_text(stored) == stored_form(incoming, model)
+    except ValidationError:
+        return False
+
+
 def display(value) -> str:
     """Return the source text of a serial for a page: trimmed, and "" for a placeholder."""
     text = _text(value)
