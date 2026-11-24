@@ -30,10 +30,17 @@ def first_row_lock(statements, model, pk):
     """Return the index of the first captured SQL statement that locks the *model* row *pk*, at any lock strength."""
     table = model._meta.db_table
     match = rf"(?:= {pk}\b|IN \([^)]*\b{pk}\b)"
-    # A single-table statement may name the key without the table, as lock_row() does.
-    target = re.compile(rf'FROM "{table}" (?:.*"{table}"\."id"|WHERE "?id"?) {match}')
+    alias = re.compile(rf'FROM "{table}" (?:AS )?(?!(?:WHERE|JOIN|INNER|LEFT|ORDER|LIMIT|FOR)\b)("?)(\w+)\1')
     row_lock = re.compile(r"\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b")
-    return next(i for i, sql in enumerate(statements) if target.search(sql) and row_lock.search(sql))
+
+    def locks_the_row(sql):
+        aliases = [re.escape(name) for _quote, name in alias.findall(sql)]
+        qualifier = "|".join([f'"{table}"', *(rf'(?<![\w"]){name}\b|"{name}"' for name in aliases)])
+        # A single-table statement may name the key without the table, as lock_row() does.
+        target = rf'FROM "{table}" (?:.*(?:{qualifier})\."id"|WHERE "?id"?) {match}'
+        return re.search(target, sql) is not None and row_lock.search(sql) is not None
+
+    return next(i for i, sql in enumerate(statements) if locks_the_row(sql))
 
 
 def lock_row(other, model, pk):
