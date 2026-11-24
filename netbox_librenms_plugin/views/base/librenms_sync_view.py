@@ -1,5 +1,6 @@
 import dataclasses
 import re
+from collections import Counter
 from dataclasses import asdict
 from functools import cached_property
 
@@ -844,6 +845,9 @@ class BaseLibreNMSSyncView(
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
+                    'selected_member': the assigned member when the user may change it and no other row
+                        has it too, else None
+                    'shared_holder': whether another row has the same assigned member
                 }
             ]
 
@@ -857,6 +861,13 @@ class BaseLibreNMSSyncView(
 
         # Each member's own Device serial context admits and compares: a masterless member keeps its own rules.
         members_by_serial = MemberSerials(vc_members, self._serial_context)
+
+        # The form posts every preselected member, and the writer refuses a member outside the change scope.
+        changeable = set(
+            self.restricted_queryset(type(obj), "change")
+            .filter(virtual_chassis_id=obj.virtual_chassis_id)
+            .values_list("pk", flat=True)
+        )
 
         result = []
         # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
@@ -876,6 +887,14 @@ class BaseLibreNMSSyncView(
                     "assigned_member": assigned_member,
                 }
             )
+
+        # Two rows that preselect one member make the writer refuse the whole post, so neither row preselects it.
+        holder_rows = Counter(item["assigned_member"].pk for item in result if item["assigned_member"] is not None)
+        for item in result:
+            holder = item["assigned_member"]
+            item["shared_holder"] = holder is not None and holder_rows[holder.pk] > 1
+            preselect = holder is not None and holder.pk in changeable and not item["shared_holder"]
+            item["selected_member"] = holder if preselect else None
 
         return result
 

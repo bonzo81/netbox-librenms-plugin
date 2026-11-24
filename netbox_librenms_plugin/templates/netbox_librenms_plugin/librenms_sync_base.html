@@ -1211,11 +1211,14 @@ that may well be correct.
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
                                         {% for member in object.virtual_chassis.members.all %}
-                                        <option value="{{ member.pk }}" {% if item.assigned_member and item.assigned_member.pk == member.pk %}selected{% endif %}>
+                                        <option value="{{ member.pk }}" {% if item.selected_member and item.selected_member.pk == member.pk %}selected{% endif %}>
                                             {{ member.name }}
                                         </option>
                                         {% endfor %}
                                     </select>
+                                    {% if item.shared_holder %}
+                                        <div class="text-muted small mt-1">Another row matches this member too. Select the member on one row only.</div>
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}

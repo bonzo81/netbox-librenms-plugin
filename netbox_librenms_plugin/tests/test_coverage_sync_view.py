@@ -100,6 +100,9 @@ def _device_view(server_key=SERVER_KEY):
 
     view = DeviceLibreNMSSyncView()
     view._librenms_api = LibreNMSAPI(server_key)
+    # The VC Serials dialog preselects only members in the change scope of the request user.
+    view.request = RequestFactory().get("/")
+    view.request.user = make_superuser("sync-view-superuser")
     return view
 
 
@@ -934,6 +937,74 @@ class TestVirtualChassisInventory:
         response = logged_in_client.get(_sync_url(owner))
         shown = {item["serial"]: item["assigned_member"] for item in response.context["vc_inventory_serials"]}
         assert shown == {"S/N OWNER-RAW": owner, "S/N MEMBER-RAW": member}
+
+    @staticmethod
+    def _post_vc_serial_form(client, html, page, serial, member):
+        """Post the rendered VC Serials form as a browser does, with *member* selected on the row of *serial*."""
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        (form,) = [form for form in module_tab_forms(html).forms if "assign-vc-serial" in form["action"]]
+        fields = dict(form["fields"])
+        (row,) = (
+            name.rsplit("_", 1)[1]
+            for name, value in fields.items()
+            if name.startswith("librenms_serial_") and value == serial
+        )
+        fields[f"member_id_{row}"] = str(member.pk)
+        client.post(reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": page.pk}), fields)
+        return form["fields"]
+
+    def test_the_dialog_preselects_only_a_member_that_the_user_may_change(self, client, librenms_server):
+        """The user may view both members but change only B, so the row of A shows A and selects nobody."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        _vc, (holder, page) = make_virtual_chassis_members("inventory-change-scope", count=2)
+        holder.serial = "SCOPE-A"
+        holder.save()
+        seed_mapping(page, SERVER_KEY, own=6653)
+        inventory = _stack_inventory({"entPhysicalSerialNum": "SCOPE-A"}, {"entPhysicalSerialNum": "SCOPE-B"})
+        _register_device(librenms_server, 6653, page.name, inventory=inventory)
+        user = make_user_with_perms("vc-serial-change-b", [("view", Device)])
+        client.force_login(grant(user, "change", Device, constraints={"pk": page.pk}))
+
+        response = client.get(_sync_url(page))
+
+        shown = [(item["serial"], item["assigned_member"]) for item in response.context["vc_inventory_serials"]]
+        assert shown == [("SCOPE-A", holder), ("SCOPE-B", None)]
+        rendered = self._post_vc_serial_form(client, response.content.decode(), page, "SCOPE-B", page)
+        page.refresh_from_db()
+        holder.refresh_from_db()
+        assert (holder.serial, page.serial) == ("SCOPE-A", "SCOPE-B")
+        assert rendered["member_id_1"] == ""
+
+    def test_two_rows_that_match_one_holder_select_no_member(self, logged_in_client, librenms_server):
+        """Two rows report the serial of A, so neither row selects A and the post of a third row succeeds."""
+        _vc, (holder, other) = make_virtual_chassis_members("inventory-shared-holder", count=2)
+        holder.serial = "SHARED-A"
+        holder.save()
+        seed_mapping(holder, SERVER_KEY, own=6654)
+        inventory = _stack_inventory(
+            {"entPhysicalSerialNum": "SHARED-A"},
+            {"entPhysicalSerialNum": "SHARED-A"},
+            {"entPhysicalSerialNum": "SHARED-B"},
+        )
+        _register_device(librenms_server, 6654, holder.name, inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(holder))
+
+        items = response.context["vc_inventory_serials"]
+        assert [(item["serial"], item["assigned_member"]) for item in items] == [
+            ("SHARED-A", holder),
+            ("SHARED-A", holder),
+            ("SHARED-B", None),
+        ]
+        rendered = self._post_vc_serial_form(logged_in_client, response.content.decode(), holder, "SHARED-B", other)
+        other.refresh_from_db()
+        assert other.serial == "SHARED-B"
+        assert (rendered["member_id_1"], rendered["member_id_2"]) == ("", "")
+        assert [bool(item.get("shared_holder")) for item in items] == [True, True, False]
 
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""
