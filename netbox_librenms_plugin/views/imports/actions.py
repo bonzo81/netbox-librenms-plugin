@@ -80,6 +80,7 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     is_sole_holder,
     lock_chassis_of,
+    locked_context,
     locked_device_type,
     retype_conflict,
     retype_lock,
@@ -3827,6 +3828,10 @@ class PromoteToHostView(
                 update_fields.append("device_type")
                 if err := _retype_refusal(existing_device, override_device_type, serial_rules, retyped):
                     return err
+                # The serial match authorized the promotion, so the new type must keep it.
+                serial_context = locked_context(existing_device, rules=serial_rules)
+                if compare(existing_device.serial, libre_device.get("serial"), serial_context) is not Comparison.SAME:
+                    return _htmx_error_response(_SERIAL_MATCH_LOST)
             if override_platform and existing_device.platform_id != override_platform.pk:
                 existing_device.platform = override_platform
                 update_fields.append("platform")

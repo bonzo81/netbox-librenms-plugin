@@ -6792,6 +6792,49 @@ class TestPromoteToHostViewPost:
         assert f"{existing_device.name}-twin".encode() not in response.content
         assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
 
+    @pytest.mark.parametrize("keeps_match", [False, True], ids=["other-maker", "same-maker"])
+    def test_a_type_override_promotes_only_when_the_new_type_keeps_the_serial_match(self, keeps_match):
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.views.imports.actions import _SERIAL_MATCH_LOST
+
+        tag = f"promote-retype-{'same' if keeps_match else 'other'}"
+        view = self._make_view()
+        existing_device = make_device(tag, serial="X-ABC123", librenms_cf={self.server_key: {"id": 10}})
+        maker = existing_device.device_type.manufacturer
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X-(.+)$", replacement=r"\1", manufacturer=maker
+        )
+        if not keeps_match:
+            maker = Manufacturer.objects.create(name=f"{tag} maker", slug=f"{tag}-maker")
+        new_type = DeviceType.objects.create(manufacturer=maker, model=f"{tag} type", slug=f"{tag}-type")
+        old_type_id = existing_device.device_type_id
+        self._register_host_device(17, f"{tag}-host", serial="ABC123")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "existing_device_id": str(existing_device.pk),
+                "override_device_type_id": str(new_type.pk),
+            },
+            user=self._device_writer(f"{tag}-user", (("view", DeviceType),)),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=17)
+
+        reloaded = Device.objects.get(pk=existing_device.pk)
+        if keeps_match:
+            assert "validationRefresh" in response.get("HX-Trigger", "")
+            assert reloaded.device_type_id == new_type.pk
+            assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 17, "oob": {"id": 10, "type": "oob"}}
+        else:
+            assert response["HX-Reswap"] == "none"
+            assert _SERIAL_MATCH_LOST.encode() in response.content
+            assert reloaded.device_type_id == old_type_id
+            assert stored_mapping_for_test(reloaded) == {self.server_key: {"id": 10}}
+
     def test_override_platform_manufacturer_mismatch_rejected(self):
         """An override platform whose manufacturer differs from the device type's is rejected (update_fields skips full_clean, so the cross-field invariant is enforced explicitly), and nothing is committed."""
         from dcim.models import Device, Manufacturer, Platform
