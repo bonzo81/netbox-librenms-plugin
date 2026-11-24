@@ -8105,9 +8105,13 @@ def test_vc_install_checks_conflicts_on_the_row_target(client, live_librenms, ta
     seed_inventory(DeviceModuleTableView(), target, inventory, librenms_id=9312)
     client.force_login(make_superuser("install-conflict-user"))
 
+    # The page is the other member, so a check on the page device looks on the wrong device.
     response = client.get(
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]),
-        {"tab": "modules", "server_key": "default"},
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": other.pk, "tab": "modules"},
+        ),
+        {"server_key": "default"},
     )
 
     assert response.status_code == 200
