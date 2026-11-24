@@ -2758,6 +2758,12 @@ def _tree_holds(tree, module_pk):
     return any(pk == module_pk for pk, _serial in tree)
 
 
+def _trees_in_delete_scope(deletable, trees):
+    """Return True when the delete-scoped queryset *deletable* holds every module of the ``(pk, serial)`` *trees*."""
+    pks = {pk for tree in trees for pk, _serial in tree}
+    return deletable.filter(pk__in=pks).count() == len(pks)
+
+
 def _hash_token(value):
     """Return a positive int that a grant signs for *value*, so the grant does not carry pks the viewer may not see."""
     payload = json.dumps(value, separators=(",", ":"))
@@ -2911,6 +2917,10 @@ class ModuleMismatchPreviewView(
         serial_conflict_owns_bay = serial_conflict is not None and _tree_holds(
             module_subtree_serials(serial_conflict.pk), installed_module.pk
         )
+        removal_roots = [installed_module.pk] if serial_conflict is None else [installed_module.pk, serial_conflict.pk]
+        replace_in_delete_scope = _trees_in_delete_scope(
+            self.restricted_queryset(Module, "delete"), [module_subtree_serials(root) for root in removal_roots]
+        )
         return render(
             request,
             "netbox_librenms_plugin/htmx/module_mismatch_modal.html",
@@ -2930,6 +2940,7 @@ class ModuleMismatchPreviewView(
                 and not serial_conflict_owns_bay
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
+                "replace_in_delete_scope": replace_in_delete_scope,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,
@@ -3180,8 +3191,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
                 _require_unchanged_module_subtrees(removals)
                 # The delete cascades through both trees, so the delete scope must cover every module in them.
-                removal_pks = {pk for tree in removals.values() for pk, _serial in tree}
-                if self.restricted_queryset(Module, "delete").filter(pk__in=removal_pks).count() != len(removal_pks):
+                if not _trees_in_delete_scope(self.restricted_queryset(Module, "delete"), removals.values()):
                     raise _ModuleActionRefused(REMOVAL_OUTSIDE_DELETE_SCOPE)
 
                 # Remove the serial-conflicting module from its current location.

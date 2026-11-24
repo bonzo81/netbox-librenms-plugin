@@ -559,8 +559,9 @@ def _previewed_replace_form(client, device):
 
 @pytest.mark.parametrize("parent", ["holder", "installed"])
 def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(client, c8300, parent):
-    """The grant may delete both removal roots, but not the child below one of them, so nothing is deleted."""
+    """A scope that covers both trees offers Replace; one that misses a child offers none and refuses the POST."""
     from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+    from users.models import ObjectPermission
 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
     from netbox_librenms_plugin.views.sync.modules import REMOVAL_OUTSIDE_DELETE_SCOPE
@@ -571,10 +572,16 @@ def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(c
     perms += [("add", Module), ("change", Module)]
     perms += [("add", Interface), ("change", Interface), ("delete", Interface)]
     user = make_user_with_perms("replace-delete-scope", perms)
-    user = grant(user, "delete", Module, constraints={"serial__in": ["OLD", _nim(entities)[1]]})
+    roots = ["OLD", _nim(entities)[1]]
+    user = grant(user, "delete", Module, constraints={"serial__in": [*roots, child.serial]}, name="scoped-delete")
     client.force_login(user)
     form = _previewed_replace_form(client, device)
     assert form[1]["conflict_module_id"] == str(holder.pk)
+    # The scope now misses the child below one of the removal roots.
+    ObjectPermission.objects.filter(name="scoped-delete").update(constraints={"serial__in": roots})
+    preview = client.get(rendered_preview_url(render(client, device), REAL_NIM), HTTP_HX_REQUEST="true")
+    assert preview.status_code == 200, preview.content
+    assert _replace_forms(preview.content.decode()) == []
     before = written_state(device)
 
     response = post(client, *form)
