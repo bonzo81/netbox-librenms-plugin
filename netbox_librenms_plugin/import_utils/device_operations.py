@@ -31,6 +31,7 @@ from ..serial_identity import (
     compare,
     display,
     is_identity,
+    keeps_stored_serial,
     other_device_holder,
     resolve_device,
     resolve_device_write,
@@ -1214,25 +1215,33 @@ def validate_device_for_import(  # noqa: C901
                     else:
                         existing_by_serial = discovery.object
                     if existing_by_serial:
+                        # Capture existing device's current LibreNMS linkage so the UI can
+                        # present accurate state (NOT just "not linked to LibreNMS").
+                        existing_link = _describe_existing_librenms_link(existing_by_serial, server_key)
+                        # Decide OOB-candidate / promote-to-host / link / hostname-differs role
+                        # for the incoming device (pure: reads state, doesn't mutate result).
+                        role = _detect_serial_match_role(
+                            existing_by_serial, existing_link, hostname, serial, libre_device, server_key
+                        )
+                        # Update & Link writes the serial, so a row that the write would duplicate blocks the match.
+                        if (
+                            role["serial_action"] == "hostname_differs"
+                            and not keeps_stored_serial(existing_by_serial.serial, incoming_serial, Device)
+                            and _write_conflict(existing_by_serial, incoming_serial, serial_rules)
+                        ):
+                            result["serial_duplicate"] = True
+                            result["issues"].append(
+                                f"Another NetBox device holds serial '{serial}' under the serial rules of the "
+                                "matched device; resolve the duplicate serial before importing."
+                            )
+                            existing_by_serial = None
+                    if existing_by_serial:
                         logger.info(f"Found existing device by serial: {existing_by_serial.name} (serial={serial})")
                         result["existing_device"] = existing_by_serial
                         result["existing_match_type"] = "serial"
                         result["can_import"] = False
-
-                        # Capture existing device's current LibreNMS linkage so the UI can
-                        # present accurate state (NOT just "not linked to LibreNMS").
-                        existing_link = _describe_existing_librenms_link(existing_by_serial, server_key)
                         result["existing_librenms_link"] = existing_link
-
-                        # Decide OOB-candidate / promote-to-host / link / hostname-differs role
-                        # for the incoming device (pure: reads state, doesn't mutate result),
-                        # then apply the decision.
-                        apply_oob_detection_result(
-                            result,
-                            **_detect_serial_match_role(
-                                existing_by_serial, existing_link, hostname, serial, libre_device, server_key
-                            ),
-                        )
+                        apply_oob_detection_result(result, **role)
 
             # Refresh local variable to reflect any VM-mode adjustments made during detection
             # (e.g. existing VM found by hostname sets result["import_as_vm"] = True).

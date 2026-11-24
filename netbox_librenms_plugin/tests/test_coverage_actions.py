@@ -4232,6 +4232,50 @@ class TestDeviceConflictActionBranches:
         target.refresh_from_db()
         assert stored_mapping_for_test(target) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("with_peer", [True, False], ids=["peer", "no-peer"])
+    def test_a_serial_match_offers_update_and_link_only_when_the_serial_write_has_no_peer(self, client, with_peer):
+        """The peer's ``XABC123`` keys to the incoming ``ABC123`` only under the target's rule, so the write refuses it."""
+        from dcim.models import Device, DeviceType, Manufacturer
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        tag = f"branches-write-peer-{'peer' if with_peer else 'none'}"
+        target = make_device(tag, serial="XABC123")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=target.device_type.manufacturer
+        )
+        if with_peer:
+            peer_maker = Manufacturer.objects.create(name=f"{tag} peer maker", slug=f"{tag}-peer-maker")
+            peer_type = DeviceType.objects.create(manufacturer=peer_maker, model=f"{tag} peer", slug=f"{tag}-peer")
+            peer = make_device(f"{tag}-peer", serial="XABC123")
+            Device.objects.filter(pk=peer.pk).update(device_type=peer_type)
+        self._register_device(42, f"{tag}-source", serial="ABC123")
+        client.force_login(make_superuser(f"{tag}-user"))
+        server = {"server_key": self.server_key}
+
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
+            server,
+            HTTP_HX_REQUEST="true",
+        )
+
+        validation = details.context["validation"]
+        blocked = [issue for issue in validation["issues"] if "ABC123" in issue and "duplicate serial" in issue]
+        assert (b'name="action" value="update"' in details.content) is (not with_peer)
+        assert bool(blocked) is with_peer
+        assert bool(validation.get("serial_duplicate")) is with_peer
+        if not with_peer:
+            assert (validation["existing_device"], validation["serial_action"]) == (target, "hostname_differs")
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
+                {**server, "action": "update", "existing_device_id": target.pk},
+                HTTP_HX_REQUEST="true",
+            )
+            assert response.headers.get("HX-Trigger") == "closeModal"
+            target.refresh_from_db()
+            assert (target.serial, stored_mapping_for_test(target)) == ("ABC123", {self.server_key: 42})
+
     def test_a_hostname_link_without_an_incoming_serial_reads_no_serial_rule(self, client):
         from django.urls import reverse
 

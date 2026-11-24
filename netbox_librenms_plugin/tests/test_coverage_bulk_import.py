@@ -734,7 +734,8 @@ class TestProcessDeviceFilters:
             for query in captured.captured_queries
             if 'BTRIM("dcim_device"."serial"' in query["sql"] and "LIKE ANY" in query["sql"]
         ]
-        assert len(candidate_queries) == 1
+        # The rewritten holder stores another form under another name, so its Update & Link offer runs the write lookup.
+        assert len(candidate_queries) == (2 if rewrite else 1)
         assert all(row["_validation"]["existing_device"] is None for row in validated[:-1])
         assert validated[-1]["_validation"]["existing_device"].pk == holder.pk
         assert all(count <= 1 for count in visits.values()), dict(visits)
