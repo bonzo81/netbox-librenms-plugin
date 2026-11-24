@@ -1045,9 +1045,14 @@ def relocation_conflict(module, target_device, moving, *, rules: SerialRules, sc
     if not serials:
         return False
     found = resolve_modules(
-        serials, rules=rules, device_ids=[target_device.pk], exclude_pks=[pk for pk, _serial in moving]
+        serials,
+        rules=rules,
+        device_ids=[target_device.pk],
+        exclude_pks=[pk for pk, _serial in moving],
+        writer=target,
     )
-    return any(resolution.kind in REFUSING for resolution in found.values())
+    # A legacy row that stores the key of a moved serial can be the same part, so it refuses too.
+    return any(resolution.kind in REFUSING or resolution.uncertain for resolution in found.values())
 
 
 def report_rows(rules: SerialRules | None = None):

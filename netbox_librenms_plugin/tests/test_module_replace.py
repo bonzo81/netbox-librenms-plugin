@@ -687,6 +687,45 @@ class TestMoveModuleView:
             occupant.refresh_from_db()
             assert occupant.module_bay == target_bay
 
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    @pytest.mark.parametrize(("held", "refused"), [("S/N ABC123", True), ("OTHER123", False)])
+    def test_a_move_refuses_a_destination_row_that_stores_the_rule_output(self, client, held, refused):
+        """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123", which keys again."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import RELOCATION_HELD
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        tag = f"move-legacy-{refused}"
+        source_device, target_device = make_device(f"{tag}-source"), make_device(f"{tag}-target")
+        module_type = make_module_type(f"{tag}-card".upper())
+        moving = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "S/N S/N ABC123")
+        holder = _module(target_device, make_module_bay(target_device, "Held Bay"), module_type, held)
+        target_bay = make_module_bay(target_device, "Target Bay")
+        client.force_login(make_superuser(f"{tag}-user"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}),
+            {
+                "conflict_module_id": str(moving.pk),
+                "target_bay_id": str(target_bay.pk),
+                "selected_device_id": str(target_device.pk),
+            },
+        )
+
+        assert response.status_code == 302
+        moving.refresh_from_db()
+        if refused:
+            assert message_texts(response.wsgi_request) == [f"Move failed: {RELOCATION_HELD}"]
+            assert moving.device == source_device
+        else:
+            assert (moving.device, moving.module_bay) == (target_device, target_bay)
+        holder.refresh_from_db()
+        assert holder.serial == held
+
     def test_real_permission_gate_rejects_a_user_without_change_scope(self):
         from dcim.models import Device
 
