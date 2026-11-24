@@ -569,10 +569,12 @@ def test_template_rechecks_instances_after_its_save_before_materialization(
     from threading import Event
 
     from dcim.models import Device, Module, ModuleBay, ModuleBayTemplate
+    from django.contrib.messages import get_messages
     from django.db import close_old_connections
     from django.test import Client
     from django.urls import reverse
 
+    from netbox_librenms_plugin.module_writes import _CHANGED
     from netbox_librenms_plugin.tests.conftest import (
         bounded_executor,
         configure_default_librenms_server,
@@ -587,13 +589,17 @@ def test_template_rechecks_instances_after_its_save_before_materialization(
     before_save, release = Event(), Event()
     save_template = ModuleBayTemplate.save
     bay_name = "Postsave Membership Bay"
+    saved = []
 
     def pause_before_save(template, *args, **kwargs):
         # Inside save(), before the INSERT: a membership check that runs before save() misses the newcomer.
         if template.name == bay_name:
             before_save.set()
             assert release.wait(timeout=15)
-        return save_template(template, *args, **kwargs)
+        result = save_template(template, *args, **kwargs)
+        if template.name == bay_name:
+            saved.append(template.pk)
+        return result
 
     monkeypatch.setattr(ModuleBayTemplate, "save", pause_before_save)
 
@@ -606,7 +612,7 @@ def test_template_rechecks_instances_after_its_save_before_materialization(
                 reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": device.pk}),
                 {"server_key": "default", "target_kind": target_kind, "target_pk": target_pk, "name": bay_name},
             )
-            return response.status_code
+            return response.status_code, [str(message) for message in get_messages(response.wsgi_request)]
         finally:
             connection.close()
 
@@ -629,7 +635,9 @@ def test_template_rechecks_instances_after_its_save_before_materialization(
                 )
         finally:
             release.set()
-        assert pending.result(timeout=20) == 302
+        status, messages = pending.result(timeout=20)
+    # The INSERT returned, so the refusal comes from the recheck after save, not from the save itself.
+    assert (status, len(saved), messages) == (302, 1, [f"Failed to add bay template: {_CHANGED}"])
     assert not ModuleBayTemplate.objects.filter(name=bay_name).exists(), (
         "membership expansion must roll back the template"
     )
