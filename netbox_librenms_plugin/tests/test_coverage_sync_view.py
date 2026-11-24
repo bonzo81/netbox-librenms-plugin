@@ -1070,6 +1070,30 @@ class TestVirtualChassisInventory:
         assert (holder.serial, other.serial) == ("L" * 48, "LONG-B")
         assert rendered["member_id_1"] == ""
 
+    @pytest.mark.parametrize(("serial", "fits"), [("N" * 50, True), ("N" * 51, False)])
+    def test_a_row_whose_serial_does_not_fit_shows_the_refusal_and_no_member_selector(
+        self, logged_in_client, librenms_server, serial, fits
+    ):
+        """The field holds 50 characters; a selected member for a longer serial rolls back the other rows."""
+        from django.utils.html import escape
+
+        _vc, (page, other) = make_virtual_chassis_members(f"inventory-fit-{fits}", count=2)
+        device_id = 6663 if fits else 6664
+        seed_mapping(page, SERVER_KEY, own=device_id)
+        inventory = _stack_inventory({"entPhysicalSerialNum": serial}, {"entPhysicalSerialNum": "FIT-B"})
+        _register_device(librenms_server, device_id, page.name, inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(page))
+
+        html = response.content.decode()
+        assert f"<code>{serial}</code>" in html
+        assert ('<select name="member_id_1"' in html) is fits
+        reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+        assert (escape(reason) in html) is (not fits)
+        rendered = self._post_vc_serial_form(logged_in_client, html, page, "FIT-B", other)
+        other.refresh_from_db()
+        assert (rendered["member_id_1"], other.serial) == ("", "FIT-B")
+
     def test_a_holder_row_whose_post_rewrites_the_stored_text_selects_no_member(
         self, logged_in_client, librenms_server
     ):

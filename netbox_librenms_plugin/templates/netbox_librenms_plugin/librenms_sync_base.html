@@ -1210,6 +1210,11 @@ that may well be correct.
                                 </td>
                                 <td>
                                     <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
+                                    {% if item.fit_refusal %}
+                                    {# The writer reads rows until the first missing member field, so the row posts an empty one. #}
+                                    <input type="hidden" name="member_id_{{ forloop.counter }}" value="">
+                                    <span class="text-muted small" data-serial-fit-refusal>{{ item.fit_refusal }}</span>
+                                    {% else %}
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
                                         {% for member in object.virtual_chassis.members.all %}
@@ -1218,6 +1223,7 @@ that may well be correct.
                                         </option>
                                         {% endfor %}
                                     </select>
+                                    {% endif %}
                                     {% if item.shared_holder %}
                                         <div class="text-muted small mt-1">Another row matches this member too. Select the member on one row only.</div>
                                     {% endif %}

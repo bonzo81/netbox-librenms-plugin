@@ -855,6 +855,7 @@ class BaseLibreNMSSyncView(
                     'selected_member': the assigned member when the user may change it, no other row
                         has it too and the writer can store the serial, else None
                     'shared_holder': whether another row has the same assigned member
+                    'fit_refusal': why the writer cannot store the serial, or ""
                 }
             ]
 
@@ -900,6 +901,8 @@ class BaseLibreNMSSyncView(
         for item in result:
             holder = item["assigned_member"]
             item["shared_holder"] = holder is not None and holder_rows[holder.pk] > 1
+            # A row that selects a member for a serial that does not fit makes the writer roll back the whole post.
+            item["fit_refusal"] = stored_form_refusal(item["librenms_serial"], type(obj))
             # A preselected row must post no change: any write it makes can refuse and roll back the other rows.
             preselect = (
                 holder is not None
