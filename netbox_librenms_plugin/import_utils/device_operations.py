@@ -1438,7 +1438,8 @@ def validate_device_for_import(  # noqa: C901
                 logger.exception("merge-candidate detection failed")
 
             # Check by primary IP (weaker match, IP could be reassigned).
-            if not result["existing_device"]:
+            # A serial match that a duplicate serial refused ends the lookup: the issue blocks the row.
+            if not result["existing_device"] and not result["serial_duplicate"]:
                 primary_ip = libre_device.get("ip")
                 if primary_ip:
                     # Shared resolver: scans every net_host row across the interface-assignment and

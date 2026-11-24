@@ -4303,6 +4303,54 @@ class TestDeviceConflictActionBranches:
             target.refresh_from_db()
             assert (target.serial, stored_mapping_for_test(target)) == ("ABC123", {self.server_key: 42})
 
+    @pytest.mark.parametrize("shape", ["write-peer", "duplicate"])
+    def test_a_refused_serial_match_binds_no_vm_by_management_ip(self, client, shape):
+        from dcim.models import Device, DeviceType, Manufacturer
+        from django.urls import reverse
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_ip, make_vm
+
+        tag = f"branches-refused-serial-vm-{shape}"
+        target = make_device(tag, serial="XABC123" if shape == "write-peer" else "ABC123")
+        if shape == "write-peer":
+            NormalizationRule.objects.create(
+                scope="serial",
+                match_pattern=r"^X(.+)$",
+                replacement=r"\1",
+                manufacturer=target.device_type.manufacturer,
+            )
+        peer_maker = Manufacturer.objects.create(name=f"{tag} peer maker", slug=f"{tag}-peer-maker")
+        peer_type = DeviceType.objects.create(manufacturer=peer_maker, model=f"{tag} peer", slug=f"{tag}-peer")
+        peer = make_device(f"{tag}-peer", serial=target.serial)
+        Device.objects.filter(pk=peer.pk).update(device_type=peer_type)
+        vm = make_vm(f"{tag}-vm")
+        make_ip("198.18.30.5/24", assigned_object=VMInterface.objects.create(virtual_machine=vm, name="eth0"))
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname=f"{tag}-source",
+            hardware="Branches unmatched chassis",
+            os="",
+            serial="ABC123",
+            ip="198.18.30.5",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        client.force_login(make_superuser(f"{tag}-user"))
+
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
+            {"server_key": self.server_key},
+            HTTP_HX_REQUEST="true",
+        )
+
+        validation = details.context["validation"]
+        assert (validation["existing_device"], validation["serial_duplicate"]) == (None, True)
+        assert validation["existing_match_type"] != "primary_ip"
+        assert any("ABC123" in issue and "duplicate serial" in issue for issue in validation["issues"])
+        assert b'name="action" value="update"' not in details.content
+        assert vm.name.encode() not in details.content
+
     def test_a_hostname_link_without_an_incoming_serial_reads_no_serial_rule(self, client):
         from django.urls import reverse
 
