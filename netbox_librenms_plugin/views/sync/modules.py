@@ -2759,6 +2759,15 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
+def _legacy_holder_beside(target_device, incoming, serial_context, *, rules, exclude_pks) -> bool:
+    """Return whether a Module on *target_device*, apart from *exclude_pks*, stores the writer's key of *incoming*."""
+    # Such a legacy row can be the same part, so a write of *incoming* on the device refuses beside it.
+    held = resolve_module(
+        incoming, rules=rules, device_ids=[target_device.pk], exclude_pks=exclude_pks, writer=serial_context
+    )
+    return bool(held.uncertain)
+
+
 def _resolve_replacement_holder(incoming, serial_context, *, rules, exclude_pk):
     if not is_identity(incoming, serial_context):
         return Resolution(ResolutionKind.ABSENT)
@@ -2937,6 +2946,14 @@ class ModuleMismatchPreviewView(
         # Move deletes the installed tree first; Replace deletes it and the holder's tree.
         move_removal = _removal_note(self, [installed_tree])
         replace_removal = _removal_note(self, [installed_tree, *holder_trees])
+        # The serial update and Replace refuse beside a legacy row on the device; each excludes what it removes.
+        legacy_update = _legacy_holder_beside(
+            target_device, incoming, serial_context, rules=serial_rules, exclude_pks=[installed_module.pk]
+        )
+        replace_removes = [pk for tree in [installed_tree, *holder_trees] for pk, _serial in tree]
+        legacy_replace = _legacy_holder_beside(
+            target_device, incoming, serial_context, rules=serial_rules, exclude_pks=replace_removes
+        )
         return render(
             request,
             "netbox_librenms_plugin/htmx/module_mismatch_modal.html",
@@ -2953,6 +2970,8 @@ class ModuleMismatchPreviewView(
                 "serial_mismatch": serial_mismatch,
                 # The serial update and Replace store the LibreNMS text, so a serial that does not fit offers neither.
                 "serial_fit_refusal": stored_form_refusal(incoming, Module),
+                "legacy_update": legacy_update,
+                "legacy_replace": legacy_replace,
                 "serial_conflict": serial_conflict,
                 # The Move POST refuses every move below NetBox 4.7.
                 "can_move_from": netbox_relocates_module_subtree()
@@ -3222,14 +3241,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # The delete cascades through both trees, so the delete scope must cover every module in them.
                 if not all_trees_in_scope(self.restricted_queryset(Module, "delete"), removals.values()):
                     raise _ModuleActionRefused(REMOVAL_OUTSIDE_DELETE_SCOPE)
-                # A legacy row on the target that stores the key of the incoming serial can be the same part.
-                if resolve_module(
+                if _legacy_holder_beside(
+                    target_device,
                     incoming,
+                    serial_context,
                     rules=serial_rules,
-                    device_ids=[target_device.pk],
                     exclude_pks=[pk for subtree in removals.values() for pk, _serial in subtree],
-                    writer=serial_context,
-                ).uncertain:
+                ):
                     raise _ModuleActionRefused(
                         f"Serial '{serial}' is already installed on this device. Nothing was replaced."
                     )

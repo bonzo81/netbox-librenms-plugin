@@ -727,6 +727,8 @@ class TestUpdateModuleSerialView:
     @pytest.mark.parametrize(("other_serial", "refused"), [("S/N LEGACY-SN1", True), ("OTHER-SN2", False)])
     def test_a_legacy_row_that_stores_the_rule_output_refuses_the_update(self, live_librenms, other_serial, refused):
         """An earlier release stored "S/N S/N LEGACY-SN1" as its rule output "S/N LEGACY-SN1", which keys again."""
+        from dcim.models import Module
+
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
@@ -736,12 +738,14 @@ class TestUpdateModuleSerialView:
         device = make_device_with_module_bays(f"serial-legacy-holder-{refused}", ["Slot 1", "Slot 2"])
         seed_mapping(device, "default", own=69)
         module = install_module(device, "Slot 1", f"SERIAL-LEGACY-CARD-{refused}", serial="OLD-SN1")
-        other = install_module(device, "Slot 2", f"SERIAL-LEGACY-OTHER-{refused}", serial=other_serial)
+        other = install_module(device, "Slot 2", f"SERIAL-LEGACY-OTHER-{refused}", serial="PRE-RENDER-SN")
         view = UpdateModuleSerialView()
         view._librenms_api = live_librenms.api
         rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N LEGACY-SN1")]
         seed_inventory(view, device, rows, librenms_id=69)
         _action, data = rendered_module_form(render_module_tab(device), "update-module-serial", 11)
+        # The table offers no update beside the legacy row, so its serial lands after the render.
+        Module.objects.filter(pk=other.pk).update(serial=other_serial)
         request = make_request("post", data, user=make_superuser(), path="/modules/")
 
         response = view_post(view, request, pk=device.pk)
@@ -826,3 +830,28 @@ class TestInventoryIgnoreRulesDuringCollection:
         self._rule("root-skip", "IDPROM", "skip")
 
         assert self._rows(rows, "branch-skip-root") == {}
+
+
+@pytest.mark.parametrize(("held", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
+def test_an_occupied_bay_offers_no_serial_update_beside_a_legacy_row(live_librenms, held, offered):
+    """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123"; the update refuses beside it."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    device = make_device_with_module_bays(f"update-legacy-{offered}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=78)
+    module = install_module(device, "Slot 1", f"UPDATE-LEGACY-CARD-{offered}", serial="OLD-SN1")
+    install_module(device, "Slot 2", f"UPDATE-LEGACY-HOLDER-{offered}", serial=held)
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=78)
+
+    html = render_module_tab(device)
+
+    update_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(update_forms) == (1 if offered else 0)

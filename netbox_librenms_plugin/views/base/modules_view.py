@@ -4675,6 +4675,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             rows.append(row)
         return rows
 
+    @staticmethod
+    def _withdraw_held_writes(row, found, resolution) -> bool:
+        """
+        Withdraw the serial writes of *row* that a holder on its target device refuses.
+
+        Returns:
+            bool: Whether the install needs a read scoped to the target device, because this read stopped early.
+
+        """
+        device_id = row.get("selected_device_id")
+        # The serial update refuses beside a legacy row on its device, as the install does.
+        if row.get("can_update_serial") and any(module.device_id == device_id for module in found.uncertain):
+            row["can_update_serial"] = False
+        if not row.get("can_install") or device_id is None:
+            return False
+        if any(module.device_id == device_id for module in (*found.matches, *found.uncertain)):
+            row["can_install"] = False
+            return False
+        return not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE
+
     def _detect_serial_conflicts(self, table_data, index_map=None, *, serial_rules=None):
         """
         Bulk-check whether a row's LibreNMS serial already names a Module in NetBox.
@@ -4740,12 +4760,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     move_candidates.append((row, conflict.pk, bay_owners.get(row.get("module_bay_id"))))
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
-            device_id = row.get("selected_device_id")
-            if row.get("can_install") and device_id is not None:
-                if any(module.device_id == device_id for module in (*found.matches, *found.uncertain)):
-                    row["can_install"] = False
-                elif not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE:
-                    pending_installs[device_id].append((row, own_bay))
+            if self._withdraw_held_writes(row, found, resolution):
+                pending_installs[row["selected_device_id"]].append((row, own_bay))
 
         # A Move changes every module of the holder's tree and refuses a bay of that tree; one walk serves all rows.
         trees = module_subtrees({holder for _row, holder, _owner in move_candidates}) if scoped else {}

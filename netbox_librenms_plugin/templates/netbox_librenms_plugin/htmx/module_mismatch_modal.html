@@ -72,6 +72,13 @@
 </div>
 {% endif %}
 
+{% if legacy_update and serial_mismatch or legacy_replace %}
+<div class="alert alert-warning py-2 mb-3" data-legacy-holder>
+    <i class="mdi mdi-alert me-1"></i>
+    <div>Another module on this device can be the same part. Reconcile the two modules before you write this serial.</div>
+</div>
+{% endif %}
+
 {% if serial_conflict %}
 <div class="alert alert-danger py-2 mb-3">
     <i class="mdi mdi-alert-circle me-1"></i>
@@ -124,7 +131,7 @@
 <div class="d-flex gap-2 justify-content-end flex-wrap mt-3">
     <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
 
-    {% if serial_mismatch and not type_mismatch and not serial_conflict and not serial_conflict_hidden and not serial_conflict_ambiguous and installed_module and not serial_fit_refusal %}
+    {% if serial_mismatch and not type_mismatch and not serial_conflict and not serial_conflict_hidden and not serial_conflict_ambiguous and installed_module and not serial_fit_refusal and not legacy_update %}
     {# Quick serial-only update — no delete/recreate needed #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
@@ -170,7 +177,7 @@
     {% endif %}
 
     {# Replace: delete current + install fresh from LibreNMS data #}
-    {% if installed_module and replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_hidden and not serial_conflict_owns_bay and not serial_fit_refusal %}
+    {% if installed_module and replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_hidden and not serial_conflict_owns_bay and not serial_fit_refusal and not legacy_replace %}
     <span class="small text-muted w-100 text-end order-first" data-replace-removes="{{ replace_removal.count }}">
         <em>Replace</em> deletes {{ replace_removal.count }} module{{ replace_removal.count|pluralize }}{% if replace_removal.names %}: {{ replace_removal.names|join:", " }}{% endif %}{% if replace_removal.hidden %} and {{ replace_removal.hidden }} that you cannot view{% endif %}.
     </span>

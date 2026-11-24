@@ -130,6 +130,28 @@ class TestModuleMismatchPreviewView:
         # The reported symptom: the row read as a serial mismatch against itself.
         assert "Only the serial differs" not in html
 
+    @pytest.mark.parametrize(("held", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
+    def test_the_preview_offers_no_serial_write_beside_a_legacy_row(self, held, offered):
+        """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123"; both writers refuse beside it."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device, installed, request, view, inventory = self._setup(f"legacy-{offered}", serial="S/N S/N ABC123")
+        _module(device, make_module_bay(device, f"Preview Sibling {offered}"), installed.module_type, held)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        actions = [form["action"] for form in module_tab_forms(response.content.decode()).forms]
+        assert any("update-module-serial" in action for action in actions) is offered
+        assert any("replace-module" in action for action in actions) is offered
+
     @pytest.mark.parametrize(("serial", "fits"), [("N" * 50, True), ("N" * 51, False)])
     def test_the_preview_offers_no_serial_write_for_a_serial_that_does_not_fit(self, serial, fits):
         """The serial field holds 50 characters, and both the serial update and Replace store the LibreNMS text."""
@@ -483,8 +505,10 @@ class TestReplaceModuleView:
         Module, device, old_type, new_type, bay, installed, inventory = self._setup(
             f"legacy-{refused}", new_serial="S/N S/N ABC123"
         )
-        sibling = _module(device, make_module_bay(device, f"Replace Sibling {refused}"), old_type, held)
+        sibling = _module(device, make_module_bay(device, f"Replace Sibling {refused}"), old_type, "PRE-RENDER-SN")
         request, view, cache_key = self._post(device, inventory)
+        # The dialog offers no Replace beside the legacy row, so its serial lands after the render.
+        Module.objects.filter(pk=sibling.pk).update(serial=held)
         try:
             response = view_post(view, request, pk=device.pk)
         finally:
