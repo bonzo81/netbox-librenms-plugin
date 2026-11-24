@@ -205,6 +205,13 @@ def _is_holder(item) -> bool:
     )
 
 
+def _withdraw_serial_writes(row) -> None:
+    """Withdraw the Install and Update Serial actions of a row whose serial another Module on its device holds."""
+    for action in ("can_install", "can_update_serial"):
+        if row.get(action):
+            row[action] = False
+
+
 def _install_refused(row) -> bool:
     """Return whether an install of the row would create a module whose LibreNMS serial does not fit the field."""
     return bool(row.get("serial_fit_refusal")) and not row.get("installed_module_id")
@@ -4681,18 +4688,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Withdraw the serial writes of *row* that a holder on its target device refuses.
 
         Returns:
-            bool: Whether the install needs a read scoped to the target device, because this read stopped early.
+            bool: Whether the install or the update needs a read scoped to the target device, because this
+            read stopped early.
 
         """
         device_id = row.get("selected_device_id")
-        # *found* leaves out the row's own module; the update refuses beside another holder on its device, as the install.
-        held_here = any(module.device_id == device_id for module in (*found.matches, *found.uncertain))
-        if row.get("can_update_serial") and held_here:
-            row["can_update_serial"] = False
-        if not row.get("can_install") or device_id is None:
+        if device_id is None or not (row.get("can_install") or row.get("can_update_serial")):
             return False
-        if held_here:
-            row["can_install"] = False
+        # *found* leaves out the row's own module; the update refuses beside another holder on its device, as the install.
+        if any(module.device_id == device_id for module in (*found.matches, *found.uncertain)):
+            _withdraw_serial_writes(row)
             return False
         return not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE
 
@@ -4803,4 +4808,4 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             for row, own_bay in target_rows:
                 held = scoped[row["serial"]].excluding(own_bay)
                 if held.matches or held.uncertain:
-                    row["can_install"] = False
+                    _withdraw_serial_writes(row)

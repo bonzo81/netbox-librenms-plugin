@@ -924,3 +924,26 @@ def test_a_bayless_parent_with_a_long_serial_keeps_the_branch_of_its_children(li
         if "install-branch" in form["action"] and form["fields"].get("parent_index") == "10"
     ]
     assert len(branch_forms) == 1
+
+
+@pytest.mark.parametrize("held_here", [True, False])
+def test_the_serial_update_reads_its_device_again_when_the_lookup_stops_early(live_librenms, held_here):
+    """Three lower-pk holders elsewhere fill the bounded read, so a holder on the row's device needs its own read."""
+    for number in range(3):
+        elsewhere = make_device_with_module_bays(f"update-early-other-{held_here}-{number}", ["Slot 1"])
+        install_module(elsewhere, "Slot 1", f"UPDATE-EARLY-OTHER-{held_here}-{number}", serial="NEW123")
+    device = make_device_with_module_bays(f"update-early-{held_here}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=82)
+    module = install_module(device, "Slot 1", f"UPDATE-EARLY-CARD-{held_here}", serial="OLD123")
+    install_module(device, "Slot 2", f"UPDATE-EARLY-HOLDER-{held_here}", serial="NEW123" if held_here else "OTHER123")
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW123")]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=82)
+
+    html = render_module_tab(device)
+
+    update_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(update_forms) == (0 if held_here else 1)
