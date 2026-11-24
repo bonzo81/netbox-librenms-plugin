@@ -58,7 +58,7 @@ class TestSeedInventoryMatchesTheReaderContract:
 
     @staticmethod
     def _new_master_with_a_stale_chassis(prefix):
-        """Return a new master whose loaded chassis still names the old master, and the new master's rule maker."""
+        """Return a third member whose loaded chassis still names the old master, and the new master's rule maker."""
         from dcim.models import Manufacturer, VirtualChassis
 
         from netbox_librenms_plugin.models import NormalizationRule
@@ -66,15 +66,21 @@ class TestSeedInventoryMatchesTheReaderContract:
 
         plain_maker = Manufacturer.objects.create(name=f"{prefix} plain maker", slug=f"{prefix}-plain-maker")
         rule_maker = Manufacturer.objects.create(name=f"{prefix} rule maker", slug=f"{prefix}-rule-maker")
+        owner_maker = Manufacturer.objects.create(name=f"{prefix} owner maker", slug=f"{prefix}-owner-maker")
         NormalizationRule.objects.create(
             scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=rule_maker
         )
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^Y(.+)$", replacement=r"\1", manufacturer=owner_maker
+        )
         old_master = make_device_with_module_bays(f"{prefix}-old-master", [], manufacturer=plain_maker)
-        device = make_device_with_module_bays(f"{prefix}-new-master", [], manufacturer=rule_maker)
-        chassis = make_virtual_chassis(f"{prefix}-chassis", old_master, device)
+        new_master = make_device_with_module_bays(f"{prefix}-new-master", [], manufacturer=rule_maker)
+        # The snapshot owner is a third member, so the stamp of its own maker differs from the new master's.
+        device = make_device_with_module_bays(f"{prefix}-owner", [], manufacturer=owner_maker)
+        chassis = make_virtual_chassis(f"{prefix}-chassis", old_master, new_master, device)
         VirtualChassis.objects.filter(pk=chassis.pk).update(master=old_master)
         device.virtual_chassis = VirtualChassis.objects.get(pk=chassis.pk)
-        VirtualChassis.objects.filter(pk=chassis.pk).update(master=device)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=new_master)
         return device, rule_maker
 
     def test_the_stamp_reads_the_current_master_not_a_cached_chassis(self):
