@@ -1013,6 +1013,70 @@ def test_move_refuses_a_module_into_a_bay_of_its_own_subtree(ui, c8300, depth):
     assert Module.objects.filter(pk=installed.pk).exists()
 
 
+@pytest.mark.parametrize(("sibling_serial", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
+@pytest.mark.parametrize("where", ["dialog", "table"])
+def test_move_is_not_offered_beside_a_legacy_holder_on_the_destination(
+    ui, settings, librenms_server, where, sibling_serial, offered
+):
+    """An earlier release stored "S/N S/N ABC123" as "S/N ABC123"; the Move POST refuses beside such a row."""
+    from dcim.models import ModuleBay
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    recording = _recording()
+    entities = _entities(recording)
+    entities[REAL_NIM]["entPhysicalSerialNum"] = "S/N S/N ABC123"
+    librenms_server.load_recording(recording)
+    configure_librenms_servers(
+        settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "grants-token", "verify_ssl": False}}
+    )
+    device = c8300_device("c8300-legacy-sibling", recording, SERVER_KEY)
+    contrib_rule(MODEL_RULE)
+    remote = make_device_with_module_bays("legacy-sibling-holder", ["Slot 1"])
+    holder = install_in_bay(remote, "Slot 1", "LEGACY-CARD", serial="S/N S/N ABC123")
+    service_model = entities[SERVICE_MODULE]["entPhysicalModelName"]
+    install_module(device, _bay_name(entities, SERVICE_MODULE), service_model, sibling_serial)
+    if where == "dialog":
+        installed = install_module(device, _bay_name(entities, REAL_NIM), service_model, "OLD")
+        html = _preview_html(ui, device)
+    else:
+        installed = None
+        html = render(ui, device)
+
+    holders = [form["fields"].get("conflict_module_id") for form in _move_forms(html)]
+
+    assert holders == ([str(holder.pk)] if offered else [])
+    if not offered:
+        # The offer and the Move POST run one check, so a scripted Move refuses too.
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.serial_identity import RELOCATION_HELD
+        from netbox_librenms_plugin.tests.view_test_helpers import move_occupant_field
+
+        fields = {"server_key": SERVER_KEY, "selected_device_id": str(device.pk), "conflict_module_id": str(holder.pk)}
+        if installed is None:
+            fields["target_bay_id"] = str(ModuleBay.objects.get(device=device, name=_bay_name(entities, REAL_NIM)).pk)
+        else:
+            fields.update(
+                target_bay_id=str(installed.module_bay_id),
+                module_id=str(installed.pk),
+                **move_occupant_field(installed),
+            )
+        before = written_state(device)
+        response = post(ui, reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk]), fields)
+        assert messages_of(response) == [f"Move failed: {RELOCATION_HELD}"]
+        assert written_state(device) == before
+
+
 @pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])
 def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_server, reported_serial, admitted):
     from dcim.models import ModuleBay

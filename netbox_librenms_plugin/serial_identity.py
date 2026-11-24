@@ -1092,21 +1092,30 @@ def relocation_conflict(module, target_device, moving, *, rules: SerialRules, sc
     target = locked_type_context(target_device, rules=rules)
     if module_subtree_serials(module.pk) != moving:
         return True
-    serials = [serial for _pk, serial in moving if target._key(serial)]
-    # The destination may not hold one identity twice, also when the moved modules shared it before.
-    if len({target._key(serial) for serial in serials}) < len(serials):
-        return True
-    if not serials:
-        return False
-    found = resolve_modules(
-        serials,
-        rules=rules,
-        device_ids=[target_device.pk],
-        exclude_pks=[pk for pk, _serial in moving],
-        writer=target,
-    )
-    # A legacy row that stores the key of a moved serial can be the same part, so it refuses too.
-    return any(resolution.kind in REFUSING or resolution.uncertain for resolution in found.values())
+    return bool(relocations_held({module.pk: moving}, target, target_device.pk, rules=rules))
+
+
+def relocations_held(trees, target: SerialContext, target_device_id, *, rules: SerialRules, exclude_pks=()) -> set:
+    """Return the keys of the ``(pk, serial)`` *trees* that a move onto the target Device refuses; one read.
+
+    The Move offers and ``relocation_conflict`` share this check. *exclude_pks* are rows that the move deletes first.
+    """
+    serials_of, held = {}, set()
+    for key, tree in trees.items():
+        serials_of[key] = [serial for _pk, serial in tree if target._key(serial)]
+        # The destination may not hold one identity twice, also when the moved modules shared it before.
+        if len({target._key(serial) for serial in serials_of[key]}) < len(serials_of[key]):
+            held.add(key)
+    wanted = [serial for key, serials in serials_of.items() if key not in held for serial in serials]
+    if not wanted:
+        return held
+    excluded = {pk for tree in trees.values() for pk, _serial in tree} | set(exclude_pks)
+    found = resolve_modules(wanted, rules=rules, device_ids=[target_device_id], exclude_pks=excluded, writer=target)
+    for key, serials in serials_of.items():
+        # A legacy row that stores the key of a moved serial can be the same part, so it refuses too.
+        if any(found[_text(serial)].kind in REFUSING or found[_text(serial)].uncertain for serial in serials):
+            held.add(key)
+    return held
 
 
 def report_rows(rules: SerialRules | None = None):

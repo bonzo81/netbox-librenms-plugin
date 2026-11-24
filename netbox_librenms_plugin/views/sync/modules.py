@@ -64,6 +64,7 @@ from netbox_librenms_plugin.serial_identity import (
     module_subtree_serials,
     locked_type_context,
     relocation_conflict,
+    relocations_held,
     resolve_module,
     stored_form,
     stored_form_refusal,
@@ -2983,6 +2984,17 @@ class ModuleMismatchPreviewView(
                 # Move deletes the module in this bay and the modules below it, so the holder must not be one.
                 and all_trees_in_scope(deletable, [installed_tree])
                 and not tree_holds(installed_tree, serial_conflict.pk)
+                # The Move POST refuses a cross-device move beside a destination row that holds a moved identity.
+                and (
+                    serial_conflict.device_id == target_device.pk
+                    or not relocations_held(
+                        {serial_conflict.pk: holder_trees[0]},
+                        serial_context,
+                        target_device.pk,
+                        rules=serial_rules,
+                        exclude_pks=[pk for pk, _serial in installed_tree],
+                    )
+                )
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,

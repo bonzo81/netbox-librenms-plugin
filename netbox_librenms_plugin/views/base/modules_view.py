@@ -38,6 +38,7 @@ from netbox_librenms_plugin.serial_identity import (
     module_move_serials_admitted,
     plain_context,
     module_subtrees,
+    relocations_held,
     resolve_modules,
     stored_form_differs,
     stored_form_refusal,
@@ -4695,6 +4696,29 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return False
         return not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE
 
+    def _offer_moves(self, move_candidates, serial_rules):
+        """Set ``can_move_from`` on each ``(row, holder, bay owner)`` candidate whose Move the Move POST would run."""
+        # A Move changes every module of the holder's tree and refuses a bay of that tree; one walk serves all rows.
+        trees = module_subtrees({holder.pk for _row, holder, _owner in move_candidates})
+        movable = trees_in_scope(movable_modules(self), trees) if trees else set()
+        # A cross-device Move refuses beside a destination row that holds a moved identity; one read per Device.
+        crossing = defaultdict(list)
+        for row, holder, _owner in move_candidates:
+            if holder.pk in movable and holder.device_id != row.get("selected_device_id"):
+                crossing[row.get("selected_device_id")].append((row, holder))
+        # A row without a target Device cannot run that check, so it offers no cross-device Move.
+        held = {holder.pk for _row, holder in crossing.pop(None, [])}
+        for target_id, pairs in crossing.items():
+            held |= relocations_held(
+                {holder.pk: trees[holder.pk] for _row, holder in pairs},
+                pairs[0][0]["_serial_context"],
+                target_id,
+                rules=serial_rules,
+            )
+        for row, holder, owner in move_candidates:
+            if holder.pk in movable and holder.pk not in held and not subtree_owns_bay(trees[holder.pk], owner):
+                row["can_move_from"] = True
+
     def _detect_serial_conflicts(self, table_data, index_map=None, *, serial_rules=None):
         """
         Bulk-check whether a row's LibreNMS serial already names a Module in NetBox.
@@ -4757,18 +4781,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 context = row["_serial_context"]
                 # The table Move removes no occupant.
                 if not installed_id and module_move_serials_admitted(serial, conflict.serial, context):
-                    move_candidates.append((row, conflict.pk, bay_owners.get(row.get("module_bay_id"))))
+                    move_candidates.append((row, conflict, bay_owners.get(row.get("module_bay_id"))))
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
             if self._withdraw_held_writes(row, found, resolution):
                 pending_installs[row["selected_device_id"]].append((row, own_bay))
 
-        # A Move changes every module of the holder's tree and refuses a bay of that tree; one walk serves all rows.
-        trees = module_subtrees({holder for _row, holder, _owner in move_candidates}) if scoped else {}
-        movable = trees_in_scope(movable_modules(self), trees) if trees else set()
-        for row, holder, owner in move_candidates:
-            if holder in movable and not subtree_owns_bay(trees[holder], owner):
-                row["can_move_from"] = True
+        if scoped:
+            self._offer_moves(move_candidates, serial_rules)
 
         for device_id, target_rows in pending_installs.items():
             scoped = resolve_modules(

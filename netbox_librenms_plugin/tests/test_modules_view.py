@@ -3728,17 +3728,20 @@ class TestDetectSerialConflicts:
 
     def test_conflict_detected_for_can_install_row(self):
         """Serial conflicts are also detected for empty-bay (can_install) rows."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
         view = self._view()
         # The Move offer reads the user's change scope, so the view needs a request.
         view.request = make_request("get", user=make_superuser())
         conflict = self._make_module("install", "CONFLICT_SERIAL")
+        target = make_device("serial-conflict-install-target")
 
         row = {
             "can_install": True,
             "serial": "CONFLICT_SERIAL",
+            # The Move offer checks the destination Device as the Move POST does.
+            "selected_device_id": target.pk,
             "_serial_context": view._row_serial_context(),
             # No installed_module_id — bay is empty
         }
@@ -3768,6 +3771,7 @@ class TestDetectSerialConflicts:
                 {
                     "can_install": True,
                     "serial": f"MOVE-QUERY-{number}",
+                    "selected_device_id": page.pk,
                     "module_bay_id": ModuleBay.objects.get(device=page, name=f"Bay {number}").pk,
                     "_serial_context": view._row_serial_context(),
                 }
@@ -7949,7 +7953,8 @@ def test_the_modules_tab_checks_complete_serials_once_across_members(client, set
     }
     assert {row["serial"]: row["serial_conflict_module"] for row in rows if row.get("can_move_from")} == holders
     serial_reads = [query for query in queries if 'BTRIM("dcim_module"."serial"' in query["sql"]]
-    assert len(serial_reads) == 1
+    # One read for the conflicts, and one destination check per member that a cross-device Move offer targets.
+    assert len(serial_reads) == 1 + (len(members) - 1 if with_holders else 0)
 
 
 @pytest.mark.django_db
