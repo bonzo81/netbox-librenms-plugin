@@ -1112,8 +1112,10 @@ def relocations_held(trees, target: SerialContext, target_device_id, *, rules: S
     excluded = {pk for tree in trees.values() for pk, _serial in tree} | set(exclude_pks)
     found = resolve_modules(wanted, rules=rules, device_ids=[target_device_id], exclude_pks=excluded, writer=target)
     for key, serials in serials_of.items():
-        # A legacy row that stores the key of a moved serial can be the same part, so it refuses too.
-        if any(found[_text(serial)].kind in REFUSING or found[_text(serial)].uncertain for serial in serials):
+        # A held tree sent no serial to the read. A legacy row that stores the key of a moved serial refuses too.
+        if key not in held and any(
+            found[_text(serial)].kind in REFUSING or found[_text(serial)].uncertain for serial in serials
+        ):
             held.add(key)
     return held
 

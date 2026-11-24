@@ -1013,6 +1013,27 @@ def test_move_refuses_a_module_into_a_bay_of_its_own_subtree(ui, c8300, depth):
     assert Module.objects.filter(pk=installed.pk).exists()
 
 
+def test_the_table_offers_move_only_for_a_tree_without_duplicate_destination_identities(ui, c8300):
+    """One holder's tree holds one identity twice, so its Move refuses; the other row keeps its Move offer."""
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    first = make_device_with_module_bays("duplicate-tree-holder", ["Slot 1"])
+    duplicate = install_in_bay(first, "Slot 1", "DUP-CARD", serial=_nim(entities)[1], child_bays=["C1", "C2"])
+    for bay in ("C1", "C2"):
+        install_in_bay(first, bay, "DUP-CHILD", serial="DUP-CHILD-1", parent_module=duplicate)
+    second = make_device_with_module_bays("valid-tree-holder", ["Slot 1"])
+    valid = install_in_bay(second, "Slot 1", "VALID-CARD", serial=entities[SERVICE_MODULE]["entPhysicalSerialNum"])
+
+    holders = [form["fields"].get("conflict_module_id") for form in _move_forms(render(ui, device))]
+
+    assert holders == [str(valid.pk)]
+
+
 @pytest.mark.parametrize(("sibling_serial", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
 @pytest.mark.parametrize("where", ["dialog", "table"])
 def test_move_is_not_offered_beside_a_legacy_holder_on_the_destination(
