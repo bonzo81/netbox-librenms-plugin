@@ -165,56 +165,40 @@ class TestValidationStateUpdates:
         assert validation["rack"]["rack"] == rack
 
     def test_remove_validation_issue_single(self):
-        """Remove single issue by keyword."""
+        """Remove the issue that starts with the prefix."""
+        from netbox_librenms_plugin.import_validation_helpers import ROLE_ISSUE, remove_validation_issue
+
+        validation = {"issues": [ROLE_ISSUE, "Site not found for location 'DC1'"]}
+
+        remove_validation_issue(validation, ROLE_ISSUE)
+
+        assert validation["issues"] == ["Site not found for location 'DC1'"]
+
+    def test_remove_validation_issue_keeps_an_issue_that_only_contains_the_word(self):
+        """An issue can quote LibreNMS text, such as a serial "ROLE-123"; only the start of an issue matches."""
         from netbox_librenms_plugin.import_validation_helpers import (
+            DEVICE_TYPE_ISSUES,
+            ROLE_ISSUE,
+            SITE_ISSUE_PREFIX,
+            VM_PLACEMENT_ISSUES,
             remove_validation_issue,
         )
 
-        validation = {
-            "issues": [
-                "Device role must be manually selected before import",
-                "Site not found for location 'DC1'",
-            ]
-        }
+        quoted = "Stack member 2: Cannot check VC member serial 'ROLE-SITE-VM placement-device type'"
+        validation = {"issues": [ROLE_ISSUE, quoted]}
 
-        remove_validation_issue(validation, "role")
+        for prefixes in ((ROLE_ISSUE,), VM_PLACEMENT_ISSUES, (SITE_ISSUE_PREFIX,), DEVICE_TYPE_ISSUES):
+            remove_validation_issue(validation, *prefixes)
 
-        assert len(validation["issues"]) == 1
-        assert "Site not found" in validation["issues"][0]
-
-    def test_remove_validation_issue_multiple(self):
-        """Remove multiple matching issues."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            remove_validation_issue,
-        )
-
-        validation = {
-            "issues": [
-                "Device role must be selected",
-                "Role is required for import",
-                "Site not found",
-            ]
-        }
-
-        remove_validation_issue(validation, "role")
-
-        assert len(validation["issues"]) == 1
-        assert "Site not found" in validation["issues"][0]
+        assert validation["issues"] == [quoted]
 
     def test_remove_validation_issue_no_match(self):
-        """No change when keyword not found."""
-        from netbox_librenms_plugin.import_validation_helpers import (
-            remove_validation_issue,
-        )
+        """No change when no issue starts with the prefix."""
+        from netbox_librenms_plugin.import_validation_helpers import VM_PLACEMENT_ISSUES, remove_validation_issue
 
-        validation = {
-            "issues": [
-                "Site not found for location 'DC1'",
-                "Device type not matched",
-            ]
-        }
+        validation = {"issues": ["Site not found for location 'DC1'", "Device type not matched"]}
 
-        remove_validation_issue(validation, "cluster")
+        remove_validation_issue(validation, *VM_PLACEMENT_ISSUES)
 
         assert len(validation["issues"]) == 2
 

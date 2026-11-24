@@ -14,6 +14,15 @@ logger = logging.getLogger(__name__)
 # reader agree on the slot names rather than each hard-coding the strings.
 MERGE_CANDIDATE_SLOTS = ("host_named", "oob_named")
 
+# The create-time blockers that a selection or a resolved match removes. A removal matches the start of
+# an issue: other issues can quote LibreNMS text, which can contain any word.
+ROLE_ISSUE = "Device role must be manually selected before import"
+VM_PLACEMENT_ISSUE = "VM placement requires a matching site, selected cluster, or selected host device"
+VM_HOST_CLUSTER_ISSUE = "NetBox requires a clustered host device for VM placement"
+VM_PLACEMENT_ISSUES = ("VM placement requires", VM_HOST_CLUSTER_ISSUE)
+SITE_ISSUE_PREFIX = "No matching site found for location:"
+DEVICE_TYPE_ISSUES = ("No matching device type found for hardware:", "Multiple device types match hardware")
+
 
 def merge_candidate_pks(validation: dict) -> set:
     """
@@ -90,7 +99,7 @@ def apply_role_to_validation(validation: dict, role, is_vm: bool = False) -> Non
     """
     validation["device_role"]["found"] = True
     validation["device_role"]["role"] = role
-    remove_validation_issue(validation, "role")
+    remove_validation_issue(validation, ROLE_ISSUE)
     recalculate_validation_status(validation, is_vm)
 
 
@@ -116,7 +125,7 @@ def apply_cluster_to_validation(validation: dict, cluster) -> None:
         "found": True,
         "host_device": None,
     }
-    remove_validation_issue(validation, "VM placement")
+    remove_validation_issue(validation, *VM_PLACEMENT_ISSUES)
     recalculate_validation_status(validation, is_vm=True)
 
 
@@ -126,7 +135,7 @@ def vm_host_placement_issue(host_device) -> str | None:
 
     if host_device.cluster_id or netbox_allows_standalone_vm_host():
         return None
-    return "NetBox requires a clustered host device for VM placement"
+    return VM_HOST_CLUSTER_ISSUE
 
 
 def apply_host_to_validation(validation: dict, host_device) -> str | None:
@@ -142,7 +151,7 @@ def apply_host_to_validation(validation: dict, host_device) -> str | None:
         validation["cluster"]["cluster"] = host_device.cluster
     else:
         reset_cluster(validation)
-    remove_validation_issue(validation, "VM placement")
+    remove_validation_issue(validation, *VM_PLACEMENT_ISSUES)
     if issue is not None:
         validation["issues"].append(issue)
     recalculate_validation_status(validation, is_vm=True)
@@ -169,20 +178,16 @@ def apply_rack_to_validation(validation: dict, rack) -> None:
     validation["rack"]["rack"] = rack
 
 
-def remove_validation_issue(validation: dict, keyword: str) -> None:
+def remove_validation_issue(validation: dict, *prefixes: str) -> None:
     """
-    Remove validation issues containing the specified keyword.
+    Remove the validation issues that start with one of *prefixes*.
 
     Args:
         validation: Validation dict
-        keyword: Keyword to search for in issue messages (case-insensitive)
-
-    Example:
-        >>> remove_validation_issue(validation, "role")
-        # Removes "Device role must be manually selected before import"
+        prefixes: The start of each issue text to remove, for example ``ROLE_ISSUE``
 
     """
-    validation["issues"] = [issue for issue in validation["issues"] if keyword.lower() not in issue.lower()]
+    validation["issues"] = [issue for issue in validation["issues"] if not issue.startswith(prefixes)]
 
 
 def apply_oob_detection_result(

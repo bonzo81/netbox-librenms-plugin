@@ -67,11 +67,13 @@ from netbox_librenms_plugin.import_utils.device_operations import (
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
 from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view
 from netbox_librenms_plugin.import_validation_helpers import (
+    VM_PLACEMENT_ISSUES,
     apply_cluster_to_validation,
     apply_host_to_validation,
     apply_rack_to_validation,
     apply_role_to_validation,
     merge_candidate_pks,
+    remove_validation_issue,
     reset_cluster,
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
@@ -1106,7 +1108,7 @@ def _set_missing_vm_placement(validation: dict, method: VMPlacementMethod, issue
         "found": False,
         "host_device": None,
     }
-    validation["issues"] = [item for item in validation["issues"] if "VM placement" not in item]
+    remove_validation_issue(validation, *VM_PLACEMENT_ISSUES)
     validation["issues"].append(issue)
     from netbox_librenms_plugin.import_validation_helpers import recalculate_validation_status
 
@@ -1146,7 +1148,7 @@ def _apply_import_intent_to_validation(
                 "host_device": None,
             }
             if placement_found:
-                validation["issues"] = [item for item in validation["issues"] if "VM placement" not in item]
+                remove_validation_issue(validation, *VM_PLACEMENT_ISSUES)
             else:
                 _set_missing_vm_placement(
                     validation,
