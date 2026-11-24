@@ -2791,7 +2791,8 @@ def _serial_holder_token(elsewhere):
 
 def _removal_note(view, trees):
     """Return what the dialog states about the modules of *trees* that a write deletes; it names only viewable ones."""
-    pks = [pk for tree in trees for pk, _serial in tree]
+    # The trees can overlap: the installed module can hold the serial holder.
+    pks = {pk for tree in trees for pk, _serial in tree}
     names = list(viewable_modules(view).filter(pk__in=pks).order_by("pk").values_list("module_type__model", flat=True))
     return {"count": len(pks), "names": names, "hidden": len(pks) - len(names)}
 

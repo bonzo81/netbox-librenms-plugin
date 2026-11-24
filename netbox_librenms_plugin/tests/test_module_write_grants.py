@@ -622,6 +622,25 @@ def _module_places(*modules):
     )
 
 
+def test_the_replace_offer_counts_a_holder_inside_the_installed_module_once(ui, c8300):
+    """The holder sits below the installed module, so both removal trees hold it; it is one module."""
+    from dcim.models import ModuleBay
+
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+
+    device, entities = c8300
+    installed = install_module(
+        device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD"
+    )
+    ModuleBay.objects.create(device=device, module=installed, name="Holder bay")
+    install_in_bay(device, "Holder bay", "INNER-CARD", serial=_nim(entities)[1], parent_module=installed)
+
+    html = _preview_html(ui, device)
+
+    assert len(_replace_forms(html)) == 1
+    assert re.findall(r'data-replace-removes="(\d+)"', html) == ["2"]
+
+
 @pytest.mark.parametrize("viewer", ["all", "roots-only"])
 def test_the_replace_offer_states_how_many_modules_it_deletes(client, c8300, viewer):
     """Replace deletes the installed tree and the holder's tree; the dialog counts both, naming only visible ones."""
