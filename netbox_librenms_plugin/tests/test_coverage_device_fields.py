@@ -1724,8 +1724,9 @@ class TestConvertLegacyLibreNMSIdView:
         assert first_row_lock(statements[2:], Device, 7) == 0
         assert first_row_lock(['SELECT 1 FROM "dcim_device" WHERE id = 70 FOR UPDATE', *statements], Device, 7) == 1
 
+    @pytest.mark.parametrize("column", ['"id"', "id"])
     @pytest.mark.parametrize("alias", ["AS d", "d", 'AS "d"'])
-    def test_the_first_row_lock_includes_a_key_qualified_by_a_table_alias(self, alias):
+    def test_the_first_row_lock_includes_a_key_qualified_by_a_table_alias(self, alias, column):
         """An aliased lock that comes before a recognized lock is the first row lock."""
         from dcim.models import Device
 
@@ -1733,7 +1734,7 @@ class TestConvertLegacyLibreNMSIdView:
 
         name = alias.split()[-1]
         statements = [
-            f'SELECT {name}."id" FROM "dcim_device" {alias} WHERE {name}."id" = 7 FOR UPDATE OF {name}',
+            f'SELECT {name}."id" FROM "dcim_device" {alias} WHERE {name}.{column} = 7 FOR UPDATE OF {name}',
             'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE',
         ]
         assert first_row_lock(statements, Device, 7) == 0

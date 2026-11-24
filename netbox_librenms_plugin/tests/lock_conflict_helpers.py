@@ -37,7 +37,7 @@ def first_row_lock(statements, model, pk):
         aliases = [re.escape(name) for _quote, name in alias.findall(sql)]
         qualifier = "|".join([f'"{table}"', *(rf'(?<![\w"]){name}\b|"{name}"' for name in aliases)])
         # A single-table statement may name the key without the table, as lock_row() does.
-        target = rf'FROM "{table}" (?:.*(?:{qualifier})\."id"|WHERE "?id"?) {match}'
+        target = rf'FROM "{table}" (?:.*(?:{qualifier})\."?id"?|WHERE "?id"?) {match}'
         return re.search(target, sql) is not None and row_lock.search(sql) is not None
 
     return next(i for i, sql in enumerate(statements) if locks_the_row(sql))
