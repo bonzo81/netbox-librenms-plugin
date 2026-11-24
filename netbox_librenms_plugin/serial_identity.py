@@ -846,6 +846,12 @@ def device_assignment(device, incoming, *, rules: SerialRules, write_set_pks=())
     return Assignment(value)
 
 
+def other_device_holder(device, incoming, context: SerialContext, *, rules: SerialRules) -> Resolution | None:
+    """Return the refusing Resolution of the Devices apart from *device* that hold *incoming* under *context*."""
+    other = resolve_device_write(incoming, context, rules=rules, exclude_pks=[device.pk], master=device)
+    return other if other.kind in REFUSING else None
+
+
 def written_device_conflict(device, *, rules: SerialRules, exclude_pks=()) -> Resolution | None:
     """Return the refusing Resolution of the serial that the locked *device* now stores; *exclude_pks* do not count."""
     context = locked_context(device, rules=rules)

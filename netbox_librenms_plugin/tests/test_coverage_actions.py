@@ -4136,16 +4136,17 @@ class TestDeviceConflictActionBranches:
         self._register_device(42, target.name, serial="LINK-SN-1")
         client.force_login(make_superuser(f"{target.name}-user"))
         server = {"server_key": self.server_key}
-        if state != "serial-differs":
-            details = client.get(
-                reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
-                server,
-                HTTP_HX_REQUEST="true",
-            )
-            validation = details.context["validation"]
-            assert (validation["existing_device"], validation["existing_match_type"]) == (target, "hostname")
-            assert validation["serial_action"] is None
-            assert b'name="action" value="link"' in details.content
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
+            server,
+            HTTP_HX_REQUEST="true",
+        )
+        validation = details.context["validation"]
+        assert (validation["existing_device"], validation["existing_match_type"]) == (target, "hostname")
+        # Another holder of the incoming serial blocks the offer; a differing serial is blocked by it already.
+        offers_link = state == "sole-holder"
+        assert validation["serial_action"] == (None if offers_link else "conflict")
+        assert (b'name="action" value="link"' in details.content) is offers_link
 
         response = client.post(
             reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
@@ -4182,8 +4183,12 @@ class TestDeviceConflictActionBranches:
         peer = make_device(f"{tag}-peer", serial="ZXABC123")
         Device.objects.filter(pk=peer.pk).update(device_type=peer_type)
         self._register_device(42, target.name, serial="XABC123")
+        request = self._request(action, target, f"{tag}-user")
+        view = self._make_view()
+        _libre_device, validation, _selections = view.get_validated_device_with_selections(42, request)
+        assert (validation["existing_match_type"], validation["serial_action"]) == ("hostname", "conflict")
 
-        response = post_view(self._make_view(), self._request(action, target, f"{tag}-user"), device_id=42)
+        response = post_view(view, request, device_id=42)
 
         self._assert_htmx_error(response, f"Serial conflict: 'XABC123' is already assigned to device '{peer.name}'")
         reloaded = Device.objects.get(pk=target.pk)

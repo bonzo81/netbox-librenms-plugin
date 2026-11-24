@@ -31,6 +31,7 @@ from ..serial_identity import (
     compare,
     display,
     is_identity,
+    other_device_holder,
     resolve_device,
     resolve_device_write,
     stored_form,
@@ -393,16 +394,16 @@ def _determine_device_name(
 
 def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules, phase) -> bool:
     """
-    Flag the serial conflict of a matched device whose stored serial differs from the incoming one.
+    Flag the serial conflict of a matched device: another Device holds the incoming serial.
 
     Returns:
         bool: True when another Device holds the incoming serial, several do, or the lookup cannot tell.
 
     """
-    other = resolve_device_write(
-        incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules, exclude_pks=[existing_device.pk]
+    other = other_device_holder(
+        existing_device, incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules
     )
-    if other.kind not in REFUSING:
+    if other is None:
         return False
     result["serial_action"] = "conflict"
     result["serial_duplicate"] = True
@@ -1139,6 +1140,10 @@ def validate_device_for_import(  # noqa: C901
                 if display(incoming_serial):
                     context = serial_rules.for_device(existing_device)
                     drift = compare(existing_device.serial, incoming_serial, context)
+                # The link refuses another holder of the same serial, so validation offers no link either.
+                same_serial_held = drift is Comparison.SAME and _flag_serial_conflict(
+                    result, existing_device, incoming_serial, serial_rules, "importing"
+                )
                 if drift is Comparison.UNAVAILABLE:
                     result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
                 elif drift is not None and is_identity(incoming_serial, context) and drift is not Comparison.SAME:
@@ -1148,7 +1153,7 @@ def validate_device_for_import(  # noqa: C901
                             f"Hostname matches but the serial differs from the NetBox record "
                             f"(LibreNMS: '{display(incoming_serial)}'). Hardware may have been replaced."
                         )
-                else:
+                elif not same_serial_held:
                     link_note = _describe_link_note(result["existing_librenms_link"])
                     result["warnings"].append(f"A device with this hostname already exists in NetBox ({link_note})")
 
