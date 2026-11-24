@@ -642,6 +642,7 @@ def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holde
         install_module as install_in_bay,
         make_device_with_module_bays,
     )
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
     recording = _recording()
     entities = _entities(recording)
@@ -677,7 +678,9 @@ def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holde
     move_holders = [
         form["fields"]["conflict_module_id"] for form in module_tab_forms(html).forms if form["action"] == move_url
     ]
-    assert move_holders == ([str(holder.pk)] if admitted else [])
+    # NetBox below 4.7 refuses a Move, so only 4.7 must offer one.
+    if netbox_relocates_module_subtree() or not admitted:
+        assert move_holders == ([str(holder.pk)] if admitted else [])
 
 
 def _preview_serial_form(client, device, entities):
