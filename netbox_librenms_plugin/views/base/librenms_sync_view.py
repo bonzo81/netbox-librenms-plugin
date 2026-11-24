@@ -6,6 +6,7 @@ from functools import cached_property
 
 from django.conf import settings as django_settings
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from netbox.views import generic
@@ -32,6 +33,7 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     is_serial_value,
     is_sole_holder,
+    stored_form,
     stored_form_differs,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
@@ -61,6 +63,15 @@ from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermis
 SYNC_TAB_PREFERENCE = "plugins.netbox_librenms_plugin.sync_tab"
 
 INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
+
+
+def _writer_stores(value, model) -> bool:
+    """Return whether a serial writer can store the LibreNMS *value* in ``model.serial``."""
+    try:
+        stored_form(value, model)
+    except ValidationError:
+        return False
+    return True
 
 
 class BaseLibreNMSSyncView(
@@ -845,8 +856,8 @@ class BaseLibreNMSSyncView(
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
-                    'selected_member': the assigned member when the user may change it and no other row
-                        has it too, else None
+                    'selected_member': the assigned member when the user may change it, no other row
+                        has it too and the writer can store the serial, else None
                     'shared_holder': whether another row has the same assigned member
                 }
             ]
@@ -893,7 +904,13 @@ class BaseLibreNMSSyncView(
         for item in result:
             holder = item["assigned_member"]
             item["shared_holder"] = holder is not None and holder_rows[holder.pk] > 1
-            preselect = holder is not None and holder.pk in changeable and not item["shared_holder"]
+            # The writer refuses a serial that does not fit the field, and that refusal rolls back the other rows.
+            preselect = (
+                holder is not None
+                and holder.pk in changeable
+                and not item["shared_holder"]
+                and _writer_stores(item["librenms_serial"], type(obj))
+            )
             item["selected_member"] = holder if preselect else None
 
         return result

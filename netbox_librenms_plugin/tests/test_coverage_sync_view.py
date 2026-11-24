@@ -1006,6 +1006,33 @@ class TestVirtualChassisInventory:
         assert (rendered["member_id_1"], rendered["member_id_2"]) == ("", "")
         assert [bool(item.get("shared_holder")) for item in items] == [True, True, False]
 
+    def test_a_holder_row_with_an_overlength_librenms_serial_selects_no_member(self, logged_in_client, librenms_server):
+        """The rules match the 52-character text to the stored serial of A, but the field holds 50 characters."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _vc, (holder, other) = make_virtual_chassis_members("inventory-overlength-holder", count=2)
+        holder.serial = "L" * 48
+        holder.save()
+        seed_mapping(holder, SERVER_KEY, own=6656)
+        inventory = _stack_inventory({"entPhysicalSerialNum": f"S/N {'L' * 48}"}, {"entPhysicalSerialNum": "LONG-B"})
+        _register_device(librenms_server, 6656, holder.name, inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(holder))
+
+        items = response.context["vc_inventory_serials"]
+        assert [(item["serial"], item["assigned_member"]) for item in items] == [
+            (f"S/N {'L' * 48}", holder),
+            ("LONG-B", None),
+        ]
+        rendered = self._post_vc_serial_form(logged_in_client, response.content.decode(), holder, "LONG-B", other)
+        other.refresh_from_db()
+        holder.refresh_from_db()
+        assert (holder.serial, other.serial) == ("L" * 48, "LONG-B")
+        assert rendered["member_id_1"] == ""
+
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""
         _vc, members = make_virtual_chassis_members("inventory-form-context", count=2)
