@@ -621,6 +621,45 @@ def _module_places(*modules):
     )
 
 
+def test_move_refuses_an_occupant_that_contains_the_holder(ui, c8300):
+    """Move deletes the occupant first; an occupant above the holder would delete the module that Move keeps."""
+    from dcim.models import ModuleBay
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.view_test_helpers import move_occupant_field
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_OCCUPANT_HOLDS_MODULE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    installed = install_module(
+        device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD"
+    )
+    ModuleBay.objects.create(device=device, module=installed, name="Holder bay")
+    holder = install_in_bay(device, "Holder bay", "INNER-CARD", serial=_nim(entities)[1], parent_module=installed)
+
+    assert _move_forms(_preview_html(ui, device)) == []
+    before = written_state(device)
+
+    response = post(
+        ui,
+        reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk]),
+        {
+            "server_key": SERVER_KEY,
+            "selected_device_id": str(device.pk),
+            "module_id": str(installed.pk),
+            "conflict_module_id": str(holder.pk),
+            "target_bay_id": str(installed.module_bay_id),
+            **move_occupant_field(installed),
+        },
+    )
+
+    assert MOVE_OCCUPANT_HOLDS_MODULE in messages_of(response)
+    assert written_state(device) == before
+
+
 def test_move_refuses_a_moved_subtree_with_a_module_outside_the_change_scope(client, c8300):
     """A cross-device Move changes the Device of every module below the holder, so the scope must cover them."""
     from users.models import ObjectPermission

@@ -114,6 +114,7 @@ from netbox_librenms_plugin.views.base.modules_view import (
     movable_modules,
     select_module_interface,
     subtree_owns_bay,
+    tree_holds,
     viewable_modules,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -459,6 +460,7 @@ MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE = (
     "A module that Move would delete from the destination bay is outside your delete permission. Nothing was moved."
 )
 MOVE_OUTSIDE_CHANGE_SCOPE = "A module that Move would change is outside your change permission. Nothing was moved."
+MOVE_OCCUPANT_HOLDS_MODULE = "The module in the destination bay contains the module to move. Nothing was moved."
 MOVE_STALE = "The modules or module bays changed. Refresh Modules and try again."
 MOVE_INTO_OWN_SUBTREE = "The destination bay belongs to the module or to a module below it. Nothing was moved."
 
@@ -2948,8 +2950,9 @@ class ModuleMismatchPreviewView(
                 and not serial_conflict_owns_bay
                 # A cross-device Move changes every module of the holder's tree.
                 and all_trees_in_scope(movable_modules(self), holder_trees)
-                # Move deletes the module in this bay and the modules below it.
+                # Move deletes the module in this bay and the modules below it, so the holder must not be one.
                 and all_trees_in_scope(deletable, [installed_tree])
+                and not tree_holds(installed_tree, serial_conflict.pk)
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
@@ -3425,6 +3428,8 @@ class MoveModuleView(
                 )
                 if occupant:
                     _require_unchanged_module_subtrees({occupant.pk: removing})
+                    if tree_holds(removing, module.pk):
+                        raise _ModuleActionRefused(MOVE_OCCUPANT_HOLDS_MODULE)
                     if not all_trees_in_scope(self.restricted_queryset(Module, "delete"), [removing]):
                         raise _ModuleActionRefused(MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE)
                     # The offer signed the occupant tree that the operator saw; the delete removes only that tree.

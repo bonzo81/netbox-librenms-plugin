@@ -316,9 +316,14 @@ def viewable_modules(view):
     return view.restricted_queryset(Module).filter(device__in=view.restricted_queryset(Device))
 
 
+def tree_holds(tree, module_pk) -> bool:
+    """Return True when the ``(pk, serial)`` module *tree* holds the Module *module_pk*."""
+    return module_pk is not None and any(pk == module_pk for pk, _serial in tree)
+
+
 def subtree_owns_bay(tree, bay_module_id) -> bool:
     """Return True when the ``(pk, serial)`` module *tree* holds *bay_module_id*, the module that owns a bay."""
-    return bay_module_id is not None and any(pk == bay_module_id for pk, _serial in tree)
+    return tree_holds(tree, bay_module_id)
 
 
 def trees_in_scope(scope, trees) -> set:
