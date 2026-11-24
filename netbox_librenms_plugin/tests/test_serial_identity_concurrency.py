@@ -1111,21 +1111,22 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     assert (first.serial, second.serial) == ("OLD111", "OLD222")
     # The snapshot was merged under the old type's serial context, so a refresh stores it again under the new one.
     device.refresh_from_db()
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
-        trusted_module_inventory_payload(device, rows, librenms_id=9841),
-    )
-    fresh = render_module_tab(device, user=user)
-    levels = []
+    results = []
     for index in (7, 8):
-        url, data = rendered_module_form(fresh, "update-module-serial", index)
+        # Each form comes from a render after the previous write, so a stale grant cannot refuse it.
+        cache.set(
+            CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
+            trusted_module_inventory_payload(device, rows, librenms_id=9841),
+        )
+        url, data = rendered_module_form(render_module_tab(device, user=user), "update-module-serial", index)
         client = Client()
         client.force_login(user)
-        levels.append([level for level, _text in messages_on(client.post(url, data).wsgi_request)])
+        results.append(messages_on(client.post(url, data).wsgi_request))
     stored = (Module.objects.get(pk=first.pk).serial, Module.objects.get(pk=second.pk).serial)
     # Under the new type "XABC" names the hardware of "ABC", so the second update refuses.
     assert stored == ("ABC", "OLD222"), stored
-    assert "error" not in levels[0] and levels[1] == ["error"], levels
+    assert "error" not in [level for level, _text in results[0]], results
+    assert results[1] == [("error", "Serial 'XABC' is already installed on this device. Nothing was changed.")]
 
 
 @transactional_db_with_all_apps()
