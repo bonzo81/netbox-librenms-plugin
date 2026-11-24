@@ -595,15 +595,16 @@ def _move_forms(html):
     return [form for form in module_tab_forms(html).forms if "move-module" in form["action"]]
 
 
-def _module_writer(name, *, device_scope=None, delete_scope=None, change_scope=None):
-    """Create a user with the Replace and Move permissions; a scope constrains the viewed Devices, deletes or changes."""
+def _module_writer(name, *, device_scope=None, delete_scope=None, change_scope=None, view_scope=None):
+    """Create a user with the Replace and Move permissions; a scope constrains Device views or Module grants."""
     from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
     user = make_user_with_perms(name, [("view", Device)], constraints=device_scope)
     user = grant(user, "delete", Module, constraints=delete_scope, name=f"{name}-module-delete")
-    for action, model in [("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)]:
+    user = grant(user, "view", Module, constraints=view_scope)
+    for action, model in [("view", ModuleBay), ("view", ModuleType), ("add", Module)]:
         user = grant(user, action, model)
     user = grant(user, "change", Module, constraints=change_scope)
     for action, model in [("add", Interface), ("change", Interface), ("delete", Interface)]:
@@ -619,6 +620,25 @@ def _module_places(*modules):
         (pk, (device, bay))
         for pk, device, bay in Module.objects.filter(pk__in=pks).values_list("pk", "device_id", "module_bay_id")
     )
+
+
+@pytest.mark.parametrize("viewer", ["all", "occupant-only"])
+def test_the_move_offer_states_how_many_modules_it_deletes(client, c8300, viewer):
+    """Move deletes the occupant and its children; the dialog counts them and names only the visible ones."""
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "installed")
+    view_scope = None if viewer == "all" else {"pk__in": [installed.pk, holder.pk]}
+    client.force_login(_module_writer(f"move-removes-{viewer}", view_scope=view_scope))
+
+    html = _preview_html(client, device)
+
+    assert len(_move_forms(html)) == 1
+    assert re.findall(r'data-move-removes="(\d+)"', html) == ["2"]
+    assert (child.module_type.model in html) is (viewer == "all")
 
 
 @pytest.mark.parametrize("change", ["deleted", "moved"])

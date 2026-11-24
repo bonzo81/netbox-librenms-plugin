@@ -87,6 +87,9 @@
             {% endif %}
             {% if can_move_from %}
             <em>Move</em> will update its location to this bay instead of creating a new entry.
+            <span data-move-removes="{{ move_removal_count }}">
+                It first deletes {{ move_removal_count }} module{{ move_removal_count|pluralize }} from this bay{% if move_removal_names %}: {{ move_removal_names|join:", " }}{% endif %}{% if move_removal_hidden %} and {{ move_removal_hidden }} that you cannot view{% endif %}.
+            </span>
             {% endif %}
         </small>
     </div>
