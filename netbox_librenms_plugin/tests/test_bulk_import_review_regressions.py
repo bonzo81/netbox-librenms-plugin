@@ -927,7 +927,8 @@ def test_bulk_import_reports_the_unverified_serial_without_netbox_details(client
     assert NETBOX_SERIAL_UNVERIFIED in warning
     chassis = member.virtual_chassis
     chassis.refresh_from_db()
-    assert all(name not in warning for name in (member.name, chassis.name, chassis.master.name))
+    hidden_names = (member.name, chassis.name, chassis.master.name)
+    assert [(message, name) for message in warnings for name in hidden_names if name in message] == []
 
 
 @pytest.mark.django_db
