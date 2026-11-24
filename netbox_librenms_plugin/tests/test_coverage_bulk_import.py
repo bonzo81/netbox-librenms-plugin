@@ -1203,8 +1203,8 @@ def test_the_bulk_confirmation_names_an_unnamed_member_of_a_stack_without_number
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("held", [True, False])
-def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_creates(client, live_librenms, held):
-    """A member serial that keys to an existing Device is skipped at import, so its length blocks nothing."""
+def test_the_bulk_confirmation_checks_every_non_master_member_serial(client, live_librenms, held):
+    """The member writer stores every non-master member serial before its lookup, so a held one blocks too."""
     from django.urls import reverse
 
     from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
@@ -1236,7 +1236,7 @@ def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_cre
     (entry,) = response.context["devices"]
     assert entry["validation"]["virtual_chassis"]["master_identified"]
     reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
-    assert (reason in entry["validation"]["issues"]) is (not held)
+    assert reason in entry["validation"]["issues"]
 
 
 @pytest.mark.django_db
