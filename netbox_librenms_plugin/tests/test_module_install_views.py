@@ -534,6 +534,31 @@ def test_batch_install_checks_serial_length_only_for_creation(live_librenms, act
         assert read_mapping(interface).own_id("default") is None
 
 
+@pytest.mark.parametrize(("held", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
+def test_an_empty_bay_offers_no_install_beside_a_legacy_row_that_stores_the_rule_output(live_librenms, held, offered):
+    """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123"; the install refuses beside it."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    device = make_device_with_module_bays(f"install-legacy-{offered}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=77)
+    module_type = make_module_type(f"INSTALL-LEGACY-CARD-{offered}")
+    install_module(device, "Slot 2", f"INSTALL-LEGACY-HOLDER-{offered}", serial=held)
+    rows = [_item(10, module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=77)
+
+    html = render_module_tab(device)
+
+    install_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "install-module" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(install_forms) == (1 if offered else 0)
+
+
 @pytest.mark.parametrize("fits", [True, False])
 def test_an_empty_bay_offers_no_install_for_a_serial_that_does_not_fit(live_librenms, fits):
     """The serial field holds 50 characters; Install, Install Selected and Install Branch create the module."""

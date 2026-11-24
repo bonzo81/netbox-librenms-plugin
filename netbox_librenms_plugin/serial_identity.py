@@ -116,15 +116,16 @@ class Resolution:
         remaining = tuple(row for row in self.matches if row.pk not in excluded)
         if not self.complete and len(remaining) < _AMBIGUOUS_AT:
             raise RuntimeError("The serial lookup stopped before the excluded rows; give it more spare reads.")
-        return _counted(remaining, complete=self.complete)
+        uncertain = tuple(row for row in self.uncertain if row.pk not in excluded)
+        return _counted(remaining, complete=self.complete, uncertain=uncertain)
 
 
 def _counted(matches: tuple, *, complete: bool = True, uncertain: tuple = ()) -> Resolution:
     if not matches:
         return Resolution(ResolutionKind.NO_MATCH, uncertain=uncertain)
     if len(matches) == 1:
-        return Resolution(ResolutionKind.UNIQUE, matches)
-    return Resolution(ResolutionKind.AMBIGUOUS, matches, complete=complete)
+        return Resolution(ResolutionKind.UNIQUE, matches, uncertain=uncertain)
+    return Resolution(ResolutionKind.AMBIGUOUS, matches, complete=complete, uncertain=uncertain)
 
 
 _ABSENT = Resolution(ResolutionKind.ABSENT)
@@ -508,6 +509,17 @@ def _writer_keys(values, probes, writer) -> dict:
     return by_own_key
 
 
+def _holder_keys(probes, holder_contexts) -> dict:
+    """Return ``{key: values}`` over the key that each value's writer context in *holder_contexts* gives it."""
+    by_key: dict = {}
+    for value, context in (holder_contexts or {}).items():
+        text = _text(value)
+        if text in probes and (key := context._key(text)):
+            probes[text].add(key)
+            by_key.setdefault(key, []).append(text)
+    return by_key
+
+
 def _row_candidates(stored, context, by_key, by_own_key, writer) -> tuple:
     """Return the values that a row with *stored* text under *context* can match, each one once."""
     candidates = by_key.get(context._key(stored), [])
@@ -522,17 +534,31 @@ def _mark_unavailable(unavailable, values, probes, stored, reason):
             unavailable.setdefault(value, reason)
 
 
-def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None, stop_at_ambiguity=False):
+def _resolve(
+    queryset,
+    values,
+    *,
+    rules,
+    row_context,
+    lock,
+    spare=0,
+    writer=None,
+    stop_at_ambiguity=False,
+    holder_contexts=None,
+):
     """
     Read the candidate rows of *values* once and confirm each row under its own context.
 
     *writer* is the target's context of a write. A row also matches when its own key, or the key
     that *writer* gives its text, equals the key that *writer* gives a value: after the write, the
     two rows would have one identity, or a lookup of the row's text would find the target.
+    *holder_contexts* maps a value to the writer context of its own later write. It changes no
+    match: it only adds the rows that store that writer's key of the value to ``uncertain``.
     """
     values = list(dict.fromkeys(_text(value) for value in values))
     probes = _probe_keys(values, rules)
     by_own_key = _writer_keys(values, probes, writer)
+    by_holder_key = _holder_keys(probes, holder_contexts)
     results = {value: _ABSENT for value, keys in probes.items() if not keys}
     open_values = [value for value in values if probes[value]]
     if not open_values:
@@ -571,7 +597,7 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
                     matches[value].append(row)
                     matched_pks[value].add(row.pk)
                     saturated += len(matches[value]) == full
-            for value in by_own_key.get(stored, ()):
+            for value in dict.fromkeys((*by_own_key.get(stored, ()), *by_holder_key.get(stored, ()))):
                 if row.pk not in matched_pks[value]:
                     uncertain[value].append(row)
             complete = saturated < len(open_values)
@@ -663,6 +689,7 @@ def resolve_modules(
     lock=False,
     spare=0,
     writer: SerialContext | None = None,
+    holder_contexts: dict | None = None,
 ) -> dict:
     """
     Return ``{serial_text: Resolution}``: the Modules that hold each incoming serial, in one query.
@@ -676,6 +703,8 @@ def resolve_modules(
         spare: Read this many matches past the Ambiguous count, so that ``Resolution.excluding`` can
             leave out up to this many rows per serial later.
         writer: The target's context of a write; the result then also holds the ``uncertain`` rows of a Resolution.
+        holder_contexts: ``{serial: writer context}`` of later writes; the result holds their ``uncertain`` rows,
+            and the matches stay those of the rows' own contexts.
 
     """
     from dcim.models import Module
@@ -695,6 +724,7 @@ def resolve_modules(
         spare=spare,
         stop_at_ambiguity=True,
         writer=writer,
+        holder_contexts=holder_contexts,
     )
 
 

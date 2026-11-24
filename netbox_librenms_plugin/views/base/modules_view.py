@@ -4706,7 +4706,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Existence is read unrestricted: a module the operator cannot see still occupies the
         # serial. Which of them may be NAMED is decided separately, below.
         # One spare read: each row leaves out the module in its own bay below.
-        resolutions = resolve_modules([row["serial"] for row in rows], rules=serial_rules, spare=1)
+        # An install guard reads its target with the row's context as the writer; the same read finds its legacy rows.
+        holder_contexts = {row["serial"]: row["_serial_context"] for row in rows if row.get("_serial_context")}
+        resolutions = resolve_modules(
+            [row["serial"] for row in rows], rules=serial_rules, spare=1, holder_contexts=holder_contexts
+        )
         matched_pks = {module.pk for resolution in resolutions.values() for module in resolution.matches}
         # Fail closed when there is no request to scope against: name nothing rather than risk
         # disclosing a module the operator cannot see.
@@ -4738,7 +4742,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["serial_conflict_ambiguous"] = True
             device_id = row.get("selected_device_id")
             if row.get("can_install") and device_id is not None:
-                if any(module.device_id == device_id for module in found.matches):
+                if any(module.device_id == device_id for module in (*found.matches, *found.uncertain)):
                     row["can_install"] = False
                 elif not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE:
                     pending_installs[device_id].append((row, own_bay))
@@ -4752,8 +4756,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         for device_id, target_rows in pending_installs.items():
             scoped = resolve_modules(
-                [row["serial"] for row, _ in target_rows], rules=serial_rules, device_ids=[device_id], spare=1
+                [row["serial"] for row, _ in target_rows],
+                rules=serial_rules,
+                device_ids=[device_id],
+                spare=1,
+                holder_contexts={
+                    row["serial"]: row["_serial_context"] for row, _ in target_rows if row.get("_serial_context")
+                },
             )
             for row, own_bay in target_rows:
-                if scoped[row["serial"]].excluding(own_bay).matches:
+                held = scoped[row["serial"]].excluding(own_bay)
+                if held.matches or held.uncertain:
                     row["can_install"] = False
