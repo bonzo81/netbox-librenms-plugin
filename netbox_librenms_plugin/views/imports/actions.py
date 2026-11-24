@@ -74,6 +74,7 @@ from netbox_librenms_plugin.serial_identity import (
     SerialRules,
     assignment_lock,
     compare,
+    REFUSING,
     RETYPE_HELD,
     device_assignment,
     display,
@@ -82,6 +83,7 @@ from netbox_librenms_plugin.serial_identity import (
     lock_chassis_of,
     locked_context,
     locked_device_type,
+    resolve_device_write,
     retype_conflict,
     retype_lock,
     retype_scope,
@@ -2408,11 +2410,19 @@ class DeviceConflictActionView(
                         # The serial match selected the target, so a forced type must keep it.
                         if serial_matched and not same_serial:
                             return _htmx_error_response(_SERIAL_MATCH_LOST)
-                        # A link writes no serial, but another holder of the same serial still refuses it.
-                        if same_serial and (conflict := written_device_conflict(existing_device, rules=serial_rules)):
-                            return _htmx_error_response(
-                                serial_conflict_text(conflict, display(incoming_serial), request.user)
+                        # A link writes no serial, but another holder of the incoming serial still refuses it.
+                        if same_serial:
+                            conflict = resolve_device_write(
+                                incoming_serial,
+                                context,
+                                rules=serial_rules,
+                                exclude_pks=[existing_device.pk],
+                                master=existing_device,
                             )
+                            if conflict.kind in REFUSING:
+                                return _htmx_error_response(
+                                    serial_conflict_text(conflict, display(incoming_serial), request.user)
+                                )
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):

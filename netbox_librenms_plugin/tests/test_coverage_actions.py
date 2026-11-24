@@ -4121,6 +4121,33 @@ class TestDeviceConflictActionBranches:
             self._assert_success(response)
             assert stored_mapping_for_test(target) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("action", ["link", "update", "update_serial"])
+    def test_a_hostname_action_refuses_a_peer_that_holds_the_incoming_serial_under_its_own_rule(self, action):
+        """The peer's ``ZXABC123`` keys to the incoming ``XABC123``, but not to the target's stored ``ABC123``."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        tag = f"branches-incoming-peer-{action}".replace("_", "-")
+        target = make_device(tag, serial="ABC123")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=target.device_type.manufacturer
+        )
+        peer_maker = Manufacturer.objects.create(name=f"{tag} peer maker", slug=f"{tag}-peer-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^Z(.+)$", replacement=r"\1", manufacturer=peer_maker
+        )
+        peer_type = DeviceType.objects.create(manufacturer=peer_maker, model=f"{tag} peer", slug=f"{tag}-peer")
+        peer = make_device(f"{tag}-peer", serial="ZXABC123")
+        Device.objects.filter(pk=peer.pk).update(device_type=peer_type)
+        self._register_device(42, target.name, serial="XABC123")
+
+        response = post_view(self._make_view(), self._request(action, target, f"{tag}-user"), device_id=42)
+
+        self._assert_htmx_error(response, f"Serial conflict: 'XABC123' is already assigned to device '{peer.name}'")
+        reloaded = Device.objects.get(pk=target.pk)
+        assert (reloaded.serial, stored_mapping_for_test(reloaded)) == ("ABC123", None)
+
     def test_a_hostname_link_without_an_incoming_serial_reads_no_serial_rule(self, client):
         from django.urls import reverse
 
