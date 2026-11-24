@@ -956,7 +956,8 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_libre
         )
 
     assert (collisions, unresolved) == ([], {})
-    assert [query["sql"] for query in captured.captured_queries].count(serial_only_query) == 1
+    rule_table = f'"{NormalizationRule._meta.db_table}"'
+    assert [query["sql"] for query in captured.captured_queries if rule_table in query["sql"]] == [serial_only_query]
     assert [
         (request["path"], request["query"])
         for request in live_librenms.server.requests
