@@ -1180,15 +1180,10 @@ def test_a_module_move_reads_its_subtree_again_after_its_device_locks(client, mo
     target_type = DeviceType.objects.create(manufacturer=target_maker, model="Move race model", slug="move-race-model")
     Device.objects.filter(pk=target.pk).update(device_type=target_type)
     card = make_module_type("MOVE-RACE-CARD")
-    parent = Module.objects.create(
-        device=source, module_bay=make_module_bay(source, "Source Bay"), module_type=card, serial="ROOT123"
-    )
-    child = Module.objects.create(
-        device=source,
-        module_bay=ModuleBay.objects.create(device=source, module=parent, name="Sub 1"),
-        module_type=card,
-        serial="OLD111",
-    )
+    source_bay = make_module_bay(source, "Source Bay")
+    parent = Module.objects.create(device=source, module_bay=source_bay, module_type=card, serial="ROOT123")
+    child_bay = ModuleBay.objects.create(device=source, module=parent, name="Sub 1")
+    child = Module.objects.create(device=source, module_bay=child_bay, module_type=card, serial="OLD111")
     Module.objects.create(device=target, module_bay=make_module_bay(target, "Held Bay"), module_type=card, serial="ABC")
     target_bay = make_module_bay(target, "Target Bay")
     original = module_views.relocation_conflict
@@ -1217,8 +1212,11 @@ def test_a_module_move_reads_its_subtree_again_after_its_device_locks(client, mo
     assert response.status_code == 302
     # The refusal names the identity check, not another failure that also leaves the child in place.
     assert any(RELOCATION_HELD in text for level, text in messages_on(response.wsgi_request) if level == "error")
+    parent.refresh_from_db()
     child.refresh_from_db()
-    assert (child.device_id, child.serial) != (target.pk, "XABC")
+    # Nothing moved, and the child keeps the serial that the second session committed.
+    assert (parent.device_id, parent.module_bay_id) == (source.pk, source_bay.pk)
+    assert (child.device_id, child.module_bay_id, child.serial) == (source.pk, child_bay.pk, "XABC")
 
 
 def _wait_for_held_serial_claim(writer_pid):
