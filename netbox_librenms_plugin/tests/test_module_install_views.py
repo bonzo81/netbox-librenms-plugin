@@ -528,13 +528,45 @@ def test_batch_install_checks_serial_length_only_for_creation(live_librenms, act
         assert occupant.module_bay.name == "Slot 1"
         assert read_mapping(interface).own_id("default") == 7401
     else:
-        max_length = Module._meta.get_field("serial").max_length
-        assert message_texts(request, "warning") == [
-            f"Failed 1: Slot 1: serial: The LibreNMS serial has {len(serial)} characters; "
-            f"the field holds at most {max_length}."
-        ]
+        # The table offers no install for a serial that does not fit, so the post names a row it does not offer.
+        assert message_texts(request, "error") == [SELECTED_ROWS_REFUSED_MESSAGE.format(rows="Slot 1")]
         assert not Module.objects.filter(device=device).exists()
         assert read_mapping(interface).own_id("default") is None
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_an_empty_bay_offers_no_install_for_a_serial_that_does_not_fit(live_librenms, fits):
+    """The serial field holds 50 characters; Install, Install Selected and Install Branch create the module."""
+    import re
+
+    from django.utils.html import escape
+
+    device = make_device_with_module_bays(f"install-fit-{fits}", ["Slot 1"])
+    seed_mapping(device, "default", own=76)
+    module_type = make_module_type(f"INSTALL-FIT-CARD-{fits}")
+    child_type = make_module_type(f"INSTALL-FIT-CHILD-{fits}")
+    serial = "N" * (50 if fits else 51)
+    rows = [
+        _item(10, module_type.model, "Slot 1", entPhysicalSerialNum=serial),
+        _item(11, child_type.model, "Child Bay", parent=10),
+    ]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=76)
+
+    html = render_module_tab(device)
+
+    actions = [form["action"] for form in module_tab_forms(html).forms]
+    assert any("install-module" in action for action in actions) is fits
+    assert any("install-branch" in action for action in actions) is fits
+    checkbox = re.search(r'<input type="checkbox" name="select" value="10"[^>]*>', html).group(0)
+    assert ("disabled" not in checkbox) is fits
+    reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (escape(reason) in html) is (not fits)
+
+
+def _view_for_seed():
+    from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+    return InstallModuleView()
 
 
 class TestUpdateModuleSerialView:

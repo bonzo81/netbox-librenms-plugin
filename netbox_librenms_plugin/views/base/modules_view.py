@@ -202,6 +202,11 @@ def _is_holder(item) -> bool:
     )
 
 
+def _install_refused(row) -> bool:
+    """Return whether an install of the row would create a module whose LibreNMS serial does not fit the field."""
+    return bool(row.get("serial_fit_refusal")) and not row.get("installed_module_id")
+
+
 def _has_skipped_ancestor(item, index_map, action_of) -> bool:
     """
     Return whether an ancestor of an inventory item matches a skip ignore rule.
@@ -1472,9 +1477,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 and row.get("_source") != OOB_INVENTORY_SOURCE
                 and row.get("status") != "Integrated"
                 and not row.get("member_withheld")
+                and not _install_refused(row)
             )
             if row.get("depth", 0) == 0:
                 branch = row["branch_rows"] = []
+                # A branch below a top-level module that cannot be created has no bays to install into.
+                if _install_refused(row):
+                    branch = None
             if branch is not None and row["selectable"]:
                 branch.append([index, row["selected_device_id"]])
 
@@ -2233,6 +2242,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 sub_selected_device == selected_device
                 and parent_bay_matched_but_uninstalled
                 and sub_row.get("module_type_id")
+                and not _install_refused(sub_row)
             ):
                 table_data[parent_row_idx]["has_installable_children"] = True
 
@@ -3828,6 +3838,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             elif matched_type:
                 # Bay exists, type matched, no module installed → can install
                 row["can_install"] = True
+
+        if matched_type and not row.get("installed_module_id"):
+            from dcim.models import Module
+
+            # An install creates the module with the LibreNMS serial, and the writer refuses one that does not fit.
+            row["serial_fit_refusal"] = stored_form_refusal(serial, Module)
+            if row["serial_fit_refusal"]:
+                row["can_install"] = False
 
         if matched_type:
             row["module_type_url"] = matched_type.get_absolute_url()
