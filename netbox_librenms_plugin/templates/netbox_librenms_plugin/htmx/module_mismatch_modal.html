@@ -89,8 +89,8 @@
         <br><small>
             {% if serial_conflict_owns_bay %}
             <em>Replace</em> is not available: that module contains this bay, so removing it would also remove this bay.
-            {% else %}
-            <em>Replace</em> will also remove it from that location.
+            {% elif replace_in_delete_scope and not serial_fit_refusal and not legacy_replace %}
+            <span data-replace-also-removes><em>Replace</em> will also remove it from that location.</span>
             {% endif %}
             {% if can_move_from %}
             <em>Move</em> will update its location to this bay instead of creating a new entry.

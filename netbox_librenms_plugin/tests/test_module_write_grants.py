@@ -1024,13 +1024,16 @@ def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(c
     roots = ["OLD", _nim(entities)[1]]
     user = grant(user, "delete", Module, constraints={"serial__in": [*roots, child.serial]}, name="scoped-delete")
     client.force_login(user)
-    form = _previewed_replace_form(client, device)
+    html = _preview_html(client, device)
+    form = rendered_module_form(html, "replace-module", REAL_NIM)
     assert form[1]["conflict_module_id"] == str(holder.pk)
+    # The conflict alert says that Replace also removes the holder only while the dialog offers Replace.
+    assert "data-replace-also-removes" in html
     # The scope now misses the child below one of the removal roots.
     ObjectPermission.objects.filter(name="scoped-delete").update(constraints={"serial__in": roots})
-    preview = client.get(rendered_preview_url(render(client, device), REAL_NIM), HTTP_HX_REQUEST="true")
-    assert preview.status_code == 200, preview.content
-    assert _replace_forms(preview.content.decode()) == []
+    html = _preview_html(client, device)
+    assert _replace_forms(html) == []
+    assert "data-replace-also-removes" not in html
     before = written_state(device)
 
     response = post(client, *form)
