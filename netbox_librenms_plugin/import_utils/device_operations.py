@@ -65,6 +65,7 @@ from .virtual_chassis import (
     _existing_member_name,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
+    identify_vc_master,
     update_vc_member_suggested_names,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -656,6 +657,23 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
         "serial_role_choice_available": oob_possible and host_possible,
         "warnings": block_warnings,
     }
+
+
+def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list:
+    """Return an issue for each stack member that the import creates with a serial that does not fit the field."""
+    vc = result.get("virtual_chassis") or {}
+    if not vc.get("is_stack"):
+        return []
+    device_type = effective_import_device_type(result["device_type"].get("device_type"))
+    master = identify_vc_master(vc["members"], incoming_serial, serial_rules.for_device_type(device_type))
+    # A stack without an identified master imports as one device and creates no member.
+    if master is None:
+        return []
+    return [
+        f"Stack member {member.get('position')}: {refusal}"
+        for member in vc["members"]
+        if member is not master and (refusal := stored_form_refusal(member.get("serial"), Device))
+    ]
 
 
 def validate_device_for_import(  # noqa: C901
@@ -1747,6 +1765,8 @@ def validate_device_for_import(  # noqa: C901
             # The import stores the LibreNMS serial, and the writer refuses one that does not fit the field.
             if not import_as_vm and (refusal := stored_form_refusal(incoming_serial, Device)):
                 result["issues"].append(refusal)
+            if not import_as_vm:
+                result["issues"].extend(_stack_member_serial_refusals(result, incoming_serial, serial_rules))
             result["can_import"] = len(result["issues"]) == 0
 
             if import_as_vm:
