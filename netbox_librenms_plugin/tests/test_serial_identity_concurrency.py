@@ -367,12 +367,14 @@ def test_a_legacy_module_serial_heals_to_the_librenms_text(client):
 
 
 @transactional_db_with_all_apps()
-def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(librenms_server):
+@pytest.mark.parametrize("concurrent", [True, False])
+def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(librenms_server, concurrent):
     """Another session stores "XABC" after the type change read "DEF456"; under the new rule it is the holder's "ABC"."""
     from dcim.models import Device, DeviceType, Manufacturer
 
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import RETYPE_HELD
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
     from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
@@ -404,20 +406,24 @@ def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(lib
     def change_before_the_first_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
             changed.append(True)
-            with second_connection() as other:
-                commit_row_change(other, Device, target.pk, {"serial": "XABC"})
+            if concurrent:
+                with second_connection() as other:
+                    commit_row_change(other, Device, target.pk, {"serial": "XABC"})
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(change_before_the_first_lock):
-        post_view(view, request, device_id=9811)
+        response = post_view(view, request, device_id=9811)
 
     assert changed
-    assert Device.objects.get(pk=target.pk).device_type_id != new_type.pk
+    # Without the concurrent edit the same request commits, so the refusal comes from the edit.
+    assert (RETYPE_HELD in response.content.decode()) is concurrent
+    assert (Device.objects.get(pk=target.pk).device_type_id == new_type.pk) is not concurrent
 
 
 @transactional_db_with_all_apps()
+@pytest.mark.parametrize("concurrent", [True, False])
 @pytest.mark.parametrize("surface", ["import", "sync"])
-def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, surface):
+def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, surface, concurrent):
     """Another session moves the new type to a maker whose rule keys "XABC" to the holder's "ABC" after the match."""
     from dcim.models import Device, DeviceType, Manufacturer
     from django.test import Client
@@ -425,6 +431,7 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
 
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import RETYPE_HELD
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.tests.view_test_helpers import make_request
     from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
@@ -450,8 +457,9 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
     def change_before_the_first_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
             changed.append(True)
-            with second_connection() as other:
-                commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
+            if concurrent:
+                with second_connection() as other:
+                    commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(change_before_the_first_lock):
@@ -459,29 +467,35 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
             view = DeviceConflictActionView()
             view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
             data = {"server_key": SERVER_KEY, "action": "update_type", "existing_device_id": str(target.pk)}
-            post_view(
+            response = post_view(
                 view, make_request("post", {**data, "force": "on"}, user=user, HTTP_HX_REQUEST="true"), device_id=9815
             )
+            refused = RETYPE_HELD in response.content.decode()
         else:
             client = Client()
             client.force_login(user)
-            client.post(
+            response = client.post(
                 reverse("plugins:netbox_librenms_plugin:update_device_type", kwargs={"pk": target.pk}),
                 {"server_key": SERVER_KEY},
             )
+            refused = ("error", RETYPE_HELD) in messages_on(response.wsgi_request)
 
     assert changed
-    assert Device.objects.get(pk=target.pk).device_type_id != new_type.pk
+    # Without the concurrent edit the same request commits, so the refusal comes from the edit.
+    assert refused is concurrent
+    assert (Device.objects.get(pk=target.pk).device_type_id == new_type.pk) is not concurrent
 
 
 @transactional_db_with_all_apps()
-def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(librenms_server):
+@pytest.mark.parametrize("concurrent", [True, False])
+def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(librenms_server, concurrent):
     """
     The old master rule strips "PREFIX-", so the member "PREFIX-ABC123" keys to "ABC123". The new type
     moves to a maker with the same rule after the match: the master's new "ABC123" then names the
     member's hardware, although the stale plain type kept the two apart.
     """
     from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+    from django.utils.html import escape
 
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.models import NormalizationRule
@@ -524,15 +538,23 @@ def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(li
     def change_before_the_first_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
             changed.append(True)
-            with second_connection() as other:
-                commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
+            if concurrent:
+                with second_connection() as other:
+                    commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(change_before_the_first_lock):
-        post_view(view, request, device_id=9816)
+        response = post_view(view, request, device_id=9816)
 
     assert changed
-    assert Device.objects.values_list("device_type_id", "serial").get(pk=master.pk) == (old_type_id, "BEFORE123")
+    stored = Device.objects.values_list("device_type_id", "serial").get(pk=master.pk)
+    if concurrent:
+        conflict = f"Serial conflict: 'ABC123' is already assigned to device '{member.name}' (ID: {member.pk})"
+        assert escape(conflict) in response.content.decode()
+        assert stored == (old_type_id, "BEFORE123")
+    else:
+        # Without the concurrent edit the same request commits the type and the serial.
+        assert stored == (new_type.pk, "ABC123")
 
 
 @transactional_db_with_all_apps()
