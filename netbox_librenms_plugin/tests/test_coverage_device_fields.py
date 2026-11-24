@@ -5,12 +5,9 @@ from copy import deepcopy
 
 import pytest
 from django.core.cache import cache
-from django.db import connection
-from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
-from netbox_librenms_plugin.serial_identity import RETYPE_HELD
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
@@ -18,7 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.lock_conflict_helpers import first_row_lock, lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_from_change_record,
     seed_mapping,
@@ -1494,6 +1491,7 @@ class TestUpdateDeviceTypeSerialIdentity:
         from dcim.models import Device, DeviceType, Manufacturer
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import RETYPE_HELD
 
         device = make_device("retype-sync-target", serial="XABC", librenms_cf={SERVER_KEY: 6571})
         NormalizationRule.objects.create(
@@ -1524,6 +1522,8 @@ class TestUpdateDeviceTypeSerialIdentity:
     ):
         from dcim.models import Device, DeviceType, Manufacturer
 
+        from netbox_librenms_plugin.serial_identity import RETYPE_HELD
+
         device = make_device(f"retype-sync-{shape}", librenms_cf={SERVER_KEY: 6572})
         new_maker = Manufacturer.objects.create(name=f"Retype sync {shape}", slug=f"retype-sync-{shape}-maker")
         _retype_shape(device, shape, new_maker)
@@ -1549,6 +1549,7 @@ class TestUpdateDeviceTypeSerialIdentity:
         from dcim.models import Device, DeviceType, Manufacturer
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import RETYPE_HELD
 
         device = make_device("retype-masked-a", serial="XABC", librenms_cf={SERVER_KEY: 6574})
         # The only other Device, so the refusal needs this holder.
@@ -1641,8 +1642,11 @@ class TestConvertLegacyLibreNMSIdView:
     def test_a_decorated_librenms_serial_confirms_the_stored_serial(self, logged_in_client, librenms_server):
         """The serial rules key both sides, so a stored "ABC" matches LibreNMS "S/N ABC"."""
         from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import first_row_lock
 
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
@@ -1663,6 +1667,8 @@ class TestConvertLegacyLibreNMSIdView:
     def test_the_first_row_lock_includes_an_unqualified_key(self):
         """The ordering check above must see a single-table lock that names ``id`` without the table."""
         from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import first_row_lock
 
         statements = [
             'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE',
