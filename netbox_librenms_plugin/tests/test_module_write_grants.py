@@ -675,6 +675,30 @@ def test_the_move_offer_states_how_many_modules_it_deletes(client, c8300, viewer
     assert (child.module_type.model in html) is (viewer == "all")
 
 
+def test_move_refuses_a_source_module_whose_serial_changed_after_its_preview(ui, c8300):
+    """The dialog offered to move the module that held the serial; a module that stores another serial since is not it."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_STALE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "holder")
+    Module.objects.filter(pk=child.pk).delete()
+    form = _previewed_move_form(ui, device)
+    Module.objects.filter(pk=holder.pk).update(serial="OTHER456")
+    before, places = written_state(device), _module_places(holder)
+
+    response = post(ui, *form)
+
+    assert MOVE_STALE in messages_of(response)
+    assert written_state(device) == before
+    assert _module_places(holder) == places
+    assert Module.objects.get(pk=holder.pk).serial == "OTHER456"
+
+
 @pytest.mark.parametrize("change", ["deleted", "moved"])
 def test_move_refuses_an_occupant_that_left_the_bay_after_its_preview(ui, c8300, change):
     """The dialog signed an occupant; a bay that is empty since is not the state the operator confirmed."""
@@ -708,7 +732,7 @@ def test_move_refuses_an_occupant_that_contains_the_holder(ui, c8300):
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
-    from netbox_librenms_plugin.tests.view_test_helpers import move_occupant_field
+    from netbox_librenms_plugin.tests.view_test_helpers import move_offer_fields
     from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
     from netbox_librenms_plugin.views.sync.modules import MOVE_OCCUPANT_HOLDS_MODULE
 
@@ -733,7 +757,7 @@ def test_move_refuses_an_occupant_that_contains_the_holder(ui, c8300):
             "module_id": str(installed.pk),
             "conflict_module_id": str(holder.pk),
             "target_bay_id": str(installed.module_bay_id),
-            **move_occupant_field(installed),
+            **move_offer_fields(installed, holder),
         },
     )
 
@@ -1081,7 +1105,7 @@ def test_move_is_not_offered_beside_a_legacy_holder_on_the_destination(
         from django.urls import reverse
 
         from netbox_librenms_plugin.serial_identity import RELOCATION_HELD
-        from netbox_librenms_plugin.tests.view_test_helpers import move_occupant_field
+        from netbox_librenms_plugin.tests.view_test_helpers import move_offer_fields
 
         fields = {"server_key": SERVER_KEY, "selected_device_id": str(device.pk), "conflict_module_id": str(holder.pk)}
         if installed is None:
@@ -1090,7 +1114,7 @@ def test_move_is_not_offered_beside_a_legacy_holder_on_the_destination(
             fields.update(
                 target_bay_id=str(installed.module_bay_id),
                 module_id=str(installed.pk),
-                **move_occupant_field(installed),
+                **move_offer_fields(installed, holder),
             )
         before = written_state(device)
         response = post(ui, reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk]), fields)

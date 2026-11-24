@@ -777,7 +777,7 @@ def test_move_claims_serials_only_when_ownership_changes_or_a_serial_is_removed(
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import move_occupant_field
+    from netbox_librenms_plugin.tests.view_test_helpers import move_offer_fields
     from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
     if not netbox_relocates_module_subtree():
@@ -803,7 +803,7 @@ def test_move_claims_serials_only_when_ownership_changes_or_a_serial_is_removed(
 
     data = {"conflict_module_id": moving.pk, "target_bay_id": target_bay.pk}
     if occupant:
-        data.update(module_id=occupant.pk, **move_occupant_field(occupant))
+        data.update(module_id=occupant.pk, **move_offer_fields(occupant, moving))
     response = client.post(reverse("plugins:netbox_librenms_plugin:move_module", args=[target.pk]), data)
 
     assert response.status_code == 302

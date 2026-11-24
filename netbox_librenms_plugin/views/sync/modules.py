@@ -2798,6 +2798,11 @@ def _removal_note(view, trees):
     return {"count": len(pks), "names": names, "hidden": len(pks) - len(names)}
 
 
+def move_source_token(module):
+    """Return the positive int that a Move offer signs for the module it moves: its row, place and stored serial."""
+    return _hash_token(["move-source", module.pk, module.device_id, module.module_bay_id, module.serial])
+
+
 def move_occupant_token(tree):
     """Return the positive int that a Move offer signs for the ``(pk, serial)`` tree of the occupant it deletes."""
     return _hash_token(["move-occupant", [pk for pk, _serial in tree]])
@@ -2999,6 +3004,7 @@ class ModuleMismatchPreviewView(
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
                 "move_occupant_token": move_occupant_token(installed_tree),
+                "move_source_token": move_source_token(serial_conflict) if serial_conflict is not None else "",
                 "move_removal": move_removal,
                 "replace_removal": replace_removal,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
@@ -3463,6 +3469,9 @@ class MoveModuleView(
             # Scoped by "delete": the device and bay filters prove where the row sits, not that
             # the grant covers it, and the gate asked has_perm without an instance.
             if module_id and module_id != module.pk:
+                # The offer that names an occupant signed the module it moves; a changed source is not that module.
+                if request.POST.get("source_token") != str(move_source_token(module)):
+                    raise _ModuleActionRefused(MOVE_STALE)
                 occupant = (
                     self.restricted_queryset(Module, "delete")
                     .select_for_update(of=("self",))

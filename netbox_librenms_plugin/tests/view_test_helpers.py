@@ -269,12 +269,15 @@ def rendered_preview_query(device, ent_index, *, user=None, server_key="default"
     return dict(parse_qsl(urlsplit(url).query))
 
 
-def move_occupant_field(occupant):
-    """Return the field that the Move offer of the mismatch preview signs for the *occupant* tree that Move deletes."""
+def move_offer_fields(occupant, source):
+    """Return the fields that the Move offer of the mismatch preview signs: the *occupant* tree and the *source* module."""
     from netbox_librenms_plugin.serial_identity import module_subtree_serials
-    from netbox_librenms_plugin.views.sync.modules import move_occupant_token
+    from netbox_librenms_plugin.views.sync.modules import move_occupant_token, move_source_token
 
-    return {"occupant_tree_token": str(move_occupant_token(module_subtree_serials(occupant.pk)))}
+    return {
+        "occupant_tree_token": str(move_occupant_token(module_subtree_serials(occupant.pk))),
+        "source_token": str(move_source_token(source)),
+    }
 
 
 def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
