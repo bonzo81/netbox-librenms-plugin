@@ -514,8 +514,15 @@ def test_the_table_offers_move_only_when_the_destination_rules_keep_the_identity
     )
     url = reverse("plugins:netbox_librenms_plugin:move_module", args=[device.pk])
 
-    forms = [form["fields"] for form in module_tab_forms(render(ui, device)).forms if form["action"] == url]
+    response = ui.post(
+        reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[device.pk]),
+        {"server_key": SERVER_KEY},
+        HTTP_HX_REQUEST="true",
+    )
+    rows = list(response.context["module_sync"]["table"].data)
+    forms = [form["fields"] for form in module_tab_forms(response.content.decode()).forms if form["action"] == url]
 
+    assert [row["serial_conflict_module"] for row in rows if row.get("serial_conflict_module")] == [holder]
     assert [fields["conflict_module_id"] for fields in forms] == ([str(holder.pk)] if offered else [])
 
 
