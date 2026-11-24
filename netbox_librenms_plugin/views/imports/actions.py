@@ -2403,10 +2403,12 @@ class DeviceConflictActionView(
                     if existing_model is Device:
                         incoming_serial = libre_device.get("serial")
                         context = locked_context(existing_device, rules=serial_rules)
+                        same_serial = compare(existing_device.serial, incoming_serial, context) is Comparison.SAME
+                        # The serial match selected the target, so a forced type must keep it.
+                        if serial_matched and not same_serial:
+                            return _htmx_error_response(_SERIAL_MATCH_LOST)
                         # A link writes no serial, but another holder of the same serial still refuses it.
-                        if compare(existing_device.serial, incoming_serial, context) is Comparison.SAME and (
-                            conflict := written_device_conflict(existing_device, rules=serial_rules)
-                        ):
+                        if same_serial and (conflict := written_device_conflict(existing_device, rules=serial_rules)):
                             return _htmx_error_response(
                                 serial_conflict_text(conflict, display(incoming_serial), request.user)
                             )

@@ -4252,6 +4252,40 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("keeps_match", [False, True], ids=["other-maker", "same-maker"])
+    def test_a_forced_serial_match_link_saves_only_a_type_that_keeps_the_match(self, keeps_match):
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.views.imports.actions import _SERIAL_MATCH_LOST
+
+        tag = f"branches-forced-serial-link-{'same' if keeps_match else 'other'}"
+        view = self._make_view()
+        target = make_device(tag, serial="X-ABC123")
+        maker = target.device_type.manufacturer
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X-(.+)$", replacement=r"\1", manufacturer=maker
+        )
+        if not keeps_match:
+            maker = Manufacturer.objects.create(name=f"{tag} maker", slug=f"{tag}-maker")
+        new_type = DeviceType.objects.create(
+            manufacturer=maker, model=f"{tag} type", slug=f"{tag}-type", part_number=f"{tag}-hw".upper()
+        )
+        old_type_id = target.device_type_id
+        self._register_device(42, f"{tag}-source", serial="ABC123", hardware=new_type.part_number)
+
+        response = post_view(view, self._request("link", target, f"{tag}-user", force="on"), device_id=42)
+
+        reloaded = Device.objects.get(pk=target.pk)
+        if keeps_match:
+            self._assert_success(response)
+            assert reloaded.device_type_id == new_type.pk
+            assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        else:
+            self._assert_htmx_error(response, _SERIAL_MATCH_LOST)
+            assert reloaded.device_type_id == old_type_id
+            assert stored_mapping_for_test(reloaded) is None
+
     @pytest.mark.parametrize("action", ["link", "update", "update_serial", "update_type"])
     def test_a_forced_type_change_refuses_when_another_device_then_holds_the_stored_serial(self, action):
         """Under the old manufacturer's rule "XABC" has no identity; under the new type it is the holder's serial."""
