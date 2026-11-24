@@ -425,10 +425,12 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
     from threading import Event
 
     from dcim.models import Device, Module, ModuleBay, ModuleBayTemplate
+    from django.contrib.messages import get_messages
     from django.db import DatabaseError, close_old_connections
     from django.test import Client
     from django.urls import reverse
 
+    from netbox_librenms_plugin.module_writes import _CHANGED
     from netbox_librenms_plugin.tests.conftest import (
         bounded_executor,
         configure_default_librenms_server,
@@ -500,7 +502,8 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
 
             action, data = requests[actor]
             with connection.execute_wrapper(observe):
-                return client.post(action, data).status_code
+                response = client.post(action, data)
+            return response.status_code, [str(message) for message in get_messages(response.wsgi_request)]
         finally:
             connection.close()
 
@@ -523,10 +526,15 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
                 time.sleep(0.02)
         finally:
             release.set()
-        assert first_result.result(timeout=30) == 302
-        assert other_result.result(timeout=30) == 302
+        results = {first_writer: first_result.result(timeout=30), other_writer: other_result.result(timeout=30)}
+    assert [results[actor][0] for actor in ("template", "creation")] == [302, 302]
     assert "40P01" not in errors
     assert waited, "the second writer did not wait for the first writer's lock"
+    created = Module.objects.filter(device=second, module_type_id=installed.module_type_id).exists()
+    # A template committed first adds a bay to the install's device, so the install refuses its stale scope.
+    refused = (first_writer, target_kind) == ("template", "device_type")
+    refusal = [f"Failed to install module: {_CHANGED}"] if refused else results["creation"][1]
+    assert (created, results["creation"][1]) == (not refused, refusal)
     template_exists = ModuleBayTemplate.objects.filter(name=bay_name).exists()
     if target_kind == "module_type":
         expected = set(Module.objects.filter(module_type_id=installed.module_type_id).values_list("pk", flat=True))
@@ -535,7 +543,6 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
                 "module_id", flat=True
             )
         )
-        assert Module.objects.filter(device=second, module_type_id=installed.module_type_id).exists()
     else:
         expected = set(Device.objects.filter(device_type_id=first.device_type_id).values_list("pk", flat=True))
         populated = set(
