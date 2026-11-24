@@ -855,3 +855,29 @@ def test_an_occupied_bay_offers_no_serial_update_beside_a_legacy_row(live_libren
         if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
     ]
     assert len(update_forms) == (1 if offered else 0)
+
+
+def test_a_lone_legacy_module_keeps_its_own_serial_update(live_librenms):
+    """The module stores the rule output "S/N ABC123"; the update writer leaves that module out, so it heals it."""
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    device = make_device_with_module_bays("update-lone-legacy", ["Slot 1"])
+    seed_mapping(device, "default", own=79)
+    module = install_module(device, "Slot 1", "UPDATE-LONE-LEGACY-CARD", serial="S/N ABC123")
+    view = UpdateModuleSerialView()
+    view._librenms_api = live_librenms.api
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
+    seed_inventory(view, device, rows, librenms_id=79)
+
+    _action, data = rendered_module_form(render_module_tab(device), "update-module-serial", 10)
+    request = make_request("post", data, user=make_superuser(), path="/modules/")
+    response = view_post(view, request, pk=device.pk)
+
+    assert response.status_code == 302
+    assert message_texts(request, "error") == []
+    module.refresh_from_db()
+    assert module.serial == "S/N S/N ABC123"

@@ -31,7 +31,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from django.core.exceptions import ValidationError
 from django.db.models import BooleanField, CharField, F, Func
@@ -110,13 +110,13 @@ class Resolution:
             RuntimeError: The read stopped early and too few rows remain to count; the lookup needs more ``spare``.
 
         """
-        if self.kind not in (ResolutionKind.UNIQUE, ResolutionKind.AMBIGUOUS):
-            return self
         excluded = set(pks)
+        uncertain = tuple(row for row in self.uncertain if row.pk not in excluded)
+        if self.kind not in (ResolutionKind.UNIQUE, ResolutionKind.AMBIGUOUS):
+            return replace(self, uncertain=uncertain)
         remaining = tuple(row for row in self.matches if row.pk not in excluded)
         if not self.complete and len(remaining) < _AMBIGUOUS_AT:
             raise RuntimeError("The serial lookup stopped before the excluded rows; give it more spare reads.")
-        uncertain = tuple(row for row in self.uncertain if row.pk not in excluded)
         return _counted(remaining, complete=self.complete, uncertain=uncertain)
 
 
