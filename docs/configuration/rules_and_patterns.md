@@ -169,6 +169,8 @@ python manage.py librenms_serial_report
 
 The report also lists a stored serial with spaces at the start or end, and a stored placeholder such as `N/A`, because the plugin stores neither. The report lists a row whose serial rules do not work, such as a rule with the replacement `X\1`, with the rule error instead of a key, and then scans the other rows. Correct the rule, then run the report again.
 
+The report checks only the rules that the scanned rows use. It does not check the rules of a manufacturer that has no Devices or Modules. A lookup by serial uses the rules of all manufacturers. So a broken rule of such a manufacturer stops each import lookup with a serial, also for a device of another manufacturer. When you upgrade, examine all serial rules, also the rules of manufacturers that have no devices or modules. Correct each replacement that is not one group reference. An empty report does not show that these rules work.
+
 The report cannot find a row that a deleted rule produced. For example, a deleted rule turned `ID-ABC123` into `ABC123`: NetBox stores `ABC123`, LibreNMS reports `ID-ABC123`, and the current rules do not change `ABC123`. An empty report does not show that no such row exists. After you delete a serial rule, compare the serials in NetBox with LibreNMS.
 
 When you upgrade, check rules that matched only part of a serial. A rule with a valid group reference can still stop matching. For example, the pattern `^ID-([A-Z0-9]+)` with the replacement `\1` used to turn `ID-ABC123-REV` into `ABC123-REV`. To keep that result for this serial format, use the full-match pattern `^ID-([A-Z0-9]+-REV)$` with the replacement `\1`.
