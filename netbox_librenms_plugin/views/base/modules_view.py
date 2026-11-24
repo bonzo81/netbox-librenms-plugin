@@ -321,6 +321,13 @@ def subtree_owns_bay(tree, bay_module_id) -> bool:
     return bay_module_id is not None and any(pk == bay_module_id for pk, _serial in tree)
 
 
+def movable_modules(view):
+    """Return the Modules that the user of *view* may move: in the Module change scope, on a Device they may view."""
+    from dcim.models import Device, Module
+
+    return view.restricted_queryset(Module, "change").filter(device__in=view.restricted_queryset(Device))
+
+
 class _StaleInventorySnapshot(Exception):
     """A cached inventory snapshot grouped serials under a serial context that changed since."""
 
@@ -4685,10 +4692,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         matched_pks = {module.pk for resolution in resolutions.values() for module in resolution.matches}
         # Fail closed when there is no request to scope against: name nothing rather than risk
         # disclosing a module the operator cannot see.
-        visible_conflict_pks = set()
+        visible_conflict_pks = movable_conflict_pks = set()
         if matched_pks and getattr(self, "request", None) is not None:
             # A module is named only when the user may view it and its device.
             visible_conflict_pks = set(viewable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
+            movable_conflict_pks = set(movable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
         bay_ids = {row["module_bay_id"] for row in rows if row.get("module_bay_id")}
         bay_owners = dict(ModuleBay.objects.filter(pk__in=bay_ids).values_list("pk", "module_id")) if bay_ids else {}
         pending_installs = defaultdict(list)
@@ -4707,6 +4715,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # The table Move removes no occupant, and a move into the holder's own subtree always refuses.
                 if (
                     not installed_id
+                    and conflict.pk in movable_conflict_pks
                     and module_move_serials_admitted(serial, conflict.serial, context)
                     and not subtree_owns_bay(
                         module_subtree_serials(conflict.pk), bay_owners.get(row.get("module_bay_id"))

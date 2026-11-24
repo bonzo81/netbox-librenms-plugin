@@ -595,8 +595,8 @@ def _move_forms(html):
     return [form for form in module_tab_forms(html).forms if "move-module" in form["action"]]
 
 
-def _module_writer(name, *, device_scope=None, delete_scope=None):
-    """Create a user with the Replace and Move permissions; a scope is a constraint on the viewed Devices or deletes."""
+def _module_writer(name, *, device_scope=None, delete_scope=None, change_scope=None):
+    """Create a user with the Replace and Move permissions; a scope constrains the viewed Devices, deletes or changes."""
     from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
@@ -605,9 +605,32 @@ def _module_writer(name, *, device_scope=None, delete_scope=None):
     user = grant(user, "delete", Module, constraints=delete_scope, name=f"{name}-module-delete")
     for action, model in [("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)]:
         user = grant(user, action, model)
-    for action, model in [("change", Module), ("add", Interface), ("change", Interface), ("delete", Interface)]:
+    user = grant(user, "change", Module, constraints=change_scope)
+    for action, model in [("add", Interface), ("change", Interface), ("delete", Interface)]:
         user = grant(user, action, model)
     return user
+
+
+@pytest.mark.parametrize("scope", ["covers", "misses"])
+@pytest.mark.parametrize("where", ["table", "dialog"])
+def test_move_is_offered_only_when_the_change_scope_covers_the_holder(client, c8300, where, scope):
+    """Move changes the holder, so the offer reads the change scope with the same queryset as the Move POST."""
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    if where == "table":
+        holder = _tagged_holder(device, entities, owns_destination=False)
+    else:
+        holder, _installed, _child = _remote_holder_with_child(device, entities, "holder")
+    change_scope = None if scope == "covers" else {"serial__in": ["OLD"]}
+    client.force_login(_module_writer(f"move-change-{where}-{scope}", change_scope=change_scope))
+
+    html = render(client, device) if where == "table" else _preview_html(client, device)
+
+    holders = [form["fields"].get("conflict_module_id") for form in _move_forms(html)]
+    assert holders == ([str(holder.pk)] if scope == "covers" else [])
 
 
 def test_the_preview_names_no_holder_on_a_device_the_user_cannot_view(client, c8300):

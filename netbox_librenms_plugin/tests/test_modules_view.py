@@ -3728,7 +3728,12 @@ class TestDetectSerialConflicts:
 
     def test_conflict_detected_for_can_install_row(self):
         """Serial conflicts are also detected for empty-bay (can_install) rows."""
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
         view = self._view()
+        # The Move offer reads the user's change scope, so the view needs a request.
+        view.request = make_request("get", user=make_superuser())
         conflict = self._make_module("install", "CONFLICT_SERIAL")
 
         row = {

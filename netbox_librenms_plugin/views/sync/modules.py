@@ -110,6 +110,7 @@ from netbox_librenms_plugin.views.base.modules_view import (
     _normalize_librenms_text,
     built_in_candidate,
     reusable_built_in_rule,
+    movable_modules,
     select_module_interface,
     subtree_owns_bay,
     viewable_modules,
@@ -2949,6 +2950,7 @@ class ModuleMismatchPreviewView(
                 "can_move_from": netbox_relocates_module_subtree()
                 and serial_conflict is not None
                 and not serial_conflict_owns_bay
+                and movable_modules(self).filter(pk=serial_conflict.pk).exists()
                 # Move deletes the module in this bay and the modules below it.
                 and _trees_in_delete_scope(deletable, [installed_tree])
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
@@ -3395,9 +3397,7 @@ class MoveModuleView(
 
         occupant_removed_msg = from_device = from_bay = None
 
-        movable = self.restricted_queryset(Module, "change").filter(
-            pk=conflict_module_id, device__in=self.restricted_queryset(Device)
-        )
+        movable = movable_modules(self).filter(pk=conflict_module_id)
         same_device_move = movable.filter(device=target_device).exists()
         same_device_empty_bay = same_device_move and not Module.objects.filter(module_bay_id=target_bay_id).exists()
 
