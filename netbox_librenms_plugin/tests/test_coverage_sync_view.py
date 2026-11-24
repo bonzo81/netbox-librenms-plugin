@@ -987,7 +987,8 @@ class TestVirtualChassisInventory:
             if name.startswith("librenms_serial_") and value == serial
         )
         fields[f"member_id_{row}"] = str(member.pk)
-        client.post(reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": page.pk}), fields)
+        assert form["action"] == reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": page.pk})
+        client.post(form["action"], fields)
         return form["fields"]
 
     def test_the_dialog_preselects_only_a_member_that_the_user_may_change(self, client, librenms_server):
