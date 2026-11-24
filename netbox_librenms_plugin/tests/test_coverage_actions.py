@@ -1628,6 +1628,31 @@ class TestDeviceValidationDetailsView:
         # The reason is visible text, not only a hover title.
         assert escape(UNAVAILABLE_MASTER_LINK) in re.sub(r"<[^>]*>", "", serial_row)
 
+    @pytest.mark.parametrize(("serial", "fits"), [("N" * 50, True), ("N" * 51, False)])
+    def test_update_serial_and_link_is_offered_only_for_a_serial_that_fits(self, serial, fits):
+        """A hostname match with another serial offers the update, but the field holds 50 characters."""
+        from django.utils.html import escape
+
+        existing = make_device(f"details-link-fit-{fits}", serial="OLD-SERIAL-1")
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial=serial,
+            ip="198.18.0.8",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "Serial differs" in content
+        assert ('name="action" value="update_serial"' in content) is fits
+        reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+        assert content.count(escape(reason)) == (0 if fits else 2)
+
     @pytest.mark.parametrize(("stored", "fits"), [("L" * 46, True), ("L" * 47, False)])
     def test_the_stored_form_sync_is_offered_only_for_a_serial_that_fits(self, stored, fits):
         """The rule matches "S/N " and the stored serial, but the field holds 50 characters, so 51 cannot be stored."""
