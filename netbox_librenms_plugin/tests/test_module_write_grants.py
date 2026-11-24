@@ -582,6 +582,27 @@ def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(c
     assert set(Module.objects.filter(pk__in=kept).values_list("pk", flat=True)) == kept
 
 
+def test_the_replace_grant_tokens_are_keyed_by_the_server_secret(client, settings, c8300):
+    """The client can read a signed grant, so a token of module pks must not be computable from pks alone."""
+    from django.core import signing
+
+    from netbox_librenms_plugin.module_grants import _SALT
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device, entities = c8300
+    _remote_holder_with_child(device, entities, "holder")
+    user = make_superuser("module-grants-keyed")
+    targets = []
+    for secret in ("first-test-secret-" * 4, "second-test-secret-" * 4):
+        settings.SECRET_KEY = secret
+        client.force_login(user)
+        _action, fields = _previewed_replace_form(client, device)
+        targets.append(signing.loads(fields["inventory_binding"], salt=_SALT)["action_target"])
+
+    for name in ("serial_holder_token", "removal_trees_token"):
+        assert targets[0][name] != targets[1][name], name
+
+
 @pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])
 def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_server, reported_serial, admitted):
     from dcim.models import ModuleBay

@@ -1,7 +1,6 @@
 """Sync action views for module/inventory installation from LibreNMS."""
 
 import copy
-import hashlib
 import json
 import logging
 import re
@@ -15,6 +14,7 @@ from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils.crypto import salted_hmac
 from django.utils.html import escape
 from django.views import View
 from utilities.exceptions import AbortRequest
@@ -2760,7 +2760,9 @@ def _tree_holds(tree, module_pk):
 def _hash_token(value):
     """Return a positive int that a grant signs for *value*, so the grant does not carry pks the viewer may not see."""
     payload = json.dumps(value, separators=(",", ":"))
-    return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:7], "big") + 1
+    # Keyed by SECRET_KEY: the client can read the grant, so a plain hash would let it test a guess about pks.
+    digest = salted_hmac("netbox_librenms_plugin.module_grant_token", payload, algorithm="sha256").digest()
+    return int.from_bytes(digest[:7], "big") + 1
 
 
 def _serial_holder_token(elsewhere):
