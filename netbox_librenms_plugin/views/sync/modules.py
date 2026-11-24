@@ -446,6 +446,10 @@ HOLDER_OWNS_BAY = (
     "Serial '{serial}' is assigned to a module that contains this bay. Replace would also delete the bay. "
     "Nothing was replaced."
 )
+# Names no module: a module below a removal root can be one that the user may not view.
+REMOVAL_OUTSIDE_DELETE_SCOPE = (
+    "A module that Replace would also delete is outside your delete permission. Nothing was replaced."
+)
 
 
 class _SerialConflictUnavailable(Exception):
@@ -3168,6 +3172,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                         raise _SerialConflictUnavailable(serial)
 
                 _require_unchanged_module_subtrees(removals)
+                # The delete cascades through both trees, so the delete scope must cover every module in them.
+                removal_pks = {pk for tree in removals.values() for pk, _serial in tree}
+                if self.restricted_queryset(Module, "delete").filter(pk__in=removal_pks).count() != len(removal_pks):
+                    raise _ModuleActionRefused(REMOVAL_OUTSIDE_DELETE_SCOPE)
 
                 # Remove the serial-conflicting module from its current location.
                 if conflict_module:

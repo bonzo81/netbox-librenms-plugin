@@ -528,6 +528,60 @@ def test_replace_refuses_a_module_added_below_a_removal_tree_after_its_preview(u
     }
 
 
+def _remote_holder_with_child(device, entities, parent):
+    """Hold the NIM serial on another device; install a child below the holder or below the module in the NIM bay."""
+    from dcim.models import ModuleBay
+
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    remote = make_device_with_module_bays("replace-tree-holder", ["Slot 1"])
+    holder = install_in_bay(remote, "Slot 1", "TREE-CARD", serial=_nim(entities)[1], child_bays=["Child"])
+    installed = install_module(
+        device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD"
+    )
+    if parent == "holder":
+        child = install_in_bay(remote, "Child", "TREE-CHILD", serial="TREE-CHILD-1", parent_module=holder)
+    else:
+        ModuleBay.objects.create(device=device, module=installed, name="Added child")
+        child = install_in_bay(device, "Added child", "TREE-CHILD", serial="TREE-CHILD-1", parent_module=installed)
+    return holder, installed, child
+
+
+def _previewed_replace_form(client, device):
+    preview = client.get(rendered_preview_url(render(client, device), REAL_NIM), HTTP_HX_REQUEST="true")
+    assert preview.status_code == 200, preview.content
+    return rendered_module_form(preview.content.decode(), "replace-module", REAL_NIM)
+
+
+@pytest.mark.parametrize("parent", ["holder", "installed"])
+def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(client, c8300, parent):
+    """The grant may delete both removal roots, but not the child below one of them, so nothing is deleted."""
+    from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+    from netbox_librenms_plugin.views.sync.modules import REMOVAL_OUTSIDE_DELETE_SCOPE
+
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, parent)
+    perms = [("view", Device), ("view", ModuleBay), ("view", ModuleType), ("view", Module)]
+    perms += [("add", Module), ("change", Module)]
+    perms += [("add", Interface), ("change", Interface), ("delete", Interface)]
+    user = make_user_with_perms("replace-delete-scope", perms)
+    user = grant(user, "delete", Module, constraints={"serial__in": ["OLD", _nim(entities)[1]]})
+    client.force_login(user)
+    form = _previewed_replace_form(client, device)
+    assert form[1]["conflict_module_id"] == str(holder.pk)
+    before = written_state(device)
+
+    response = post(client, *form)
+
+    assert REMOVAL_OUTSIDE_DELETE_SCOPE in messages_of(response)
+    assert written_state(device) == before
+    kept = {holder.pk, installed.pk, child.pk}
+    assert set(Module.objects.filter(pk__in=kept).values_list("pk", flat=True)) == kept
+
+
 @pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])
 def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_server, reported_serial, admitted):
     from dcim.models import ModuleBay
