@@ -29,8 +29,9 @@ def second_connection():
 def first_row_lock(statements, model, pk):
     """Return the index of the first captured SQL statement that locks the *model* row *pk*, at any lock strength."""
     table = re.escape(model._meta.db_table)
-    keyword = r"(?:WHERE|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ORDER|LIMIT|FOR)\b"
-    source = re.compile(rf'\bFROM (?:"{table}"|{table}\b)(?: (?:AS )?(?!{keyword})("?)(\w+)\1)?')
+    keyword = r"(?:WHERE|ON|USING|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ORDER|LIMIT|FOR)\b"
+    # The target table can come after FROM or after any JOIN.
+    source = re.compile(rf'\b(?:FROM|JOIN) (?:"{table}"|{table}\b)(?: (?:AS )?(?!{keyword})("?)(\w+)\1)?')
     row_lock = re.compile(r'\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b(?: OF ("?\w+"?(?:, "?\w+"?)*))?')
 
     def locks_the_row(sql):

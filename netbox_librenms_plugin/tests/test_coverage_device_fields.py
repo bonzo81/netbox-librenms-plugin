@@ -1760,6 +1760,12 @@ class TestConvertLegacyLibreNMSIdView:
             ("name", 'FOR UPDATE OF "dcim_device"', True),
             ("name", "FOR NO KEY UPDATE OF dcim_device", True),
             ("name", 'FOR UPDATE OF "dcim_site"', False),
+            ("joined", "FOR UPDATE OF d", True),
+            ("joined", "FOR UPDATE OF s", False),
+            ("joined", "FOR UPDATE", True),
+            ("joined_name", 'FOR UPDATE OF "dcim_device"', True),
+            ("joined_name", 'FOR UPDATE OF "dcim_site"', False),
+            ("joined_other_key", "FOR UPDATE", False),
         ],
     )
     def test_the_first_row_lock_counts_a_lock_of_only_the_target_table(self, source, lock, counts):
@@ -1772,6 +1778,10 @@ class TestConvertLegacyLibreNMSIdView:
             "alias": "FROM dcim_device d JOIN dcim_site s ON s.id = d.site_id WHERE d.id = 7",
             "name": 'FROM "dcim_device" JOIN "dcim_site" ON "dcim_site"."id" = "dcim_device"."site_id"'
             ' WHERE "dcim_device"."id" = 7',
+            "joined": "FROM dcim_site s JOIN dcim_device d ON d.site_id = s.id WHERE d.id = 7",
+            "joined_name": 'FROM "dcim_site" INNER JOIN "dcim_device" ON "dcim_device"."site_id" = "dcim_site"."id"'
+            ' WHERE "dcim_device"."id" = 7',
+            "joined_other_key": "FROM dcim_site s JOIN dcim_device d ON d.site_id = s.id WHERE s.id = 7",
         }
         statement = f"SELECT 1 {joins[source]} {lock}"
         recognized = 'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE'
