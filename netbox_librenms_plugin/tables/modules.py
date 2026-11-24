@@ -320,15 +320,18 @@ class LibreNMSModuleTable(tables.Table):
         return format_html("{}", value)
 
     def render_serial(self, value, record):
-        """Render the LibreNMS serial, and mark an installed module whose stored form names it differently."""
+        """Render the LibreNMS serial, mark a stored form that differs, and say why a serial update is not offered."""
+        html = format_html("{}", value or "-")
         if record.get("serial_stored_form_differs"):
             # The bay loader does not apply the viewer's Module scope, so the badge names no stored serial.
-            return format_html(
+            html = format_html(
                 '{} <span class="badge text-bg-info" title="NetBox stores another form of this serial, which names '
                 'the same hardware. Update the serial to store the LibreNMS text.">stored form differs</span>',
                 value or "-",
             )
-        return format_html("{}", value or "-")
+        if refusal := record.get("serial_fit_refusal"):
+            html = format_html('{} <span class="text-muted small" data-serial-fit-refusal>{}</span>', html, refusal)
+        return html
 
     def render_description(self, value, record):
         """Render description, truncated for display."""

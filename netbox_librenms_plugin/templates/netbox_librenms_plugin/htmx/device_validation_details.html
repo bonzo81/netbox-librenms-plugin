@@ -328,6 +328,8 @@
                         <span class="text-danger ms-1" title="{% if validation.serial_conflict.unavailable %}Serial conflict: {{ validation.serial_conflict.unavailable }}{% else %}Serial conflict — another device already has this serial{% endif %}">
                           <i class="mdi mdi-alert-circle"></i>
                         </span>
+                      {% elif sync_info.serial_fit_refusal %}
+                        <span class="text-muted small ms-1" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
                       {% else %}
                       <form style="display:inline" class="ms-1"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"

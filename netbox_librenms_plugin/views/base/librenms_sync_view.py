@@ -34,6 +34,7 @@ from netbox_librenms_plugin.serial_identity import (
     is_sole_holder,
     keeps_stored_serial,
     stored_form_differs,
+    stored_form_refusal,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
@@ -563,6 +564,7 @@ class BaseLibreNMSSyncView(
             "librenms_device_serial": "-",
             "serial_matches": False,
             "serial_stored_form_differs": False,
+            "serial_fit_refusal": "",
             "librenms_device_os": "-",
             "librenms_device_version": "-",
             "librenms_device_features": "-",
@@ -632,6 +634,10 @@ class BaseLibreNMSSyncView(
                         # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
                         "serial_stored_form_differs": obj._meta.model_name == "device"
                         and stored_form_differs(obj.serial, librenms_serial, self._serial_context(obj)),
+                        # The writer refuses a serial that does not fit the field, so the page offers no sync for it.
+                        "serial_fit_refusal": stored_form_refusal(librenms_serial, type(obj))
+                        if obj._meta.model_name == "device"
+                        else "",
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
                         "librenms_device_features": features,

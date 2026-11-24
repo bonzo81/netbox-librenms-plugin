@@ -85,6 +85,7 @@ from netbox_librenms_plugin.serial_identity import (
     retype_lock,
     retype_scope,
     stored_form_differs,
+    stored_form_refusal,
 )
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
@@ -2069,6 +2070,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         serial_synced = True
         serial_same = False
         serial_unavailable = ""
+        serial_fit_refusal = ""
         if existing_device._meta.model_name == "device":
             try:
                 serial_context = SerialRules.load().for_device(existing_device)
@@ -2089,6 +2091,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                     serial_same
                     and not stored_form_differs(existing_device.serial, libre_device.get("serial"), serial_context)
                 )
+                # The writer refuses a serial that does not fit the field, so the row shows why instead of the action.
+                serial_fit_refusal = stored_form_refusal(libre_device.get("serial"), type(existing_device))
 
         # Platform comparison
         platform_assessment = assess_platform(
@@ -2132,6 +2136,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "serial_synced": serial_synced,
             "serial_same": serial_same,
             "serial_unavailable": serial_unavailable,
+            "serial_fit_refusal": serial_fit_refusal,
             "platform_info": platform_info,
             "platform_synced": platform_synced,
             "librenms_hardware": librenms_hardware,

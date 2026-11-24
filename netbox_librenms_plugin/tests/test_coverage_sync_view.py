@@ -307,6 +307,34 @@ class TestSyncPageRouting:
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
         assert sync_serial_url in response.content.decode()
 
+    @pytest.mark.parametrize(("stored", "fits"), [("L" * 46, True), ("L" * 47, False)])
+    def test_the_stored_form_sync_is_offered_only_for_a_serial_that_fits(
+        self, logged_in_client, settings, librenms_server, stored, fits
+    ):
+        """The rule matches "S/N " and the stored serial, but the field holds 50 characters, so 51 cannot be stored."""
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device_id = 6661 if fits else 6662
+        device = make_device(f"sync-stored-form-fit-{device_id}", serial=stored, librenms_cf=device_id)
+        _register_device(librenms_server, device_id, device.name, serial=f"S/N {stored}")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["serial_matches"] is True
+        assert response.context["serial_stored_form_differs"] is True
+        content = response.content.decode()
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
+        assert (sync_serial_url in content) is fits
+        assert f"S/N {stored}" in content
+        reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+        assert (escape(reason) in content) is (not fits)
+
     @pytest.mark.parametrize(("stored", "reported", "matches"), [("100200", 100200, True), ("0", 0, False)])
     def test_a_numeric_serial_matches_its_stored_text_when_it_has_an_identity(
         self, logged_in_client, settings, librenms_server, stored, reported, matches

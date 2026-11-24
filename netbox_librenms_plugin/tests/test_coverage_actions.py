@@ -1628,6 +1628,38 @@ class TestDeviceValidationDetailsView:
         # The reason is visible text, not only a hover title.
         assert escape(UNAVAILABLE_MASTER_LINK) in re.sub(r"<[^>]*>", "", serial_row)
 
+    @pytest.mark.parametrize(("stored", "fits"), [("L" * 46, True), ("L" * 47, False)])
+    def test_the_stored_form_sync_is_offered_only_for_a_serial_that_fits(self, stored, fits):
+        """The rule matches "S/N " and the stored serial, but the field holds 50 characters, so 51 cannot be stored."""
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        existing = make_device(f"details-fit-{len(stored)}", serial=stored, librenms_cf={"default": {"id": 1}})
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial=f"S/N {stored}",
+            ip="198.18.0.7",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('<td style="padding-left: 0.75rem;">Serial</td>')
+        serial_row = content[start : content.index("</tr>", start)]
+        assert ("sync_serial" in serial_row) is fits
+        assert f"S/N {stored}" in serial_row
+        reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+        assert (escape(reason) in re.sub(r"<[^>]*>", "", serial_row)) is (not fits)
+
     @pytest.mark.parametrize("holder", ["unavailable", "duplicate"])
     def test_a_hostname_match_tells_a_duplicate_holder_from_an_unavailable_lookup(self, holder):
         from django.utils.html import escape

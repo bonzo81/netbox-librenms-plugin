@@ -39,6 +39,7 @@ from netbox_librenms_plugin.serial_identity import (
     plain_context,
     resolve_modules,
     stored_form_differs,
+    stored_form_refusal,
 )
 from netbox_librenms_plugin.serial_identity import group as group_serials
 from netbox_librenms_plugin.server_mappings import (
@@ -3849,19 +3850,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             row["status"] = "Type Mismatch"
             row["can_replace"] = True
         elif matched_type is not None:
+            from dcim.models import Module
+
+            update_serial = False
             # A LibreNMS serial without a hardware identity never contradicts the stored one.
             if is_identity(serial, serial_context) and (
                 compare(installed.serial, serial, serial_context) is not Comparison.SAME
             ):
                 row["status"] = "Serial Mismatch"
-                row["can_update_serial"] = True
+                update_serial = True
                 row["can_replace"] = True
             else:
                 row["status"] = "Installed"
                 # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
                 if stored_form_differs(installed.serial, serial, serial_context):
                     row["serial_stored_form_differs"] = True
-                    row["can_update_serial"] = True
+                    update_serial = True
+            if update_serial:
+                # The writer refuses a serial that does not fit the field, so the row shows why instead of the action.
+                row["serial_fit_refusal"] = stored_form_refusal(serial, Module)
+                row["can_update_serial"] = not row["serial_fit_refusal"]
         else:
             row["status"] = "No Type"
 

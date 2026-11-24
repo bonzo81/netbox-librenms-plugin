@@ -324,6 +324,15 @@ def keeps_stored_serial(stored, incoming, model) -> bool:
         return False
 
 
+def stored_form_refusal(value, model) -> str:
+    """Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can."""
+    text = display(value)
+    max_length = model._meta.get_field("serial").max_length
+    if max_length is not None and len(text) > max_length:
+        return f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."
+    return ""
+
+
 def display(value) -> str:
     """Return the source text of a serial for a page: trimmed, and "" for a placeholder."""
     text = _text(value)
@@ -338,13 +347,9 @@ def stored_form(value, model) -> str:
         ValidationError: The text is longer than the field; the writer refuses rather than cut it.
 
     """
-    text = display(value)
-    max_length = model._meta.get_field("serial").max_length
-    if max_length is not None and len(text) > max_length:
-        raise ValidationError(
-            {"serial": f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."}
-        )
-    return text
+    if refusal := stored_form_refusal(value, model):
+        raise ValidationError({"serial": refusal})
+    return display(value)
 
 
 def naming_token(value, context: SerialContext) -> str:

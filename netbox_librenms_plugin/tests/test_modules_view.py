@@ -7731,6 +7731,58 @@ def test_the_stored_form_badge_does_not_show_the_stored_serial(client, settings)
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(("stored", "fits"), [("M" * 46, True), ("M" * 47, False)])
+def test_update_serial_is_offered_for_a_stored_form_only_when_the_serial_fits(client, settings, stored, fits):
+    """The rule matches "S/N " and the stored serial, but the field holds 50 characters, so 51 cannot be stored."""
+    from django.core.cache import cache
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms, trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    device = make_device_with_module_bays(f"stored-form-fit-{len(stored)}", ["Slot 1"])
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    module = install_module(device, "Slot 1", f"STORED-FIT-CARD-{len(stored)}", serial=stored)
+    item = {
+        "entPhysicalIndex": 85,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalModelName": module.module_type.model,
+        "entPhysicalSerialNum": f"S/N {stored}",
+    }
+    payload = trusted_module_inventory_payload(device, [item], librenms_id=9305)
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9305", (True, {"device_id": 9305, "hostname": device.name}), 300)
+    client.force_login(make_superuser(f"stored-form-fit-user-{len(stored)}"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    (row,) = list(table.data)
+    assert row["status"] == "Installed"
+    assert row.get("serial_stored_form_differs") is True
+    table_html = table.as_html(response.wsgi_request)
+    assert f"S/N {stored}" in table_html
+    update_forms = [form for form in module_tab_forms(table_html).forms if "update-module-serial" in form["action"]]
+    assert len(update_forms) == (1 if fits else 0)
+    reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (escape(reason) in table_html) is (not fits)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("master_link_broken", [True, False])
 def test_a_chassis_page_without_member_serials_offers_no_module_action(client, settings, master_link_broken):
     """Without member serials a row has no owner, so it must not fall back to the page device's bays."""

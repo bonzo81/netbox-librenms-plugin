@@ -624,7 +624,9 @@
                                             </button>
                                         {% else %}
                                             {% if serial_admitted and not serial_unavailable %}
-                                                {% if not serial_matches or serial_stored_form_differs %}
+                                                {% if serial_fit_refusal and not serial_matches or serial_fit_refusal and serial_stored_form_differs %}
+                                                <span class="text-muted small" data-serial-fit-refusal>{{ serial_fit_refusal }}</span>
+                                                {% elif not serial_matches or serial_stored_form_differs %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">
