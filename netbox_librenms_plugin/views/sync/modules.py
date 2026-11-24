@@ -452,6 +452,9 @@ HOLDER_OWNS_BAY = (
 REMOVAL_OUTSIDE_DELETE_SCOPE = (
     "A module that Replace would also delete is outside your delete permission. Nothing was replaced."
 )
+MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE = (
+    "A module that Move would delete from the destination bay is outside your delete permission. Nothing was moved."
+)
 MOVE_INTO_OWN_SUBTREE = "The destination bay belongs to the module or to a module below it. Nothing was moved."
 
 
@@ -2919,10 +2922,10 @@ class ModuleMismatchPreviewView(
         serial_conflict_owns_bay = serial_conflict is not None and _tree_holds(
             module_subtree_serials(serial_conflict.pk), installed_module.pk
         )
-        removal_roots = [installed_module.pk] if serial_conflict is None else [installed_module.pk, serial_conflict.pk]
-        replace_in_delete_scope = _trees_in_delete_scope(
-            self.restricted_queryset(Module, "delete"), [module_subtree_serials(root) for root in removal_roots]
-        )
+        deletable = self.restricted_queryset(Module, "delete")
+        installed_tree = module_subtree_serials(installed_module.pk)
+        holder_trees = [] if serial_conflict is None else [module_subtree_serials(serial_conflict.pk)]
+        replace_in_delete_scope = _trees_in_delete_scope(deletable, [installed_tree, *holder_trees])
         return render(
             request,
             "netbox_librenms_plugin/htmx/module_mismatch_modal.html",
@@ -2942,6 +2945,8 @@ class ModuleMismatchPreviewView(
                 "serial_conflict": serial_conflict,
                 "can_move_from": serial_conflict is not None
                 and not serial_conflict_owns_bay
+                # Move deletes the module in this bay and the modules below it.
+                and _trees_in_delete_scope(deletable, [installed_tree])
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
@@ -3417,6 +3422,8 @@ class MoveModuleView(
                 )
                 if occupant:
                     _require_unchanged_module_subtrees({occupant.pk: removing})
+                    if not _trees_in_delete_scope(self.restricted_queryset(Module, "delete"), [removing]):
+                        raise _ModuleActionRefused(MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE)
                     occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                     occupant.delete()
             _refuse_identity_move(module, target_device, moving, serial_rules, scope)

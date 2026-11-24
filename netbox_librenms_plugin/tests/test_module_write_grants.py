@@ -622,6 +622,41 @@ def test_replace_refuses_a_holder_whose_device_the_user_can_no_longer_view(clien
     assert set(Module.objects.filter(pk__in=kept).values_list("pk", flat=True)) == kept
 
 
+def _previewed_move_form(client, device):
+    forms = _move_forms(_preview_html(client, device))
+    assert len(forms) == 1, forms
+    return forms[0]["action"], dict(forms[0]["fields"])
+
+
+def test_move_refuses_an_occupant_tree_with_a_module_outside_the_delete_scope(client, c8300):
+    """Move deletes the occupant of the destination bay and the modules below it, so the scope must cover them."""
+    from dcim.models import Module
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "installed")
+    roots = ["OLD", _nim(entities)[1]]
+    client.force_login(_module_writer("move-delete-scope", delete_scope={"serial__in": [*roots, child.serial]}))
+    form = _previewed_move_form(client, device)
+    assert (form[1]["conflict_module_id"], form[1]["module_id"]) == (str(holder.pk), str(installed.pk))
+    # The scope now misses the child below the occupant.
+    ObjectPermission.objects.filter(name="move-delete-scope-module-delete").update(constraints={"serial__in": roots})
+    assert _move_forms(_preview_html(client, device)) == []
+    before = written_state(device)
+
+    response = post(client, *form)
+
+    assert MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE in messages_of(response)
+    assert written_state(device) == before
+    kept = {holder.pk: holder.module_bay_id, installed.pk: installed.module_bay_id, child.pk: child.module_bay_id}
+    assert dict(Module.objects.filter(pk__in=kept).values_list("pk", "module_bay_id")) == kept
+
+
 @pytest.mark.parametrize("parent", ["holder", "installed"])
 def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(client, c8300, parent):
     """A scope that covers both trees offers Replace; one that misses a child offers none and refuses the POST."""
