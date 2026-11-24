@@ -401,20 +401,28 @@ class TestSyncPageRouting:
         # The reason is page text, not only a tooltip: a keyboard user cannot hover the icon.
         assert UNAVAILABLE_MASTER_LINK in unescape(re.sub(r"<[^>]*>", " ", content))
 
+    @pytest.mark.parametrize("shared", [True, False])
     def test_a_device_that_shares_the_legacy_id_serial_gets_no_convert_offer(
-        self, logged_in_client, settings, librenms_server
+        self, logged_in_client, settings, librenms_server, shared
     ):
         """The conversion needs the sole holder of the serial; the badge still compares the pair."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device("sync-legacy-shared", serial="SHARED-LEGACY", librenms_cf=6617)
-        make_device("sync-legacy-shared-peer", serial="SHARED-LEGACY")
+        device = make_device(f"sync-legacy-shared-{shared}", serial="SHARED-LEGACY", librenms_cf=6617)
+        if shared:
+            make_device("sync-legacy-shared-peer", serial="SHARED-LEGACY")
         _register_device(librenms_server, 6617, device.name, serial="SHARED-LEGACY")
 
         response = logged_in_client.get(_sync_url(device))
 
         assert response.context["serial_matches"] is True
         assert response.context["librenms_id_is_legacy"] is True
-        assert response.context["librenms_id_serial_confirmed"] is False
+        assert response.context["librenms_id_serial_confirmed"] is not shared
+        action = reverse("plugins:netbox_librenms_plugin:convert_legacy_librenms_id", kwargs={"pk": device.pk})
+        (form,) = re.findall(
+            rf'<form[^>]*action="{re.escape(action)}"[^>]*>(.*?)</form>', response.content.decode(), re.S
+        )
+        # Only the sole holder gets an enabled Convert ID button.
+        assert ('<button type="submit"' in form) is not shared
 
     @pytest.mark.parametrize(("reported", "offered"), [("12", False), ("NEW-SERIAL-12", True)])
     def test_a_librenms_serial_without_an_identity_offers_no_serial_sync(
