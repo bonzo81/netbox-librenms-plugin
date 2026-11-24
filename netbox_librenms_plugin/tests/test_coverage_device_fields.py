@@ -1724,23 +1724,31 @@ class TestConvertLegacyLibreNMSIdView:
         assert first_row_lock(statements[2:], Device, 7) == 0
         assert first_row_lock(['SELECT 1 FROM "dcim_device" WHERE id = 70 FOR UPDATE', *statements], Device, 7) == 1
 
-    @pytest.mark.parametrize("column", ['"id"', "id"])
-    @pytest.mark.parametrize("alias", ["AS d", "d", 'AS "d"'])
-    def test_the_first_row_lock_includes_a_key_qualified_by_a_table_alias(self, alias, column):
-        """An aliased lock that comes before a recognized lock is the first row lock."""
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            f"SELECT 1 FROM {table} {alias}WHERE {qualifier}{column} = 7 FOR UPDATE{lock_of}"
+            for table in ('"dcim_device"', "dcim_device")
+            for alias, qualifiers, lock_of in (
+                ("", ("", '"dcim_device".', "dcim_device."), ""),
+                ("AS d ", ("", "d.", '"d".'), " OF d"),
+                ("d ", ("", "d.", '"d".'), " OF d"),
+                ('AS "d" ', ("", "d.", '"d".'), ' OF "d"'),
+            )
+            for qualifier in qualifiers
+            for column in ("id", '"id"')
+        ],
+    )
+    def test_the_first_row_lock_includes_every_form_of_the_key(self, statement):
+        """A lock of the table counts with or without an alias, whatever form of the id column its WHERE names."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.lock_conflict_helpers import first_row_lock
 
-        name = alias.split()[-1]
-        statements = [
-            f'SELECT {name}."id" FROM "dcim_device" {alias} WHERE {name}.{column} = 7 FOR UPDATE OF {name}',
-            'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE',
-        ]
-        assert first_row_lock(statements, Device, 7) == 0
+        assert first_row_lock([statement, 'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE'], Device, 7) == 0
         # An alias of another table does not qualify the key of the Device row.
         joined = 'SELECT 1 FROM "dcim_device" JOIN "dcim_site" s ON s.id = 7 WHERE s."id" = 7 FOR UPDATE'
-        assert first_row_lock([joined, *statements], Device, 7) == 1
+        assert first_row_lock([joined, statement], Device, 7) == 1
 
     @pytest.mark.parametrize("hidden_twin", [True, False])
     def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(
