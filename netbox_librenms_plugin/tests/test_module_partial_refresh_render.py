@@ -447,9 +447,12 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
 
         backend = caches["default"]
         real_get = backend.get
+        injected = []
 
         def get(cache_key, *args, **kwargs):
-            if cache_key == key:
+            if cache_key == key and not injected:
+                # One concurrent write: later reads see the real cache.
+                injected.append(True)
                 cache.set(key, fresh, timeout=300)
                 return old
             return real_get(cache_key, *args, **kwargs)
