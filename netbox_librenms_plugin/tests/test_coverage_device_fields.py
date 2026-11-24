@@ -311,7 +311,7 @@ class TestUpdateDeviceSerialView:
         device.refresh_from_db()
         assert response.status_code == 302
         assert device.serial == "KEPT-SERIAL"
-        assert len(_messages(response, "error")) == 1
+        assert _messages(response, "error") == ["LibreNMS reports a serial that is not text or a number."]
 
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)
