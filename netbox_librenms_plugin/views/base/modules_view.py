@@ -207,14 +207,17 @@ def _is_holder(item) -> bool:
 
 def _withdraw_serial_writes(row) -> None:
     """Withdraw the Install and Update Serial actions of a row whose serial another Module on its device holds."""
+    # A batch install refuses the row too, so the grant marking reads the withheld install.
+    row["install_withheld"] = bool(row.get("can_install"))
     for action in ("can_install", "can_update_serial"):
         if row.get(action):
             row[action] = False
 
 
 def _install_refused(row) -> bool:
-    """Return whether an install of the row would create a module whose LibreNMS serial does not fit the field."""
-    return bool(row.get("serial_fit_refusal")) and not row.get("installed_module_id")
+    """Return whether an install of the row refuses: its serial does not fit, or another Module holds it."""
+    fit_refused = bool(row.get("serial_fit_refusal")) and not row.get("installed_module_id")
+    return fit_refused or bool(row.get("install_withheld"))
 
 
 def _has_skipped_ancestor(item, index_map, action_of) -> bool:
@@ -1527,6 +1530,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
             if row.get("depth", 0) == 0:
                 branch = row["branch_rows"] = []
+                # The bays of the children of a matched empty bay come with its module, which the holder refuses.
+                if row.get("install_withheld"):
+                    branch = None
             if branch is not None and row["selectable"]:
                 branch.append([index, row["selected_device_id"]])
 

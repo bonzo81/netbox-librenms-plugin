@@ -1,5 +1,7 @@
 """End-to-end tests for the module install actions and their inventory ignore rules."""
 
+import re
+
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
@@ -546,17 +548,27 @@ def test_an_empty_bay_offers_no_install_beside_a_legacy_row_that_stores_the_rule
     seed_mapping(device, "default", own=77)
     module_type = make_module_type(f"INSTALL-LEGACY-CARD-{offered}")
     install_module(device, "Slot 2", f"INSTALL-LEGACY-HOLDER-{offered}", serial=held)
-    rows = [_item(10, module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
+    child_type = make_module_type(f"INSTALL-LEGACY-CHILD-{offered}")
+    rows = [
+        _item(10, module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123"),
+        _item(11, child_type.model, "Child Bay", parent=10),
+    ]
     seed_inventory(_view_for_seed(), device, rows, librenms_id=77)
 
     html = render_module_tab(device)
 
+    forms = module_tab_forms(html).forms
     install_forms = [
-        form
-        for form in module_tab_forms(html).forms
-        if "install-module" in form["action"] and form["fields"].get("ent_index") == "10"
+        form for form in forms if "install-module" in form["action"] and form["fields"].get("ent_index") == "10"
     ]
     assert len(install_forms) == (1 if offered else 0)
+    # Install Selected and Install Branch create the module too, so the row is neither selectable nor a branch.
+    checkbox = re.search(r'<input type="checkbox" name="select" value="10"[^>]*>', html).group(0)
+    assert ("disabled" not in checkbox) is offered
+    branch_forms = [
+        form for form in forms if "install-branch" in form["action"] and form["fields"].get("parent_index") == "10"
+    ]
+    assert len(branch_forms) == (1 if offered else 0)
 
 
 @pytest.mark.parametrize("fits", [True, False])
@@ -855,6 +867,9 @@ def test_an_occupied_bay_offers_no_serial_update_beside_a_legacy_row(live_libren
         if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
     ]
     assert len(update_forms) == (1 if offered else 0)
+    # A batch install of an occupied bay creates no module and writes no serial, so the row stays selectable.
+    checkbox = re.search(r'<input type="checkbox" name="select" value="10"[^>]*>', html).group(0)
+    assert "disabled" not in checkbox
 
 
 def test_a_lone_legacy_module_keeps_its_own_serial_update(live_librenms):
