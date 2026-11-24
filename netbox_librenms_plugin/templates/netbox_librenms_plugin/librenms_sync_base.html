@@ -1182,6 +1182,7 @@ that may well be correct.
                     {% csrf_token %}
                     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                     <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
+                    <div class="table-responsive">
                     <table class="table table-striped">
                         <thead>
                             <tr>
@@ -1195,7 +1196,7 @@ that may well be correct.
                             {% for item in vc_inventory_serials %}
                             <tr>
                                 <td>{{ item.model }}</td>
-                                <td><code>{{ item.serial }}</code></td>
+                                <td class="text-break"><code>{{ item.serial }}</code></td>
                                 <td>
                                     {% if item.assigned_member %}
                                         <a href="{{ item.assigned_member.get_absolute_url }}" target="_blank">
@@ -1232,6 +1233,7 @@ that may well be correct.
                             {% endfor %}
                         </tbody>
                     </table>
+                    </div>
                 </form>
             </div>
             <div class="modal-footer">

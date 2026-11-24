@@ -311,7 +311,7 @@
               {% if not validation.existing_device and not validation.import_as_vm or validation.existing_device and existing_device_model_name != "virtualmachine" %}
               <tr>
                 <td style="padding-left: 0.75rem;">Serial</td>
-                <td>
+                <td class="text-break">
                   {% if validation.existing_device %}
                     {% if validation.existing_device.serial %}
                       {{ validation.existing_device.serial }}
@@ -329,7 +329,7 @@
                           <i class="mdi mdi-alert-circle"></i>
                         </span>
                       {% elif sync_info.serial_fit_refusal %}
-                        <span class="text-muted small ms-1" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
+                        <span class="d-block text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
                       {% else %}
                       <form style="display:inline" class="ms-1"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
@@ -351,7 +351,7 @@
                     <span class="text-muted">—</span>
                   {% endif %}
                 </td>
-                <td>
+                <td class="text-break">
                   {{ libre_device.serial|default:"—" }}
                   {% if validation.serial_duplicate %}
                     <span class="badge bg-danger text-white ms-1">Conflict</span>

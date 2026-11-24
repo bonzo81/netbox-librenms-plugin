@@ -37,8 +37,8 @@
         </tr>
         <tr>
             <td><strong>Serial</strong></td>
-            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ installed_serial|default:"-" }}</td>
-            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ librenms_serial|default:"-" }}</td>
+            <td class="text-break{% if serial_mismatch %} text-warning fw-semibold{% endif %}">{{ installed_serial|default:"-" }}</td>
+            <td class="text-break{% if serial_mismatch %} text-warning fw-semibold{% endif %}">{{ librenms_serial|default:"-" }}</td>
         </tr>
     </tbody>
 </table>
