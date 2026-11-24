@@ -41,6 +41,7 @@ from netbox_librenms_plugin.serial_identity import (
     resolve_modules,
     stored_form_differs,
     stored_form_refusal,
+    assignment_fit_refusal,
 )
 from netbox_librenms_plugin.serial_identity import group as group_serials
 from netbox_librenms_plugin.server_mappings import (
@@ -3923,7 +3924,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     update_serial = True
             if update_serial:
                 # The writer refuses a serial that does not fit the field, so the row shows why instead of the action.
-                row["serial_fit_refusal"] = stored_form_refusal(serial, Module)
+                row["serial_fit_refusal"] = assignment_fit_refusal(serial, Module, serial_context)
                 row["can_update_serial"] = not row["serial_fit_refusal"]
         else:
             row["status"] = "No Type"

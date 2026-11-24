@@ -333,6 +333,12 @@ def stored_form_refusal(value, model) -> str:
     return ""
 
 
+def assignment_fit_refusal(value, model, context: SerialContext) -> str:
+    """Return why ``device_assignment`` or ``module_assignment`` refuses to store *value*, or "" when it can."""
+    # The assignment writers store only a serial with an identity; without one they write nothing.
+    return stored_form_refusal(value, model) if is_identity(value, context) else ""
+
+
 def display(value) -> str:
     """Return the source text of a serial for a page: trimmed, and "" for a placeholder."""
     text = _text(value)

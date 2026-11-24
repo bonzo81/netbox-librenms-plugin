@@ -1628,6 +1628,33 @@ class TestDeviceValidationDetailsView:
         # The reason is visible text, not only a hover title.
         assert escape(UNAVAILABLE_MASTER_LINK) in re.sub(r"<[^>]*>", "", serial_row)
 
+    def test_update_and_link_stays_for_a_long_serial_without_an_identity(self):
+        """A value without three letters or digits in a row writes no serial, so its length refuses nothing."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        existing = make_device("details-ip-no-identity", serial="OLD-SERIAL-1")
+        ip = ip_on(existing, "198.18.21.19/24", "management")
+        Device.objects.filter(pk=existing.pk).update(primary_ip4=ip)
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname="reported-no-identity",
+            hardware=existing.device_type.model,
+            os="ios",
+            serial="A-" * 26,
+            ip=str(ip.address.ip),
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "IP match" in content
+        assert 'name="action" value="update"' in content
+        assert "data-serial-fit-refusal" not in content
+
     @pytest.mark.parametrize("match", ["primary_ip", "serial"])
     @pytest.mark.parametrize("fits", [True, False])
     def test_update_and_link_is_offered_only_for_a_serial_that_fits(self, match, fits):

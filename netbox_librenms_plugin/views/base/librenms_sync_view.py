@@ -35,6 +35,7 @@ from netbox_librenms_plugin.serial_identity import (
     keeps_stored_serial,
     stored_form_differs,
     stored_form_refusal,
+    assignment_fit_refusal,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
@@ -635,7 +636,9 @@ class BaseLibreNMSSyncView(
                         "serial_stored_form_differs": obj._meta.model_name == "device"
                         and stored_form_differs(obj.serial, librenms_serial, self._serial_context(obj)),
                         # The writer refuses a serial that does not fit the field, so the page offers no sync for it.
-                        "serial_fit_refusal": stored_form_refusal(librenms_serial, type(obj))
+                        "serial_fit_refusal": assignment_fit_refusal(
+                            librenms_serial, type(obj), self._serial_context(obj)
+                        )
                         if obj._meta.model_name == "device"
                         else "",
                         "librenms_device_os": os_name,

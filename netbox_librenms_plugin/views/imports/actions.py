@@ -6,7 +6,6 @@ import re
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import netaddr
-
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
@@ -67,28 +66,6 @@ from netbox_librenms_plugin.import_utils.device_operations import (
 )
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
 from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view
-from netbox_librenms_plugin.models import RuleConfigurationError
-from netbox_librenms_plugin.serial_identity import (
-    Comparison,
-    SerialContext,
-    SerialRules,
-    assignment_lock,
-    compare,
-    RETYPE_HELD,
-    device_assignment,
-    display,
-    is_identity,
-    is_sole_holder,
-    lock_chassis_of,
-    locked_context,
-    locked_device_type,
-    other_device_holder,
-    retype_conflict,
-    retype_lock,
-    retype_scope,
-    stored_form_differs,
-    stored_form_refusal,
-)
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -101,6 +78,7 @@ from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.platform_versions import (
     NewOSPlatform,
     PlatformFacts,
@@ -117,6 +95,27 @@ from netbox_librenms_plugin.platform_versions import (
     platform_visible,
     reason_text,
     target_label,
+)
+from netbox_librenms_plugin.serial_identity import (
+    RETYPE_HELD,
+    Comparison,
+    SerialContext,
+    SerialRules,
+    assignment_fit_refusal,
+    assignment_lock,
+    compare,
+    device_assignment,
+    display,
+    is_identity,
+    is_sole_holder,
+    lock_chassis_of,
+    locked_context,
+    locked_device_type,
+    other_device_holder,
+    retype_conflict,
+    retype_lock,
+    retype_scope,
+    stored_form_differs,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -147,6 +146,7 @@ from netbox_librenms_plugin.utils import (
     SET_PRIMARY_IP_PREFERENCE,
     coerce_model_pk,
     coerce_positive_int,
+    exception_text_for,
     resolve_naming_preferences,
     same_host,
     save_interface_name_preference,
@@ -155,7 +155,6 @@ from netbox_librenms_plugin.utils import (
     validate_import_context_columns,
     validate_interface_sync_options,
     validation_error_detail,
-    exception_text_for,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -2100,7 +2099,9 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                     and not stored_form_differs(existing_device.serial, libre_device.get("serial"), serial_context)
                 )
                 # The writer refuses a serial that does not fit the field, so the row shows why instead of the action.
-                serial_fit_refusal = stored_form_refusal(libre_device.get("serial"), type(existing_device))
+                serial_fit_refusal = assignment_fit_refusal(
+                    libre_device.get("serial"), type(existing_device), serial_context
+                )
 
         # Platform comparison
         platform_assessment = assess_platform(
