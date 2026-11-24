@@ -401,11 +401,13 @@ class TestSyncPageRouting:
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
         assert (sync_serial_url in content) is offered
 
-    @pytest.mark.parametrize(("stored", "reported", "mismatch"), [("12", "12", False), ("STORED-12", "OTHER-12", True)])
+    @pytest.mark.parametrize(
+        ("stored", "reported", "mismatch"), [("STORED-12", "12", False), ("STORED-12", "OTHER-12", True)]
+    )
     def test_only_an_admitted_librenms_serial_is_marked_as_a_mismatch(
         self, logged_in_client, settings, librenms_server, stored, reported, mismatch
     ):
-        """A serial without an identity matches nothing, but the page must not call two equal texts a mismatch."""
+        """A serial without an identity matches nothing, so the page must not mark a different text as a mismatch."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
         device = make_device(f"sync-mismatch-{mismatch}", serial=stored, librenms_cf={SERVER_KEY: 6620})
         _register_device(librenms_server, 6620, device.name, serial=reported)
