@@ -6676,6 +6676,72 @@ class TestBuildRowIntegratedDedupe:
 
 
 @pytest.mark.django_db
+class TestIntegratedChildWithAShortSerial:
+    """A serial without an identity still marks a child whose model and serial text repeat its parent's."""
+
+    CHILD = 200
+
+    def _render(self, name, child_serial):
+        """Render the Modules tab of an installed card "AB-12" with one child card; return the child row and installs."""
+        from django.core.cache import cache
+        from django.test.signals import template_rendered
+
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            module_tab_forms,
+            render_module_tab,
+            trusted_module_inventory_payload,
+        )
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+        from netbox_librenms_plugin.views.mixins import CacheMixin
+
+        # The installed parent card has the empty bay "Slot 2" that the child row matches.
+        device = make_device_with_module_bays(name, ["Slot 1"])
+        install_module(device, "Slot 1", "CARD-X", serial="AB-12", child_bays=["Slot 2"])
+        card = {"entPhysicalClass": "module", "entPhysicalModelName": "CARD-X"}
+        inventory = [
+            {"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalName": "Chassis", "entPhysicalContainedIn": 0},
+            {**card, "entPhysicalIndex": 100, "entPhysicalName": "Slot 1", "entPhysicalSerialNum": "AB-12", "entPhysicalContainedIn": 1},
+            {**card, "entPhysicalIndex": self.CHILD, "entPhysicalName": "Slot 2", "entPhysicalSerialNum": child_serial, "entPhysicalContainedIn": 100},
+        ]  # fmt: skip
+        cache_key = CacheMixin().get_cache_key(device, "inventory", "default")
+        cache.set(cache_key, trusted_module_inventory_payload(device, inventory))
+        tables = []
+
+        def capture(sender, template, context, **kwargs):
+            if template.name == BaseModuleTableView.partial_template_name:
+                tables.append(context["module_sync"]["table"])
+
+        template_rendered.connect(capture)
+        try:
+            html = render_module_tab(device)
+        finally:
+            template_rendered.disconnect(capture)
+            cache.delete(cache_key)
+        (table,) = tables
+        (row,) = [row for row in table.data if row["ent_physical_index"] == self.CHILD]
+        installs = [
+            form
+            for form in module_tab_forms(html).forms
+            if "install-module" in form["action"] and form["fields"].get("ent_index") == str(self.CHILD)
+        ]
+        return row, installs
+
+    def test_a_child_that_repeats_the_short_serial_is_integrated(self):
+        row, installs = self._render("integrated-short-serial", "AB-12")
+
+        assert row["status"] == "Integrated"
+        assert row["integrated_in_index"] == 100
+        assert installs == []
+
+    def test_a_child_with_another_short_serial_stays_independent(self):
+        row, installs = self._render("independent-short-serial", "CD-34")
+
+        assert row["status"] != "Integrated"
+        assert len(installs) == 1
+
+
+@pytest.mark.django_db
 class TestScopePreservedAcrossIntegratedContainer:
     """Verify an integrated container passes its bay scope to children without marking the scope as preserved."""
 

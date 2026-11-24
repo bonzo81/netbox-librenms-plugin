@@ -4530,7 +4530,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if item_class not in _INTEGRATED_MODULE_CLASSES:
             return None
         item_serial = item.get("entPhysicalSerialNum")
-        if not is_identity(item_serial, serial_context):
+        item_serial_text = _clean_librenms_value(item_serial)
+        if not item_serial_text:
             return None
         item_model = _clean_librenms_value(item.get("entPhysicalModelName")).lower()
         if not item_model:
@@ -4548,8 +4549,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if anc_class == "chassis":
                 return None
             if anc_class in _INTEGRATED_MODULE_CLASSES:
+                # A serial without an identity still names one card when both rows report the same text.
+                anc_serial = ancestor.get("entPhysicalSerialNum")
                 same_serial = (
-                    compare(ancestor.get("entPhysicalSerialNum"), item_serial, serial_context) is Comparison.SAME
+                    _clean_librenms_value(anc_serial) == item_serial_text
+                    or compare(anc_serial, item_serial, serial_context) is Comparison.SAME
                 )
                 anc_model = _clean_librenms_value(ancestor.get("entPhysicalModelName")).lower()
                 if same_serial and anc_model and anc_model == item_model:
