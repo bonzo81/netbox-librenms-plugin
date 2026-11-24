@@ -4194,6 +4194,44 @@ class TestDeviceConflictActionBranches:
         reloaded = Device.objects.get(pk=target.pk)
         assert (reloaded.serial, stored_mapping_for_test(reloaded)) == ("ABC123", None)
 
+    @pytest.mark.parametrize("action", ["link", "update"])
+    def test_a_serial_match_action_ignores_a_row_whose_own_rules_give_it_no_identity(self, client, action):
+        """The rejected row stores the incoming text, but its own rule gives it no identity; validation binds the match."""
+        from dcim.models import Device, DeviceType, Manufacturer
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        tag = f"branches-rejected-peer-{action}"
+        rejected = make_device(f"{tag}-rejected", serial="REJECTED-PEER-1")
+        vendor = Manufacturer.objects.create(name=f"{tag} vendor", slug=f"{tag}-vendor")
+        vendor_type = DeviceType.objects.create(manufacturer=vendor, model=f"{tag} model", slug=f"{tag}-model")
+        Device.objects.filter(pk=rejected.pk).update(device_type=vendor_type)
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=vendor, match_pattern=r"^REJECTED-PEER-1(X)?$", replacement=r"\1"
+        )
+        target = make_device(tag, serial="REJECTED-PEER-1")
+        self._register_device(42, f"{tag}-source", serial="REJECTED-PEER-1")
+        client.force_login(make_superuser(f"{tag}-user"))
+        server = {"server_key": self.server_key}
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
+            server,
+            HTTP_HX_REQUEST="true",
+        )
+        validation = details.context["validation"]
+        assert (validation["existing_device"], validation["existing_match_type"]) == (target, "serial")
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
+            {**server, "action": action, "existing_device_id": target.pk},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.headers.get("HX-Trigger") == "closeModal"
+        target.refresh_from_db()
+        assert stored_mapping_for_test(target) == {self.server_key: 42}
+
     def test_a_hostname_link_without_an_incoming_serial_reads_no_serial_rule(self, client):
         from django.urls import reverse
 

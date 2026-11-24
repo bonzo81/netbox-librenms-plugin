@@ -846,9 +846,9 @@ def device_assignment(device, incoming, *, rules: SerialRules, write_set_pks=())
     return Assignment(value)
 
 
-def other_device_holder(device, incoming, context: SerialContext, *, rules: SerialRules) -> Resolution | None:
-    """Return the refusing Resolution of the Devices apart from *device* that hold *incoming* under *context*."""
-    other = resolve_device_write(incoming, context, rules=rules, exclude_pks=[device.pk], master=device)
+def other_device_holder(device, incoming, *, rules: SerialRules) -> Resolution | None:
+    """Return the refusing Resolution of the Devices apart from *device* that hold *incoming*, as an import lookup counts them."""
+    other = resolve_device(incoming, rules=rules, exclude_pks=[device.pk])
     return other if other.kind in REFUSING else None
 
 

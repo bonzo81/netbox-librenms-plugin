@@ -392,17 +392,22 @@ def _determine_device_name(
     ]
 
 
-def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules, phase) -> bool:
+def _write_conflict(existing_device, incoming_serial, serial_rules) -> Resolution | None:
+    """Return the refusing Resolution of the Devices that a serial write of *incoming_serial* on *existing_device* would duplicate."""
+    other = resolve_device_write(
+        incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules, exclude_pks=[existing_device.pk]
+    )
+    return other if other.kind in REFUSING else None
+
+
+def _flag_serial_conflict(result, other, incoming_serial, phase) -> bool:
     """
-    Flag the serial conflict of a matched device: another Device holds the incoming serial.
+    Flag the serial conflict of a matched device when *other*, the refusing Resolution of its action, is set.
 
     Returns:
         bool: True when another Device holds the incoming serial, several do, or the lookup cannot tell.
 
     """
-    other = other_device_holder(
-        existing_device, incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules
-    )
     if other is None:
         return False
     result["serial_action"] = "conflict"
@@ -1061,7 +1066,12 @@ def validate_device_for_import(  # noqa: C901
                 elif drift is Comparison.UNAVAILABLE:
                     result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
                 elif is_identity(incoming_serial, context) and display(existing_device.serial):
-                    if not _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules, "updating"):
+                    if not _flag_serial_conflict(
+                        result,
+                        _write_conflict(existing_device, incoming_serial, serial_rules),
+                        incoming_serial,
+                        "updating",
+                    ):
                         result["serial_action"] = "update_serial"
                         result["warnings"].append(
                             f"Serial number differs from the NetBox record "
@@ -1142,12 +1152,20 @@ def validate_device_for_import(  # noqa: C901
                     drift = compare(existing_device.serial, incoming_serial, context)
                 # The link refuses another holder of the same serial, so validation offers no link either.
                 same_serial_held = drift is Comparison.SAME and _flag_serial_conflict(
-                    result, existing_device, incoming_serial, serial_rules, "importing"
+                    result,
+                    other_device_holder(existing_device, incoming_serial, rules=serial_rules),
+                    incoming_serial,
+                    "importing",
                 )
                 if drift is Comparison.UNAVAILABLE:
                     result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
                 elif drift is not None and is_identity(incoming_serial, context) and drift is not Comparison.SAME:
-                    if not _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules, "importing"):
+                    if not _flag_serial_conflict(
+                        result,
+                        _write_conflict(existing_device, incoming_serial, serial_rules),
+                        incoming_serial,
+                        "importing",
+                    ):
                         result["serial_action"] = "update_serial"
                         result["warnings"].append(
                             f"Hostname matches but the serial differs from the NetBox record "
