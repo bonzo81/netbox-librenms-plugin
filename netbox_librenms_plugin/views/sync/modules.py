@@ -3426,17 +3426,19 @@ class MoveModuleView(
                     .filter(pk=module_id, device=target_device, module_bay=target_bay)
                     .first()
                 )
-                if occupant:
-                    _require_unchanged_module_subtrees({occupant.pk: removing})
-                    if tree_holds(removing, module.pk):
-                        raise _ModuleActionRefused(MOVE_OCCUPANT_HOLDS_MODULE)
-                    if not all_trees_in_scope(self.restricted_queryset(Module, "delete"), [removing]):
-                        raise _ModuleActionRefused(MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE)
-                    # The offer signed the occupant tree that the operator saw; the delete removes only that tree.
-                    if request.POST.get("occupant_tree_token") != str(move_occupant_token(removing)):
-                        raise _ModuleActionRefused(MOVE_STALE)
-                    occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
-                    occupant.delete()
+                # The offer signed this occupant; an empty bay or another occupant is not what it showed.
+                if occupant is None:
+                    raise _ModuleActionRefused(MOVE_STALE)
+                _require_unchanged_module_subtrees({occupant.pk: removing})
+                if tree_holds(removing, module.pk):
+                    raise _ModuleActionRefused(MOVE_OCCUPANT_HOLDS_MODULE)
+                if not all_trees_in_scope(self.restricted_queryset(Module, "delete"), [removing]):
+                    raise _ModuleActionRefused(MOVE_REMOVAL_OUTSIDE_DELETE_SCOPE)
+                # The offer signed the occupant tree that the operator saw; the delete removes only that tree.
+                if request.POST.get("occupant_tree_token") != str(move_occupant_token(removing)):
+                    raise _ModuleActionRefused(MOVE_STALE)
+                occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
+                occupant.delete()
             _refuse_identity_move(module, target_device, moving, serial_rules, scope)
             from_device, from_bay = module.device.name, module.module_bay.name
             module.module_bay = target_bay

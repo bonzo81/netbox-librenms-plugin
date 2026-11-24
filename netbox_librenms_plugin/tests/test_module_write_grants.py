@@ -621,6 +621,33 @@ def _module_places(*modules):
     )
 
 
+@pytest.mark.parametrize("change", ["deleted", "moved"])
+def test_move_refuses_an_occupant_that_left_the_bay_after_its_preview(ui, c8300, change):
+    """The dialog signed an occupant; a bay that is empty since is not the state the operator confirmed."""
+    from dcim.models import Module, ModuleBay
+
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import MOVE_STALE
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "holder")
+    Module.objects.filter(pk=child.pk).delete()
+    form = _previewed_move_form(ui, device)
+    if change == "deleted":
+        Module.objects.filter(pk=installed.pk).delete()
+    else:
+        free = ModuleBay.objects.get(device=device, name=_bay_name(entities, SERVICE_MODULE))
+        Module.objects.filter(pk=installed.pk).update(module_bay=free)
+    places = _module_places(holder)
+
+    response = post(ui, *form)
+
+    assert MOVE_STALE in messages_of(response)
+    assert _module_places(holder) == places
+
+
 def test_move_refuses_an_occupant_that_contains_the_holder(ui, c8300):
     """Move deletes the occupant first; an occupant above the holder would delete the module that Move keeps."""
     from dcim.models import ModuleBay
