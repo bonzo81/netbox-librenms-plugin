@@ -1520,9 +1520,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
             if row.get("depth", 0) == 0:
                 branch = row["branch_rows"] = []
-                # A branch below a top-level module that cannot be created has no bays to install into.
-                if _install_refused(row):
-                    branch = None
             if branch is not None and row["selectable"]:
                 branch.append([index, row["selected_device_id"]])
 
@@ -2282,6 +2279,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 and parent_bay_matched_but_uninstalled
                 and sub_row.get("module_type_id")
                 and not _install_refused(sub_row)
+                # The bays of such a child come with its parent, so a parent that cannot be created gives none.
+                and not _install_refused(table_data[parent_row_idx])
             ):
                 table_data[parent_row_idx]["has_installable_children"] = True
 

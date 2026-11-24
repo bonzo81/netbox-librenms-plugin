@@ -901,3 +901,26 @@ def test_an_occupied_bay_offers_no_serial_update_beside_a_confirmed_holder(live_
         if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
     ]
     assert len(update_forms) == (1 if offered else 0)
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_a_bayless_parent_with_a_long_serial_keeps_the_branch_of_its_children(live_librenms, fits):
+    """The parent matches no bay, so its children install into the device's own bays without it."""
+    device = make_device_with_module_bays(f"branch-bayless-{fits}", ["Slot 1"])
+    seed_mapping(device, "default", own=81)
+    parent_type = make_module_type(f"BRANCH-BAYLESS-PARENT-{fits}")
+    child_type = make_module_type(f"BRANCH-BAYLESS-CHILD-{fits}")
+    rows = [
+        _item(10, parent_type.model, "Chassis Carrier", entPhysicalSerialNum="N" * (50 if fits else 51)),
+        _item(11, child_type.model, "Slot 1", parent=10, entPhysicalSerialNum="CHILD-SN1"),
+    ]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=81)
+
+    html = render_module_tab(device)
+
+    branch_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "install-branch" in form["action"] and form["fields"].get("parent_index") == "10"
+    ]
+    assert len(branch_forms) == 1
