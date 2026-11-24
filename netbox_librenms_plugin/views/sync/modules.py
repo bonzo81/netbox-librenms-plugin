@@ -2945,7 +2945,9 @@ class ModuleMismatchPreviewView(
                 # The serial update and Replace store the LibreNMS text, so a serial that does not fit offers neither.
                 "serial_fit_refusal": stored_form_refusal(incoming, Module),
                 "serial_conflict": serial_conflict,
-                "can_move_from": serial_conflict is not None
+                # The Move POST refuses every move below NetBox 4.7.
+                "can_move_from": netbox_relocates_module_subtree()
+                and serial_conflict is not None
                 and not serial_conflict_owns_bay
                 # Move deletes the module in this bay and the modules below it.
                 and _trees_in_delete_scope(deletable, [installed_tree])

@@ -899,8 +899,9 @@ def test_the_table_offers_move_only_when_the_destination_rules_keep_the_identity
     [("TAG CARD12", True, False), ("CARD12", True, True), ("TAG CARD12", False, False)],
     ids=["no-destination-identity", "same-identity", "other-destination-identity"],
 )
+@pytest.mark.parametrize("netbox", ["installed", "below-4.7"])
 def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holder(
-    ui, settings, librenms_server, stored_serial, destination_rule, admitted
+    ui, settings, librenms_server, monkeypatch, stored_serial, destination_rule, admitted, netbox
 ):
     from django.urls import reverse
 
@@ -935,6 +936,10 @@ def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holde
         )
     bay_name = entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"]
     install_module(device, bay_name, *_nim(entities, "OLD"))
+    if netbox == "below-4.7":
+        # The Move POST refuses every move below NetBox 4.7, so the preview must not offer one.
+        monkeypatch.setattr("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", lambda: False)
+    relocates = netbox == "installed" and netbox_relocates_module_subtree()
 
     preview = ui.get(rendered_preview_url(render(ui, device), REAL_NIM), HTTP_HX_REQUEST="true")
 
@@ -946,9 +951,7 @@ def test_mismatch_preview_offers_move_only_when_the_destination_admits_the_holde
     move_holders = [
         form["fields"]["conflict_module_id"] for form in module_tab_forms(html).forms if form["action"] == move_url
     ]
-    # NetBox below 4.7 refuses a Move, so only 4.7 must offer one.
-    if netbox_relocates_module_subtree() or not admitted:
-        assert move_holders == ([str(holder.pk)] if admitted else [])
+    assert move_holders == ([str(holder.pk)] if admitted and relocates else [])
 
 
 def _preview_serial_form(client, device, entities):
