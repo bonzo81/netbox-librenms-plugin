@@ -4351,6 +4351,43 @@ class TestDeviceConflictActionBranches:
         assert b'name="action" value="update"' not in details.content
         assert vm.name.encode() not in details.content
 
+    def test_a_hostname_link_refuses_a_serial_that_a_broken_master_link_cannot_compare(self, client):
+        from html import unescape
+
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        target = _stray_chassis_member("branches-unavailable-link", "UNAVAILABLE-SN-1")
+        make_device(f"{target.name}-other", serial="UNAVAILABLE-SN-1")
+        self._register_device(42, target.name, serial="UNAVAILABLE-SN-1")
+        client.force_login(make_superuser(f"{target.name}-user"))
+        server = {"server_key": self.server_key}
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
+            server,
+            HTTP_HX_REQUEST="true",
+        )
+        validation = details.context["validation"]
+        assert (validation["existing_device"], validation["existing_match_type"]) == (target, "hostname")
+        assert (validation["serial_action"], validation["serial_conflict"]["unavailable"]) == (
+            "conflict",
+            UNAVAILABLE_MASTER_LINK,
+        )
+        assert b'name="action" value="link"' not in details.content
+        assert UNAVAILABLE_MASTER_LINK in unescape(details.content.decode())
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
+            {**server, "action": "link", "existing_device_id": target.pk},
+            HTTP_HX_REQUEST="true",
+        )
+
+        self._assert_htmx_error(response, f"Serial 'UNAVAILABLE-SN-1' cannot be matched. {UNAVAILABLE_MASTER_LINK}")
+        target.refresh_from_db()
+        assert stored_mapping_for_test(target) is None
+
     def test_a_hostname_link_without_an_incoming_serial_reads_no_serial_rule(self, client):
         from django.urls import reverse
 

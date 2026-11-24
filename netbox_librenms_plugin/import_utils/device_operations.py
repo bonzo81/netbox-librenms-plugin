@@ -1181,7 +1181,9 @@ def validate_device_for_import(  # noqa: C901
                     "importing",
                 )
                 if drift is Comparison.UNAVAILABLE:
-                    result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
+                    # The link refuses a serial that it cannot compare, so validation offers no link either.
+                    unavailable = Resolution(ResolutionKind.UNAVAILABLE, reason=context.unavailable)
+                    _flag_serial_conflict(result, unavailable, incoming_serial, "importing")
                 elif drift is not None and is_identity(incoming_serial, context) and drift is not Comparison.SAME:
                     if not _flag_serial_conflict(
                         result,
