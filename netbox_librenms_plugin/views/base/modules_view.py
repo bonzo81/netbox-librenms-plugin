@@ -4661,7 +4661,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         When a single conflict is found the row gets:
 
           serial_conflict_module: the conflicting Module object (with device/module_bay loaded)
-          can_move_from: True if the target rules give the stored serial the reported identity
+          can_move_from: True if the bay is empty and the target rules give the stored serial the reported identity
 
         More than one match sets ``serial_conflict_ambiguous`` and picks nothing.
         A holder on the row's target Device clears ``can_install``.
@@ -4704,9 +4704,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["serial_conflict_module"] = conflict
                 row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                 context = row["_serial_context"]
-                # A move into a bay of the holder's own subtree always refuses, so the row offers none.
-                if module_move_serials_admitted(serial, conflict.serial, context) and not subtree_owns_bay(
-                    module_subtree_serials(conflict.pk), bay_owners.get(row.get("module_bay_id"))
+                # The table Move removes no occupant, and a move into the holder's own subtree always refuses.
+                if (
+                    not installed_id
+                    and module_move_serials_admitted(serial, conflict.serial, context)
+                    and not subtree_owns_bay(
+                        module_subtree_serials(conflict.pk), bay_owners.get(row.get("module_bay_id"))
+                    )
                 ):
                     row["can_move_from"] = True
             elif found.kind is ResolutionKind.AMBIGUOUS:

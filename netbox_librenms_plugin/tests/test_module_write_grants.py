@@ -495,6 +495,19 @@ def test_the_table_offers_move_only_when_the_serial_holder_does_not_own_the_bay(
     assert holders == ([] if owns_destination else [str(holder.pk)])
 
 
+def test_the_table_offers_move_only_into_an_empty_bay(ui, c8300):
+    """The table Move removes no occupant, so it always refuses for an occupied bay; the dialog covers that case."""
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device, entities = c8300
+    _tagged_holder(device, entities, owns_destination=False)
+    install_module(device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD")
+
+    assert _move_forms(render(ui, device)) == []
+
+
 def test_replace_refuses_a_serial_holder_that_owns_the_bay_since_its_preview(ui, c8300):
     from dcim.models import Module
 

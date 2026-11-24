@@ -3688,7 +3688,8 @@ class TestDetectSerialConflicts:
         view._detect_serial_conflicts([row])
 
         assert row.get("serial_conflict_module") == conflict
-        assert row.get("can_move_from") is True
+        # The table Move removes no occupant, so an occupied bay offers none; the dialog covers it.
+        assert "can_move_from" not in row
 
     def test_no_conflict_when_conflict_is_same_module(self):
         """When the only module with the serial IS the installed module, no conflict is set."""
