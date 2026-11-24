@@ -2819,16 +2819,32 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert message_texts(request, "error") == [GrantRefusal.STALE.message]
 
     def test_module_replace_keeps_a_previewed_serial_holder_outside_delete_scope(self):
-        """The preview shows the holder, so the grant is fresh; the delete scope of the holder must refuse."""
+        """A preview inside the delete scope signs the Replace; once the scope misses the holder, the POST refuses."""
+        from types import SimpleNamespace
+
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.contrib.auth import get_user_model
         from django.core.cache import cache
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
+        from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
-        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView, _SerialConflictUnavailable
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            get,
+            make_request,
+            make_view,
+            message_texts,
+            module_tab_forms,
+            rendered_modal_form,
+            rendered_preview_query,
+        )
+        from netbox_librenms_plugin.views.sync.modules import (
+            ModuleMismatchPreviewView,
+            ReplaceModuleView,
+            _SerialConflictUnavailable,
+        )
 
         device = make_device("scope-replace-kept")
         other_device = make_device("scope-replace-kept-holder")
@@ -2855,7 +2871,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                 (Module, "view", {"pk__in": [target.pk, holder.pk]}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
-                (Module, "delete", {"pk": target.pk}),
+                (Module, "delete", {"pk__in": [target.pk, holder.pk]}),
                 (Interface, "add", None),
                 (Interface, "change", None),
                 (Interface, "delete", None),
@@ -2875,6 +2891,22 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
         _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
         assert fields["conflict_module_id"] == str(holder.pk)
+        # The delete scope now covers only the target, so a new preview offers no Replace.
+        assert (
+            ObjectPermission.objects.filter(name="scope-replace-kept-delete-6").update(constraints={"pk": target.pk})
+            == 1
+        )
+        user = get_user_model().objects.get(pk=user.pk)
+        query = rendered_preview_query(device, 100, user=user, server_key=server_key)
+        preview_request = make_request("get", query, user=user)
+        preview_view = make_view(
+            ModuleMismatchPreviewView, preview_request, librenms_api=SimpleNamespace(server_key=server_key)
+        )
+        preview = get(preview_view, preview_request, pk=device.pk)
+        assert preview.status_code == 200, preview.content
+        assert [
+            form for form in module_tab_forms(preview.content.decode()).forms if "replace-module" in form["action"]
+        ] == []
         request = self._request(user, fields)
         view.setup(request)
         try:
@@ -2888,6 +2920,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert (target.serial, holder.serial) == ("OLD-KEPT", "INCOMING-KEPT")
         # The refusal of the holder's delete scope, not an earlier refusal of the preview.
         assert message_texts(request, "error") == [_SerialConflictUnavailable.MESSAGE.format(serial="INCOMING-KEPT")]
+        assert other_device.name not in " ".join(message_texts(request, "error"))
         # The delete scope refuses before the write locks the holder's Device or walks the holder's subtree.
         assert other_device.pk not in self._locked_device_ids(queries)
         holder_subtree = re.compile(rf'"dcim_module"\."id" = {holder.pk}\b|"module_id" IN \({holder.pk}\)')
