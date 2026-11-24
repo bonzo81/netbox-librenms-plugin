@@ -34,6 +34,7 @@ from ..serial_identity import (
     resolve_device,
     resolve_device_write,
     stored_form,
+    stored_form_refusal,
 )
 from ..transactions import atomic_with_events
 from ..platform_versions import (
@@ -1743,6 +1744,9 @@ def validate_device_for_import(  # noqa: C901
                         f"NetBox record. This may indicate the wrong device was matched."
                     )
         else:
+            # The import stores the LibreNMS serial, and the writer refuses one that does not fit the field.
+            if not import_as_vm and (refusal := stored_form_refusal(incoming_serial, Device)):
+                result["issues"].append(refusal)
             result["can_import"] = len(result["issues"]) == 0
 
             if import_as_vm:

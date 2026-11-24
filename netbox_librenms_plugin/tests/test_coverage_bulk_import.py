@@ -1037,3 +1037,38 @@ def test_bulk_confirmation_reuses_serial_rules_and_refreshes_them_next_request(c
     entries, batch_reads = confirm(list(rows))
     assert all(not entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)
     assert batch_reads == one_key_reads
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("fits", [True, False])
+def test_the_bulk_confirmation_blocks_a_new_device_whose_serial_does_not_fit(client, live_librenms, fits):
+    """The import stores the LibreNMS serial, and the field holds 50 characters."""
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 291 if fits else 292
+    row = _libre_device(
+        device_id,
+        f"confirm-fit-{fits}",
+        serial="N" * (50 if fits else 51),
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _register_device(live_librenms, row)
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-fit-user-{fits}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (reason in entry["validation"]["issues"]) is (not fits)
+    assert (escape(reason) in response.content.decode()) is (not fits)
