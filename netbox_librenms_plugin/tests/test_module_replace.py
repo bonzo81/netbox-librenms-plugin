@@ -448,6 +448,36 @@ class TestReplaceModuleView:
         assert replacement.serial == "SHARED-NEW-SERIAL"
         assert any("Removed REPLACE-CONFLICT-OWNER-TYPE" in text for text in message_texts(request, "info"))
 
+    @pytest.mark.parametrize(("held", "refused"), [("S/N ABC123", True), ("OTHER123", False)])
+    def test_replacement_refuses_a_sibling_that_stores_the_rule_output(self, held, refused):
+        """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123", which keys again."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        Module, device, old_type, new_type, bay, installed, inventory = self._setup(
+            f"legacy-{refused}", new_serial="S/N S/N ABC123"
+        )
+        sibling = _module(device, make_module_bay(device, f"Replace Sibling {refused}"), old_type, held)
+        request, view, cache_key = self._post(device, inventory)
+        try:
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        replacement = Module.objects.get(device=device, module_bay=bay)
+        if refused:
+            assert message_texts(request, "error") == [
+                "Serial 'S/N S/N ABC123' is already installed on this device. Nothing was replaced."
+            ]
+            assert replacement.pk == installed.pk
+        else:
+            assert (replacement.module_type, replacement.serial) == (new_type, "S/N S/N ABC123")
+        sibling.refresh_from_db()
+        assert sibling.serial == held
+
     def test_interface_scope_is_checked_before_the_old_module_is_deleted(self):
         from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
 

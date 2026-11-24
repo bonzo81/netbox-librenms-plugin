@@ -3193,6 +3193,17 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # The delete cascades through both trees, so the delete scope must cover every module in them.
                 if not _trees_in_delete_scope(self.restricted_queryset(Module, "delete"), removals.values()):
                     raise _ModuleActionRefused(REMOVAL_OUTSIDE_DELETE_SCOPE)
+                # A legacy row on the target that stores the key of the incoming serial can be the same part.
+                if resolve_module(
+                    incoming,
+                    rules=serial_rules,
+                    device_ids=[target_device.pk],
+                    exclude_pks=[pk for subtree in removals.values() for pk, _serial in subtree],
+                    writer=serial_context,
+                ).uncertain:
+                    raise _ModuleActionRefused(
+                        f"Serial '{serial}' is already installed on this device. Nothing was replaced."
+                    )
 
                 # Remove the serial-conflicting module from its current location.
                 if conflict_module:
