@@ -1628,6 +1628,47 @@ class TestDeviceValidationDetailsView:
         # The reason is visible text, not only a hover title.
         assert escape(UNAVAILABLE_MASTER_LINK) in re.sub(r"<[^>]*>", "", serial_row)
 
+    @pytest.mark.parametrize("match", ["primary_ip", "serial"])
+    @pytest.mark.parametrize("fits", [True, False])
+    def test_update_and_link_is_offered_only_for_a_serial_that_fits(self, match, fits):
+        """The update action writes the LibreNMS serial, and the field holds 50 characters."""
+        from dcim.models import Device
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        length = 50 if fits else 51
+        if match == "primary_ip":
+            existing = make_device(f"details-ip-fit-{fits}", serial="OLD-SERIAL-1")
+            serial = "N" * length
+        else:
+            NormalizationRule.objects.get_or_create(
+                scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+            )
+            existing = make_device(f"details-serial-fit-{fits}", serial="N" * (length - 4))
+            serial = f"S/N {'N' * (length - 4)}"
+        ip = ip_on(existing, "198.18.21.9/24", "management")
+        Device.objects.filter(pk=existing.pk).update(primary_ip4=ip)
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=f"reported-{match}-{fits}",
+            hardware=existing.device_type.model,
+            os="ios",
+            serial=serial,
+            ip=str(ip.address.ip),
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert ("IP match" if match == "primary_ip" else "Name differs") in content
+        assert ('name="action" value="update"' in content) is fits
+        reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+        assert (escape(reason) in content) is (not fits)
+
     @pytest.mark.parametrize(("serial", "fits"), [("N" * 50, True), ("N" * 51, False)])
     def test_update_serial_and_link_is_offered_only_for_a_serial_that_fits(self, serial, fits):
         """A hostname match with another serial offers the update, but the field holds 50 characters."""

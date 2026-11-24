@@ -802,15 +802,19 @@
             {% if validation.device_type_mismatch %}
               <div class="form-check mb-2">
                 <input class="form-check-input" type="checkbox" name="force" id="force-promote-{{ libre_device.device_id }}"
-                       onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+                       onchange="this.closest('form').querySelector('.force-action-btn')?.toggleAttribute('disabled', !this.checked)">
                 <label class="form-check-label text-danger" for="force-promote-{{ libre_device.device_id }}">
                   <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
                 </label>
               </div>
             {% endif %}
+            {% if sync_info.serial_fit_refusal %}
+            <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
+            {% else %}
             <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
               <i class="mdi mdi-pencil"></i> Update &amp; Link
             </button>
+            {% endif %}
           </form>
         </div>
       </div>
@@ -1098,7 +1102,7 @@
           {% if validation.device_type_mismatch %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"
-                     onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+                     onchange="this.closest('form').querySelector('.force-action-btn')?.toggleAttribute('disabled', !this.checked)">
               <label class="form-check-label text-danger" for="force-serial-{{ libre_device.device_id }}">
                 <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
               </label>
@@ -1110,9 +1114,13 @@
               <i class="mdi mdi-link-plus"></i> Link to LibreNMS
             </button>
           {% elif validation.serial_action == 'hostname_differs' %}
+            {% if sync_info.serial_fit_refusal %}
+            <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
+            {% else %}
             <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
               <i class="mdi mdi-pencil"></i> Update &amp; Link
             </button>
+            {% endif %}
           {% endif %}
         </form>
       </div>
@@ -1161,15 +1169,19 @@
           {% if validation.device_type_mismatch %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-primary-ip-{{ libre_device.device_id }}"
-                     onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+                     onchange="this.closest('form').querySelector('.force-action-btn')?.toggleAttribute('disabled', !this.checked)">
               <label class="form-check-label text-danger" for="force-primary-ip-{{ libre_device.device_id }}">
                 <i class="mdi mdi-alert-circle"></i> Device type mismatch, check to force
               </label>
             </div>
           {% endif %}
+          {% if sync_info.serial_fit_refusal %}
+          <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
+          {% else %}
           <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
             <i class="mdi mdi-pencil"></i> Update &amp; Link
           </button>
+          {% endif %}
         </form>
       </div>
       {% endif %}
