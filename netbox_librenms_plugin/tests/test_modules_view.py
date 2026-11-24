@@ -3784,6 +3784,37 @@ class TestDetectSerialConflicts:
 
         assert count([1, 2, 3]) == count([1])
 
+    def test_a_move_refused_on_one_member_keeps_the_same_holders_move_to_another(self):
+        """The destination check refuses per target Device, so a refusal on one member must not hide another."""
+        from dcim.models import ModuleBay
+
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays, make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        source = make_device_with_module_bays("per-target-holder", ["Slot 1"])
+        holder = install_module(source, "Slot 1", "PER-TARGET-CARD", serial="PER-TARGET-1", child_bays=["Child"])
+        install_module(source, "Child", "PER-TARGET-CHILD", serial="PER-TARGET-CHILD", parent_module=holder)
+        refusing = make_device_with_module_bays("per-target-refusing", ["Bay", "Held"])
+        # This member already holds the identity of the holder's child, so a Move onto it refuses.
+        install_module(refusing, "Held", "PER-TARGET-SIBLING", serial="PER-TARGET-CHILD")
+        accepting = make_device_with_module_bays("per-target-accepting", ["Bay"])
+        view = self._view()
+        view.request = make_request("get", user=make_superuser("per-target-user"))
+        rows = [
+            {
+                "can_install": True,
+                "serial": "PER-TARGET-1",
+                "selected_device_id": member.pk,
+                "module_bay_id": ModuleBay.objects.get(device=member, name="Bay").pk,
+                "_serial_context": view._row_serial_context(),
+            }
+            for member in (refusing, accepting)
+        ]
+
+        view._detect_serial_conflicts(rows)
+
+        assert [row.get("can_move_from") for row in rows] == [None, True]
+
     def test_ambiguous_when_multiple_conflicts_for_same_serial(self):
         """When multiple modules share the same serial, mark the row ambiguous instead of picking one."""
         view = self._view()

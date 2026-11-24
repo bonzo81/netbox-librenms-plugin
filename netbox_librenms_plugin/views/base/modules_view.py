@@ -4711,17 +4711,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         for row, holder, _owner in move_candidates:
             if holder.pk in movable and holder.device_id != row.get("selected_device_id"):
                 crossing[row.get("selected_device_id")].append((row, holder))
-        # A row without a target Device cannot run that check, so it offers no cross-device Move.
-        held = {holder.pk for _row, holder in crossing.pop(None, [])}
+        # A refusal holds for one target Device only. A row without a target cannot run the check, so it offers none.
+        held = {(None, holder.pk) for _row, holder in crossing.pop(None, [])}
         for target_id, pairs in crossing.items():
-            held |= relocations_held(
+            refused = relocations_held(
                 {holder.pk: trees[holder.pk] for _row, holder in pairs},
                 pairs[0][0]["_serial_context"],
                 target_id,
                 rules=serial_rules,
             )
+            held |= {(target_id, holder_pk) for holder_pk in refused}
         for row, holder, owner in move_candidates:
-            if holder.pk in movable and holder.pk not in held and not subtree_owns_bay(trees[holder.pk], owner):
+            if (
+                holder.pk in movable
+                and (row.get("selected_device_id"), holder.pk) not in held
+                and not subtree_owns_bay(trees[holder.pk], owner)
+            ):
                 row["can_move_from"] = True
 
     def _detect_serial_conflicts(self, table_data, index_map=None, *, serial_rules=None):
