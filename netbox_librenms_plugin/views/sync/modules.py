@@ -111,6 +111,7 @@ from netbox_librenms_plugin.views.base.modules_view import (
     built_in_candidate,
     reusable_built_in_rule,
     select_module_interface,
+    viewable_modules,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -2905,7 +2906,7 @@ class ModuleMismatchPreviewView(
         )
         if elsewhere.kind is ResolutionKind.UNIQUE:
             serial_conflict = (
-                self.restricted_queryset(Module)
+                viewable_modules(self)
                 .filter(pk=elsewhere.object.pk)
                 .select_related("module_type", "module_bay", "device")
                 .first()
@@ -3106,7 +3107,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 if previous is not None:
                     # A holder that the preview can show refuses before the write walks it or locks its Device.
                     # A hidden holder keeps the stale-grant answer after the lock, so the refusal does not disclose it.
-                    visible = self.restricted_queryset(Module).filter(pk=previous.pk).exists()
+                    visible = viewable_modules(self).filter(pk=previous.pk).exists()
                     if visible and not self.restricted_queryset(Module, "delete").filter(pk=previous.pk).exists():
                         raise _SerialConflictUnavailable(display(incoming))
                     removals[previous.pk] = module_subtree_serials(previous.pk)
@@ -3182,9 +3183,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     scope.require_devices([elsewhere.object.device_id])
                     if elsewhere.object.pk not in removals:
                         raise _ModuleActionRefused("The conflicting module changed. Refresh Modules and try again.")
+                    # The success message names the holder's place, so the user must also see it.
                     conflict_module = (
                         self.restricted_queryset(Module, "delete")
-                        .filter(pk=elsewhere.object.pk)
+                        .filter(pk=elsewhere.object.pk, pk__in=viewable_modules(self).values("pk"))
                         .select_for_update(of=("self",))
                         .select_related("module_type", "module_bay", "device")
                         .first()

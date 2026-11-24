@@ -308,6 +308,13 @@ def _admitting_rules(item: dict, rules: list) -> list:
     return [rule for rule in rules if rule.matches_inventory_item(item)]
 
 
+def viewable_modules(view):
+    """Return the Modules whose location the user of *view* may see: the Module and its Device are both in scope."""
+    from dcim.models import Device, Module
+
+    return view.restricted_queryset(Module).filter(device__in=view.restricted_queryset(Device))
+
+
 class _StaleInventorySnapshot(Exception):
     """A cached inventory snapshot grouped serials under a serial context that changed since."""
 
@@ -4659,8 +4666,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             serial_rules (SerialRules | None): The page's serial rules; None reads them.
 
         """
-        from dcim.models import Device, Module
-
         rows = self._identity_candidate_rows(table_data, index_map)
         if not rows:
             return
@@ -4675,11 +4680,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         visible_conflict_pks = set()
         if matched_pks and getattr(self, "request", None) is not None:
             # A module is named only when the user may view it and its device.
-            visible_conflict_pks = set(
-                self.restricted_queryset(Module)
-                .filter(pk__in=matched_pks, device__in=self.restricted_queryset(Device))
-                .values_list("pk", flat=True)
-            )
+            visible_conflict_pks = set(viewable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
         pending_installs = defaultdict(list)
         for row in rows:
             serial = row["serial"]

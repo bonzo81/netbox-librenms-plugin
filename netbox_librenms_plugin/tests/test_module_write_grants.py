@@ -557,6 +557,71 @@ def _previewed_replace_form(client, device):
     return rendered_module_form(preview.content.decode(), "replace-module", REAL_NIM)
 
 
+def _preview_html(client, device):
+    preview = client.get(rendered_preview_url(render(client, device), REAL_NIM), HTTP_HX_REQUEST="true")
+    assert preview.status_code == 200, preview.content
+    return preview.content.decode()
+
+
+def _move_forms(html):
+    return [form for form in module_tab_forms(html).forms if "move-module" in form["action"]]
+
+
+def _module_writer(name, *, device_scope=None, delete_scope=None):
+    """Create a user with the Replace and Move permissions; a scope is a constraint on the viewed Devices or deletes."""
+    from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    user = make_user_with_perms(name, [("view", Device)], constraints=device_scope)
+    user = grant(user, "delete", Module, constraints=delete_scope, name=f"{name}-module-delete")
+    for action, model in [("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)]:
+        user = grant(user, action, model)
+    for action, model in [("change", Module), ("add", Interface), ("change", Interface), ("delete", Interface)]:
+        user = grant(user, action, model)
+    return user
+
+
+def test_the_preview_names_no_holder_on_a_device_the_user_cannot_view(client, c8300):
+    """The table names a holder only with view on its Device; the preview must not show its place either."""
+    device, entities = c8300
+    holder, _installed, _child = _remote_holder_with_child(device, entities, "holder")
+    client.force_login(_module_writer("preview-hidden-device", device_scope={"pk": device.pk}))
+
+    html = _preview_html(client, device)
+
+    assert holder.device.name not in html
+    assert _replace_forms(html) == []
+    assert _move_forms(html) == []
+
+
+def test_replace_refuses_a_holder_whose_device_the_user_can_no_longer_view(client, c8300):
+    from dcim.models import Module
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.views.sync.modules import _SerialConflictUnavailable
+
+    device, entities = c8300
+    holder, installed, child = _remote_holder_with_child(device, entities, "holder")
+    user = _module_writer("replace-hidden-device")
+    client.force_login(user)
+    form = _previewed_replace_form(client, device)
+    assert form[1]["conflict_module_id"] == str(holder.pk)
+    ObjectPermission.objects.filter(name__startswith="replace-hidden-device-view-device").update(
+        constraints={"pk": device.pk}
+    )
+    before = written_state(device)
+
+    response = post(client, *form)
+
+    texts = messages_of(response)
+    assert _SerialConflictUnavailable.MESSAGE.format(serial=_nim(entities)[1]) in texts
+    assert holder.device.name not in " ".join(texts)
+    assert written_state(device) == before
+    kept = {holder.pk, installed.pk, child.pk}
+    assert set(Module.objects.filter(pk__in=kept).values_list("pk", flat=True)) == kept
+
+
 @pytest.mark.parametrize("parent", ["holder", "installed"])
 def test_replace_refuses_a_removal_tree_with_a_module_outside_the_delete_scope(client, c8300, parent):
     """A scope that covers both trees offers Replace; one that misses a child offers none and refuses the POST."""
