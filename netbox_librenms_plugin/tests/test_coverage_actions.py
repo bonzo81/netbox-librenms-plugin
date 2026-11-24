@@ -4058,6 +4058,44 @@ class TestDeviceConflictActionBranches:
             self._assert_success(response)
             assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("state", ["other-holder", "other-holder-other-form", "sole-holder", "serial-differs"])
+    def test_a_hostname_link_refuses_only_when_another_device_holds_the_same_serial(self, client, state):
+        from django.urls import reverse
+
+        _seed_decorated_serial_rule()
+        stored = {"other-holder-other-form": "S/N LINK-SN-1", "serial-differs": "LINK-OLD-1"}.get(state, "LINK-SN-1")
+        target = make_device(f"branches-hostname-link-{state}", serial=stored)
+        if state != "sole-holder":
+            make_device(f"{target.name}-other", serial="LINK-SN-1")
+        self._register_device(42, target.name, serial="LINK-SN-1")
+        client.force_login(make_superuser(f"{target.name}-user"))
+        server = {"server_key": self.server_key}
+        if state != "serial-differs":
+            details = client.get(
+                reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 42}),
+                server,
+                HTTP_HX_REQUEST="true",
+            )
+            validation = details.context["validation"]
+            assert (validation["existing_device"], validation["existing_match_type"]) == (target, "hostname")
+            assert validation["serial_action"] is None
+            assert b'name="action" value="link"' in details.content
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
+            {**server, "action": "link", "existing_device_id": target.pk},
+            HTTP_HX_REQUEST="true",
+        )
+
+        target.refresh_from_db()
+        assert target.serial == stored
+        if state.startswith("other-holder"):
+            self._assert_htmx_error(response, "Serial conflict: 'LINK-SN-1' is already assigned to device")
+            assert stored_mapping_for_test(target) is None
+        else:
+            self._assert_success(response)
+            assert stored_mapping_for_test(target) == {self.server_key: 42}
+
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
 

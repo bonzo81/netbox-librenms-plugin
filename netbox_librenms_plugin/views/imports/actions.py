@@ -2339,7 +2339,8 @@ class DeviceConflictActionView(
                 serial_rules = SerialRules.load()
                 # A forced DeviceType change decides the identity of the stored serials too.
                 retyped = retype_scope(existing_device) if librenms_device_type and existing_model is Device else None
-                lock_serials = [libre_device.get("serial")] if writes_serial or serial_matched else []
+                # Each Device action reads who holds the serial, also a link that writes none.
+                lock_serials = [libre_device.get("serial")] if existing_model is Device else []
                 # The serial identity locks come before the claim and the row lock.
                 if retyped is not None:
                     retype_lock(retyped, rules=serial_rules, serials=lock_serials)
@@ -2399,6 +2400,16 @@ class DeviceConflictActionView(
                         fields.append("device_type")
                     if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
                         return err
+                    if existing_model is Device:
+                        incoming_serial = libre_device.get("serial")
+                        context = locked_context(existing_device, rules=serial_rules)
+                        # A link writes no serial, but another holder of the same serial still refuses it.
+                        if compare(existing_device.serial, incoming_serial, context) is Comparison.SAME and (
+                            conflict := written_device_conflict(existing_device, rules=serial_rules)
+                        ):
+                            return _htmx_error_response(
+                                serial_conflict_text(conflict, display(incoming_serial), request.user)
+                            )
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
