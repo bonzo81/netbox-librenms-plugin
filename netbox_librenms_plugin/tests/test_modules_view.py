@@ -3787,7 +3787,9 @@ class TestDetectSerialConflicts:
         row = {"can_install": True, "serial": "SCOPE-SN1", "selected_device_id": page.pk}
         unassigned = {"can_install": True, "serial": "SCOPE-SN2", "selected_device_id": page.pk}
 
-        view._detect_serial_conflicts([row, unassigned])
+        # Each row gets its own call: a second open serial would keep the global read going past three holders.
+        view._detect_serial_conflicts([row])
+        view._detect_serial_conflicts([unassigned])
 
         assert row.get("serial_conflict_ambiguous") is True
         assert row["can_install"] is False
