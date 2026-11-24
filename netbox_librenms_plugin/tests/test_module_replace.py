@@ -129,6 +129,29 @@ class TestModuleMismatchPreviewView:
         # The reported symptom: the row read as a serial mismatch against itself.
         assert "Only the serial differs" not in html
 
+    @pytest.mark.parametrize(("serial", "fits"), [("N" * 50, True), ("N" * 51, False)])
+    def test_the_preview_offers_no_serial_write_for_a_serial_that_does_not_fit(self, serial, fits):
+        """The serial field holds 50 characters, and both the serial update and Replace store the LibreNMS text."""
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        device, _installed, request, view, inventory = self._setup(f"fit-{fits}", serial=serial)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert serial in html
+        actions = [form["action"] for form in module_tab_forms(html).forms]
+        assert any("update-module-serial" in action for action in actions) is fits
+        assert any("replace-module" in action for action in actions) is fits
+        reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+        assert (escape(reason) in html) is (not fits)
+
     def test_the_recognised_type_icon_is_named(self):
         device, installed, request, view, inventory = self._setup("named-icon")
         cache_key = _cache_preview(view, device, inventory, request)

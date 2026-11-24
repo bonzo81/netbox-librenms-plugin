@@ -66,6 +66,7 @@ from netbox_librenms_plugin.serial_identity import (
     relocation_conflict,
     resolve_module,
     stored_form,
+    stored_form_refusal,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
@@ -2935,6 +2936,8 @@ class ModuleMismatchPreviewView(
                 "type_mismatch": type_mismatch,
                 "type_matched": type_matched,
                 "serial_mismatch": serial_mismatch,
+                # The serial update and Replace store the LibreNMS text, so a serial that does not fit offers neither.
+                "serial_fit_refusal": stored_form_refusal(incoming, Module),
                 "serial_conflict": serial_conflict,
                 "can_move_from": serial_conflict is not None
                 and not serial_conflict_owns_bay
