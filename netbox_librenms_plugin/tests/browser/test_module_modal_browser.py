@@ -219,6 +219,9 @@ def test_mismatch_action_disables_competing_modal_submissions(page):
                 "device_pk": 1,
                 "ent_index": 200,
                 "csrf_token": "test-token",
+                # The view offers Replace only when the delete scope covers both removal trees.
+                "replace_in_delete_scope": True,
+                "replace_removal": {"count": 1, "names": ["Test Card"], "hidden": 0},
             },
             use_l10n=False,
         )
