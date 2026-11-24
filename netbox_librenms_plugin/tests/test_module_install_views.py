@@ -881,3 +881,23 @@ def test_a_lone_legacy_module_keeps_its_own_serial_update(live_librenms):
     assert message_texts(request, "error") == []
     module.refresh_from_db()
     assert module.serial == "S/N S/N ABC123"
+
+
+@pytest.mark.parametrize(("held", "offered"), [("NEW123", False), ("OTHER123", True)])
+def test_an_occupied_bay_offers_no_serial_update_beside_a_confirmed_holder(live_librenms, held, offered):
+    """Slot 2 already stores the reported serial, so the update writer refuses it for Slot 1."""
+    device = make_device_with_module_bays(f"update-holder-{offered}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=80)
+    module = install_module(device, "Slot 1", f"UPDATE-HOLDER-CARD-{offered}", serial="OLD123")
+    install_module(device, "Slot 2", f"UPDATE-HOLDER-OTHER-{offered}", serial=held)
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW123")]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=80)
+
+    html = render_module_tab(device)
+
+    update_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(update_forms) == (1 if offered else 0)

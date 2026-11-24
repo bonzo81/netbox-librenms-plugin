@@ -4686,12 +4686,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         """
         device_id = row.get("selected_device_id")
-        # The serial update refuses beside a legacy row on its device, as the install does.
-        if row.get("can_update_serial") and any(module.device_id == device_id for module in found.uncertain):
+        # *found* leaves out the row's own module; the update refuses beside another holder on its device, as the install.
+        held_here = any(module.device_id == device_id for module in (*found.matches, *found.uncertain))
+        if row.get("can_update_serial") and held_here:
             row["can_update_serial"] = False
         if not row.get("can_install") or device_id is None:
             return False
-        if any(module.device_id == device_id for module in (*found.matches, *found.uncertain)):
+        if held_here:
             row["can_install"] = False
             return False
         return not resolution.complete or resolution.kind is ResolutionKind.UNAVAILABLE

@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
+    module_tab_forms,
     move_occupant_field,
     rendered_module_form,
     render_module_tab,
@@ -1141,22 +1142,26 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     assert (first.serial, second.serial) == ("OLD111", "OLD222")
     # The snapshot was merged under the old type's serial context, so a refresh stores it again under the new one.
     device.refresh_from_db()
-    results = []
-    for index in (7, 8):
-        # Each form comes from a render after the previous write, so a stale grant cannot refuse it.
+
+    def render_after_refresh():
         cache.set(
             CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
             trusted_module_inventory_payload(device, rows, librenms_id=9841),
         )
-        url, data = rendered_module_form(render_module_tab(device, user=user), "update-module-serial", index)
-        client = Client()
-        client.force_login(user)
-        results.append(messages_on(client.post(url, data).wsgi_request))
+        return render_module_tab(device, user=user)
+
+    url, data = rendered_module_form(render_after_refresh(), "update-module-serial", 7)
+    client = Client()
+    client.force_login(user)
+    result = messages_on(client.post(url, data).wsgi_request)
     stored = (Module.objects.get(pk=first.pk).serial, Module.objects.get(pk=second.pk).serial)
-    # Under the new type "XABC" names the hardware of "ABC", so the second update refuses.
     assert stored == ("ABC", "OLD222"), stored
-    assert "error" not in [level for level, _text in results[0]], results
-    assert results[1] == [("error", "Serial 'XABC' is already installed on this device. Nothing was changed.")]
+    assert "error" not in [level for level, _text in result], result
+    # Under the new type "XABC" names the hardware of "ABC", so the table offers no second update.
+    forms = module_tab_forms(render_after_refresh()).forms
+    assert not [
+        form for form in forms if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "8"
+    ]
 
 
 @transactional_db_with_all_apps()
