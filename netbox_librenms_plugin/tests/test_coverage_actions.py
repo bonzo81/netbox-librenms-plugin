@@ -4180,6 +4180,26 @@ class TestDeviceConflictActionBranches:
         target.refresh_from_db()
         assert (target.serial, stored_mapping_for_test(target)) == ("STORED-SN-1", {self.server_key: 42})
 
+    @pytest.mark.parametrize("action", ["update_serial", "sync_serial"])
+    def test_a_serial_action_without_an_incoming_serial_refuses_before_it_reads_a_serial_rule(self, action):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        target = make_device(f"branches-blank-{action}".replace("_", "-"), serial="STORED-SN-2")
+        rule = NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^(.+)$", replacement=r"\1", manufacturer=target.device_type.manufacturer
+        )
+        # A QuerySet.update() skips clean(), as an upgrade from an older release can leave the rule.
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+        self._register_device(42, target.name, serial="")
+
+        response = post_view(self._make_view(), self._request(action, target, f"{target.name}-user"), device_id=42)
+
+        self._assert_htmx_error(response, "No valid serial from LibreNMS")
+        reloaded = Device.objects.get(pk=target.pk)
+        assert (reloaded.serial, stored_mapping_for_test(reloaded)) == ("STORED-SN-2", None)
+
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
 

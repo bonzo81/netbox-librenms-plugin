@@ -653,6 +653,9 @@ def _apply_conflict_checked_serial(
 
     """
     serial = display(incoming_serial)
+    if not serial:
+        # No incoming serial: nothing to compare, so no serial rule is read.
+        return (_htmx_error_response("No valid serial from LibreNMS") if require_serial else None), False
     try:
         assignment = device_assignment(device, incoming_serial, rules=serial_rules)
     except ValidationError as exc:
@@ -2526,7 +2529,9 @@ class DeviceConflictActionView(
                     )
                 except Device.DoesNotExist:
                     return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
-                if not is_identity(incoming_serial, serial_rules.for_device(locked_device)):
+                if not display(incoming_serial) or not is_identity(
+                    incoming_serial, serial_rules.for_device(locked_device)
+                ):
                     return _htmx_error_response("No valid serial from LibreNMS")
                 err, changed = _apply_conflict_checked_serial(
                     locked_device, incoming_serial, request.user, serial_rules
