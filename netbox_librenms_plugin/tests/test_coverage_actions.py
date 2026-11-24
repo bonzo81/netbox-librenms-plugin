@@ -1628,6 +1628,67 @@ class TestDeviceValidationDetailsView:
         # The reason is visible text, not only a hover title.
         assert escape(UNAVAILABLE_MASTER_LINK) in re.sub(r"<[^>]*>", "", serial_row)
 
+    @pytest.mark.parametrize("holder", ["unavailable", "duplicate"])
+    def test_a_hostname_match_tells_a_duplicate_holder_from_an_unavailable_lookup(self, holder):
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        existing = make_device(f"details-held-{holder}", serial="HELD-NETBOX")
+        if holder == "unavailable":
+            _stray_chassis_member("details-held", "HELD-LIBRENMS")
+        else:
+            make_device("details-held-owner", serial="HELD-LIBRENMS")
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial="HELD-LIBRENMS",
+            ip="198.18.0.5",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert 'name="action" value="link"' not in content
+        assert ("Resolve the duplicate serial" in content) is (holder == "duplicate")
+        if holder == "unavailable":
+            start = content.index('data-serial-conflict="unavailable"')
+            alert = content[start : content.index("</div>", start)]
+            assert escape(UNAVAILABLE_MASTER_LINK) in alert
+
+    def test_a_linked_device_does_not_report_a_duplicate_when_the_lookup_is_unavailable(self):
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        existing = make_device("details-linked-held", serial="LINKED-NETBOX", librenms_cf={"default": {"id": 1}})
+        _stray_chassis_member("details-linked-held", "LINKED-LIBRENMS")
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial="LINKED-LIBRENMS",
+            ip="198.18.0.6",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('<td style="padding-left: 0.75rem;">Serial</td>')
+        serial_row = content[start : content.index("</tr>", start)]
+        assert "sync_serial" not in serial_row
+        assert "another device already has this serial" not in serial_row
+        assert f'title="Serial conflict: {escape(UNAVAILABLE_MASTER_LINK)}"' in serial_row
+
     def test_a_broken_serial_rule_of_the_device_shows_the_reason_and_keeps_the_dialog(self):
         from django.utils.html import escape
 

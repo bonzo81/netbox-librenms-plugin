@@ -325,7 +325,7 @@
                       <span class="text-muted small">{{ sync_info.serial_unavailable }}</span>
                     {% elif sync_info and not sync_info.serial_synced %}
                       {% if validation.serial_action == 'conflict' %}
-                        <span class="text-danger ms-1" title="Serial conflict — another device already has this serial">
+                        <span class="text-danger ms-1" title="{% if validation.serial_conflict.unavailable %}Serial conflict: {{ validation.serial_conflict.unavailable }}{% else %}Serial conflict — another device already has this serial{% endif %}">
                           <i class="mdi mdi-alert-circle"></i>
                         </span>
                       {% else %}
@@ -661,7 +661,13 @@
           <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
         </span>
       </div>
-      {% if validation.serial_action == 'conflict' %}
+      {% if validation.serial_action == 'conflict' and validation.serial_conflict.unavailable %}
+        <div class="alert alert-danger py-2 mb-3" data-serial-conflict="unavailable">
+          <i class="mdi mdi-alert-circle"></i>
+          Import blocked: The serial lookup cannot check the other devices that can hold the incoming serial number.
+          {{ validation.serial_conflict.unavailable }}
+        </div>
+      {% elif validation.serial_action == 'conflict' %}
         <div class="alert alert-danger py-2 mb-3">
           <i class="mdi mdi-alert-circle"></i>
           Import blocked: The incoming serial number is already assigned to another device in NetBox.
