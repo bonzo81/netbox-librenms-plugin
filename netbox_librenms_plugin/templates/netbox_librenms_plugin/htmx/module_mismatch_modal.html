@@ -73,7 +73,11 @@
         <strong>{{ serial_conflict.device.name }}</strong> /
         Bay: <strong>{{ serial_conflict.module_bay.name }}</strong>.
         <br><small>
+            {% if serial_conflict_owns_bay %}
+            <em>Replace</em> is not available: that module contains this bay, so removing it would also remove this bay.
+            {% else %}
             <em>Replace</em> will also remove it from that location.
+            {% endif %}
             {% if can_move_from %}
             <em>Move</em> will update its location to this bay instead of creating a new entry.
             {% endif %}
@@ -146,7 +150,7 @@
     {% endif %}
 
     {# Replace: delete current + install fresh from LibreNMS data #}
-    {% if installed_module and not serial_conflict_ambiguous and not serial_conflict_hidden %}
+    {% if installed_module and not serial_conflict_ambiguous and not serial_conflict_hidden and not serial_conflict_owns_bay %}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
           hx-post="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"

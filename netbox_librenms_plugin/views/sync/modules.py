@@ -442,6 +442,12 @@ class _SerialConflictAmbiguous(Exception):
         self.serial = serial
 
 
+HOLDER_OWNS_BAY = (
+    "Serial '{serial}' is assigned to a module that contains this bay. Replace would also delete the bay. "
+    "Nothing was replaced."
+)
+
+
 class _SerialConflictUnavailable(Exception):
     """Abort replacement when a serial conflict is outside the caller's delete scope."""
 
@@ -2742,6 +2748,11 @@ def _resolve_replacement_holder(incoming, serial_context, *, rules, exclude_pk):
     return resolve_module(incoming, rules=rules, exclude_pks=[exclude_pk])
 
 
+def _tree_holds(tree, module_pk):
+    """Return True when the ``(pk, serial)`` pairs of a module subtree include the Module *module_pk*."""
+    return any(pk == module_pk for pk, _serial in tree)
+
+
 def _serial_holder_token(elsewhere):
     """Return a positive int for the other module that holds the incoming serial: none, several, or its row and place."""
     held = elsewhere.object
@@ -2893,6 +2904,8 @@ class ModuleMismatchPreviewView(
                 "serial_conflict": serial_conflict,
                 "can_move_from": serial_conflict is not None
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
+                "serial_conflict_owns_bay": serial_conflict is not None
+                and _tree_holds(module_subtree_serials(serial_conflict.pk), installed_module.pk),
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "serial_conflict_hidden": serial_conflict_hidden,
                 "ent_index": ent_index_int,
@@ -3055,12 +3068,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 if previous is not None:
                     # A holder that the preview can show refuses before the write walks it or locks its Device.
                     # A hidden holder keeps the stale-grant answer after the lock, so the refusal does not disclose it.
-                    if (
-                        self.restricted_queryset(Module).filter(pk=previous.pk).exists()
-                        and not self.restricted_queryset(Module, "delete").filter(pk=previous.pk).exists()
-                    ):
+                    visible = self.restricted_queryset(Module).filter(pk=previous.pk).exists()
+                    if visible and not self.restricted_queryset(Module, "delete").filter(pk=previous.pk).exists():
                         raise _SerialConflictUnavailable(display(incoming))
                     removals[previous.pk] = module_subtree_serials(previous.pk)
+                    if visible and _tree_holds(removals[previous.pk], installed_module.pk):
+                        raise _ModuleActionRefused(HOLDER_OWNS_BAY.format(serial=display(incoming)))
                 scope = lock_module_write(
                     observe_module_write(device_ids=[target_device.pk], subtree_roots=removals),
                     incoming=[incoming],

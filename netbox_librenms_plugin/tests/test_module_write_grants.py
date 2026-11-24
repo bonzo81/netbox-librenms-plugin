@@ -428,6 +428,74 @@ def test_replace_only_removes_a_holder_when_the_target_admits_the_serial(
     assert replacement.serial == reported_serial
 
 
+def _bay_name(entities, index):
+    return entities[entities[index]["entPhysicalContainedIn"]]["entPhysicalName"]
+
+
+def _tagged_holder(device, entities, *, owns_destination):
+    """Install a card that stores "TAG <NIM serial>" under a rule that strips "TAG "; it can own the NIM bay."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=device.device_type.manufacturer
+    )
+    holder = install_module(
+        device,
+        _bay_name(entities, SERVICE_MODULE),
+        entities[SERVICE_MODULE]["entPhysicalModelName"],
+        f"TAG {_nim(entities)[1]}",
+    )
+    if owns_destination:
+        _own_the_nim_bay(device, entities, holder)
+    return holder
+
+
+def _own_the_nim_bay(device, entities, holder):
+    from dcim.models import ModuleBay
+
+    ModuleBay.objects.filter(device=device, name=_bay_name(entities, REAL_NIM)).update(module=holder)
+
+
+def _replace_forms(html):
+    return [form for form in module_tab_forms(html).forms if "replace-module" in form["action"]]
+
+
+@pytest.mark.parametrize("owns_destination", [True, False], ids=["ancestor", "sibling"])
+def test_the_preview_offers_replace_only_when_the_serial_holder_does_not_own_the_bay(ui, c8300, owns_destination):
+    """Replace deletes the serial holder; a holder above the destination bay would delete that bay too."""
+    device, entities = c8300
+    holder = _tagged_holder(device, entities, owns_destination=owns_destination)
+    install_module(device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD")
+
+    preview = ui.get(rendered_preview_url(render(ui, device), REAL_NIM), HTTP_HX_REQUEST="true")
+
+    assert preview.status_code == 200, preview.content
+    forms = _replace_forms(preview.content.decode())
+    if owns_destination:
+        assert forms == []
+    else:
+        assert [form["fields"].get("conflict_module_id") for form in forms] == [str(holder.pk)]
+
+
+def test_replace_refuses_a_serial_holder_that_owns_the_bay_since_its_preview(ui, c8300):
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.views.sync.modules import HOLDER_OWNS_BAY
+
+    device, entities = c8300
+    holder = _tagged_holder(device, entities, owns_destination=False)
+    form = _replace_form(ui, device, entities)
+    assert form[1]["conflict_module_id"] == str(holder.pk)
+    _own_the_nim_bay(device, entities, holder)
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert HOLDER_OWNS_BAY.format(serial=_nim(entities)[1]) in messages_of(response)
+    assert written_state(device) == before
+    assert Module.objects.filter(pk=holder.pk).exists()
+
+
 @pytest.mark.parametrize(("reported_serial", "admitted"), [("TAG 12", False), ("TAG CARD123", True)])
 def test_move_requires_a_serial_the_destination_admits(ui, settings, librenms_server, reported_serial, admitted):
     from dcim.models import ModuleBay
