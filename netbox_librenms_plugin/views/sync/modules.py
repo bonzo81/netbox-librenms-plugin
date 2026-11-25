@@ -2409,6 +2409,10 @@ class UpdateModuleInterfaceView(
                 )
                 granted.grant.require(action_target=installed_module_target(module.pk, module_bay_id))
                 bind_item = granted.row(granted.grant.ent_index)
+                # The table withholds the action for this row, so the writer refuses it too.
+                serial_context = locked_type_context(target_device, rules=granted.policy.serial_identity_rules)
+                if _unlinked_optic_refusal(bind_item, bind_item.get("entPhysicalSerialNum"), serial_context):
+                    raise _ModuleActionRefused(UNLINKED_OPTIC_REFUSAL)
                 bind_result, adoption_failed = self._bind_and_adopt(
                     target_device, module, bind_item, server_key, changeable_interfaces
                 )

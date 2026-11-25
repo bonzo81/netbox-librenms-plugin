@@ -3946,9 +3946,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if row["serial_fit_refusal"]:
                 row["can_install"] = False
         elif unlinked_optic_refusal:
-            # A Replace deletes the occupant and installs the optic, so it refuses as the install does.
+            # A Replace or an interface adoption writes to the occupant, so it refuses as the install does.
             row["serial_fit_refusal"] = unlinked_optic_refusal
             row["can_replace"] = False
+            row["can_update_interface_binding"] = False
 
         if matched_type:
             row["module_type_url"] = matched_type.get_absolute_url()

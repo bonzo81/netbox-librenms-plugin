@@ -1343,10 +1343,12 @@ class TestMergeTransceiverDataPortIdentity:
         optic_type=True,
         entity=None,
         port=None,
+        occupant_interface=None,
     ):
         """Render the Modules tab of a device whose optic no entity links to; return the content and the optic index.
 
         *entity* overrides fields of the one inventory entity; *port* is a LibreNMS port that the optic reports.
+        *occupant_interface* names a standalone interface that the occupant's interface template can adopt.
         """
         from django.urls import reverse
 
@@ -1365,7 +1367,17 @@ class TestMergeTransceiverDataPortIdentity:
         if optic_type:
             make_module_type_with_bays("SFP-10G-SR")
         if occupant_model:
-            install_module(device, bay, occupant_model, serial="OCCUPANT9876")
+            occupant = install_module(device, bay, occupant_model, serial="OCCUPANT9876")
+        if occupant_interface:
+            from dcim.models import InterfaceTemplate
+
+            from netbox_librenms_plugin.tests.conftest import make_interface
+
+            # The template comes after the install, so the standalone interface stays out of the module.
+            InterfaceTemplate.objects.create(
+                module_type=occupant.module_type, name=occupant_interface, type="10gbase-x-sfpp"
+            )
+            make_interface(device, occupant_interface)
         entity = {
             "entPhysicalIndex": 10,
             "entPhysicalContainedIn": 0,
@@ -1488,6 +1500,79 @@ class TestMergeTransceiverDataPortIdentity:
         assert "Type Mismatch" in row
         assert len(replaces) == int(replace_offered)
         assert ("data-serial-fit-refusal" in row) is (not replace_offered)
+
+    @pytest.mark.parametrize(
+        ("optic_serial", "refused"), [("AB-12", True), ("OPTIC12345", False)], ids=["short-serial", "identity-serial"]
+    )
+    def test_an_unlinked_optic_with_a_short_serial_adopts_no_interface_into_the_occupant(
+        self, client, settings, recording_server, optic_serial, refused
+    ):
+        """The occupant has the optic's type, but nothing links the optic to it, so Update Interface is withheld.
+
+        A short serial gets a grant signed for the rendered snapshot and policy, so the writer refuses it on its own.
+        """
+        from dcim.models import Device, Interface, Module
+        from django.contrib.messages import get_messages
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.module_grants import (
+            ACTION_INSTALL_SELECTED,
+            ACTION_UPDATE_INTERFACE,
+            installed_module_target,
+            read_module_grant,
+            sign_module_grant,
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms, rendered_module_form
+        from netbox_librenms_plugin.views.base.modules_view import UNLINKED_OPTIC_REFUSAL
+
+        name = f"optic-adopt-{optic_serial}"
+        content, optic = self._render_unlinked_optic_tab(
+            client,
+            settings,
+            recording_server,
+            name,
+            optic_serial,
+            occupant_model="SFP-10G-SR",
+            occupant_interface="xcvr",
+        )
+        device = Device.objects.get(name=name)
+        occupant = Module.objects.get(device=device)
+        forms = [form for form in module_tab_forms(content).forms if "update-module-interface" in form["action"]]
+        assert len(forms) == int(not refused)
+        if refused:
+            _action, selected = rendered_module_form(content, "install-selected")
+            rendered = read_module_grant(
+                selected["inventory_binding"],
+                action=ACTION_INSTALL_SELECTED,
+                page_device_id=device.pk,
+                server_key="optic-tab",
+            )
+            action = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": device.pk})
+            fields = {
+                "server_key": "optic-tab",
+                "selected_device_id": str(device.pk),
+                "module_id": str(occupant.pk),
+                "ent_index": str(optic),
+                "inventory_binding": sign_module_grant(
+                    page_device_id=device.pk,
+                    device_id=device.pk,
+                    server_key="optic-tab",
+                    action=ACTION_UPDATE_INTERFACE,
+                    ent_index=optic,
+                    action_target=installed_module_target(occupant.pk, occupant.module_bay_id),
+                    inventory_digest=rendered.inventory_digest,
+                    policy_fingerprint=rendered.policy_fingerprint,
+                    render_mode=rendered.render_mode,
+                ),
+            }
+        else:
+            ((action, fields),) = [(form["action"], dict(form["fields"])) for form in forms]
+
+        response = client.post(action, fields)
+
+        assert Interface.objects.get(device=device, name="xcvr").module_id == (None if refused else occupant.pk)
+        texts = [str(message.message) for message in get_messages(response.wsgi_request)]
+        assert (UNLINKED_OPTIC_REFUSAL in texts) is refused, texts
 
     @pytest.mark.parametrize("netbox_change", ["type-added", "occupant-removed"])
     @pytest.mark.parametrize(
