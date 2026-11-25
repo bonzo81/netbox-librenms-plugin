@@ -5124,10 +5124,11 @@ class TestDeviceConflictActionBranches:
         assert response.headers.get("HX-Reswap") == "none"
         assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
         assert cache.get(get_import_device_cache_key(42, self.server_key))["device_id"] == 42
-        # The client's device-info cache holds nothing for 42 either: a cached read asks LibreNMS again.
-        self._register_device(42, f"{target.name}-source", serial="SERIAL-OTHER-ID")
+        # A cached read serves the earlier row of 42 without a request; a cached ID 43 row would be fetched again.
+        requests = len(self.librenms_server.requests)
         found, row = view.librenms_api.get_device_info(42)
         assert (found, row["device_id"]) == (True, 42)
+        assert len(self.librenms_server.requests) == requests
 
     @pytest.mark.parametrize("action", ["link", "update", "update_serial", "update_type"])
     def test_a_forced_type_change_refuses_when_another_device_then_holds_the_stored_serial(self, action):
