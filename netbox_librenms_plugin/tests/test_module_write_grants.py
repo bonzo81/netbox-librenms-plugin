@@ -1708,7 +1708,7 @@ def vc_grants(settings, recording_server):
         map_device_to_librenms,
     )
 
-    def build(*, optic_1_on_member=False, card=None, extra_rows=()):
+    def build(*, optic_1_on_member=False, card=None, extra_rows=(), rows=None):
         member_vendor = Manufacturer.objects.create(name="Grants Member Vendor", slug="grants-member-vendor")
         bays = ["Carrier Slot", "Cage 1", "Cage 2", "Card Slot"]
         page = make_device_with_module_bays("vc-grants-page", bays, serial="VCA-0001")
@@ -1717,7 +1717,7 @@ def vc_grants(settings, recording_server):
         make_module_type_with_bays("GR-CARRIER", bay_names=["Cage 1", "Cage 2"])
         make_module_type_with_bays("GR-OPTIC")
         make_module_type_with_bays("GR-CARD")
-        rows = _vc_rows(
+        rows = rows or _vc_rows(
             page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1X1", card=card
         ) + list(extra_rows)
         recording = {
@@ -1943,6 +1943,59 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
 
     assert "Inventory rules or device identity changed. Refresh Modules and try again." in messages_of(response)
     assert _installed(member) == set()
+
+
+def _stack_rows(positions):
+    """Return a stack root with two chassis members that report "AB-12" and "CD-34" and hold one card each."""
+
+    def row(index, parent, entity_class, name, serial, **fields):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalContainedIn": parent,
+            "entPhysicalClass": entity_class,
+            "entPhysicalName": name,
+            "entPhysicalDescr": name,
+            "entPhysicalSerialNum": serial,
+            **fields,
+        }
+
+    members = [
+        row(index, 1, "chassis", f"Switch {index}", serial, entPhysicalParentRelPos=position)
+        for index, serial, position in zip((2, 3), ("AB-12", "CD-34"), positions, strict=True)
+    ]
+    return [
+        row(1, 0, "stack", "Stack", ""),
+        *members,
+        row(CARD, 2, "module", "Card Slot", "SN-CARD", entPhysicalModelName="GR-CARD"),
+        row(CARD + 1, 3, "module", "Card Slot", "SN-CARD-2", entPhysicalModelName="GR-CARD"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("positions", "withheld"),
+    [((-1, -1), True), ((1, 2), False), ((2, 1), False)],
+    ids=["row-order", "reported", "reported-reversed"],
+)
+@pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+def test_a_row_order_position_attributes_no_stack_member_with_a_short_serial(
+    ui, vc_grants, positions, withheld, reverse
+):
+    """Row order is no identity of "AB-12" or "CD-34", so neither card is offered on any member in either row order."""
+    rows = _stack_rows(positions)
+    if reverse:
+        rows[1:3] = rows[2:0:-1]
+    page, member = vc_grants(rows=rows)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    for index in (CARD, CARD + 1):
+        (row,) = re.findall(rf'<tr[^>]*data-ent-index="{index}".*?</tr>', content, flags=re.S)
+        assert ("data-member-unattributed" in row) is withheld
+        assert bool([form for form in parsed.forms if str(index) in form["fields"].values()]) is (not withheld)
+    if not withheld:
+        on_page = CARD if positions[0] == 1 else CARD + 1
+        _action, fields = rendered_module_form(content, "install-module", on_page)
+        assert fields["selected_device_id"] == str(page.pk)
 
 
 @pytest.mark.parametrize("occupant", [None, "GR-OTHER", "GR-CARD"], ids=["empty-bay", "other-type", "same-type"])

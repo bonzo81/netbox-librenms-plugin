@@ -339,6 +339,34 @@ class TestRecognizedStack:
         assert owner[4] == master
         assert owner[2] == member
 
+    @pytest.mark.parametrize("reported", [False, True], ids=["row-order", "reported"])
+    @pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+    def test_a_row_order_position_does_not_attribute_a_member_row_with_a_short_serial(self, reported, reverse):
+        """Row order names no member of a serial without an identity, so its subtree is unattributed in any order."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        first, second = _vc_members(["100031", "100032"])
+        members = [
+            _row(191, "chassis", 190, position=1 if reported else -1, entPhysicalSerialNum="AB-12"),
+            _row(192, "chassis", 190, position=2 if reported else -1, entPhysicalSerialNum="CD-34"),
+        ]
+        inventory = [
+            _row(190, "stack", 0),
+            *(members[::-1] if reverse else members),
+            _row(193, "powerSupply", 191, entPhysicalModelName="PSU-1"),
+            _row(194, "powerSupply", 192, entPhysicalModelName="PSU-2"),
+        ]
+
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        if reported:
+            assert (owner[191], owner[193]) == ((first, "position"), (first, "parent-context"))
+            assert (owner[192], owner[194]) == ((second, "position"), (second, "parent-context"))
+        else:
+            assert {owner[index] for index in (191, 192, 193, 194)} == {(None, UNATTRIBUTED_SOURCE)}
+
     def test_junos_fpcs_sharing_a_slot_follow_the_detected_positions(self):
         """Two FPCs that both report slot 1 get positions 1 and 2 from detection; module sync must agree."""
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
