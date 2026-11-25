@@ -2543,15 +2543,33 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert "Module no longer exists." in message_texts(request, "error")
 
     @staticmethod
-    def _locked_device_ids(queries):
-        """Return the Device pks of the captured ``FOR NO KEY UPDATE`` Device row locks."""
-        found = set()
-        for query in queries:
-            sql = query["sql"]
-            if sql.lstrip().startswith("SELECT") and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
-                for listed in re.findall(r'"dcim_device"\."id" IN \(([^)]*)\)', sql):
-                    found.update(int(pk) for pk in listed.split(","))
-        return found
+    def _locks_device(queries, pk):
+        """Return whether a captured statement locks the Device row *pk*, by equality or ``IN``, at any strength."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import locks_row
+
+        return any(locks_row(query["sql"], Device, pk) for query in queries)
+
+    @pytest.mark.parametrize("single", [True, False])
+    def test_the_device_lock_check_sees_a_single_and_a_batch_device_lock(self, single):
+        """Positive control: the check finds the Device lock that the writers take, for one row and for a batch."""
+        from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        locked = make_device("scope-lock-control-locked")
+        other = make_device("scope-lock-control-other")
+        rows = Device.objects.select_for_update(no_key=True)
+        with CaptureQueriesContext(connection) as queries:
+            if single:
+                rows.get(pk=locked.pk)
+            else:
+                list(rows.filter(pk__in=[locked.pk, other.pk]))
+        assert len(queries) == 1
+        assert self._locks_device(queries, locked.pk)
 
     @pytest.mark.parametrize("named", ["hidden", "missing"])
     def test_module_move_answers_a_hidden_module_as_a_missing_one(self, named):
@@ -2592,7 +2610,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             view.post(request, pk=page_device.pk)
 
         assert message_texts(request, "error") == ["Module no longer exists."]
-        assert other_device.pk not in self._locked_device_ids(queries)
+        assert self._locks_device(queries, other_device.pk) is False
         # The serials of the posted module and its subtree are read only after the grant admits it.
         posted_pk = re.compile(rf"\b{module_id}\b")
         serial_reads = [
@@ -2667,7 +2685,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             cache.delete(cache_key)
 
         assert message_texts(request, "error") == ["Module no longer exists."]
-        assert other_device.pk not in self._locked_device_ids(queries)
+        assert self._locks_device(queries, other_device.pk) is False
         hidden.refresh_from_db()
         assert hidden.serial == "KEEP"
 
@@ -2922,7 +2940,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert message_texts(request, "error") == [_SerialConflictUnavailable.MESSAGE.format(serial="INCOMING-KEPT")]
         assert other_device.name not in " ".join(message_texts(request, "error"))
         # The delete scope refuses before the write locks the holder's Device or walks the holder's subtree.
-        assert other_device.pk not in self._locked_device_ids(queries)
+        assert self._locks_device(queries, other_device.pk) is False
         holder_subtree = re.compile(rf'"dcim_module"\."id" = {holder.pk}\b|"module_id" IN \({holder.pk}\)')
         subtree_reads = [
             query["sql"]

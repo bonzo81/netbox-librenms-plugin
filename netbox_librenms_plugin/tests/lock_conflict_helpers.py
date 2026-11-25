@@ -26,33 +26,34 @@ def second_connection():
         other.close()
 
 
-def first_row_lock(statements, model, pk):
-    """Return the index of the first captured SQL statement that locks the *model* row *pk*, at any lock strength."""
+def locks_row(sql, model, pk):
+    """Return whether the SQL statement *sql* locks the *model* row *pk*, at any lock strength."""
     table = re.escape(model._meta.db_table)
     keyword = r"(?:WHERE|ON|USING|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ORDER|LIMIT|FOR)\b"
     # The target table can come after FROM or after any JOIN.
     source = re.compile(rf'\b(?:FROM|JOIN) (?:"{table}"|{table}\b)(?: (?:AS )?(?!{keyword})("?)(\w+)\1)?')
     row_lock = re.compile(r'\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b(?: OF ("?\w+"?(?:, "?\w+"?)*))?')
+    # A clause without OF locks every table; OF locks only the tables it names.
+    clauses = row_lock.findall(sql)
+    where = sql.partition(" WHERE ")[2]
+    # A self-join reads the table more than once, so every alias must be checked.
+    for read in source.finditer(sql):
+        name = read.group(2)
+        locked = name or model._meta.db_table
+        if not any(not of or locked in of.replace('"', "").split(", ") for of in clauses):
+            continue
+        qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
+        # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
+        key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
+        # Only a positive predicate selects the row: NOT ((... id = 7)) excludes it at any parenthesis depth.
+        if any(not re.search(r"\bNOT\s*(?:\(\s*)*$", where[: found.start()]) for found in re.finditer(key, where)):
+            return True
+    return False
 
-    def locks_the_row(sql):
-        # A clause without OF locks every table; OF locks only the tables it names.
-        clauses = row_lock.findall(sql)
-        where = sql.partition(" WHERE ")[2]
-        # A self-join reads the table more than once, so every alias must be checked.
-        for read in source.finditer(sql):
-            name = read.group(2)
-            locked = name or model._meta.db_table
-            if not any(not of or locked in of.replace('"', "").split(", ") for of in clauses):
-                continue
-            qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
-            # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
-            key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
-            # Only a positive predicate selects the row: NOT ((... id = 7)) excludes it at any parenthesis depth.
-            if any(not re.search(r"\bNOT\s*(?:\(\s*)*$", where[: found.start()]) for found in re.finditer(key, where)):
-                return True
-        return False
 
-    return next(i for i, sql in enumerate(statements) if locks_the_row(sql))
+def first_row_lock(statements, model, pk):
+    """Return the index of the first captured SQL statement that locks the *model* row *pk*, at any lock strength."""
+    return next(i for i, sql in enumerate(statements) if locks_row(sql, model, pk))
 
 
 def lock_row(other, model, pk):
