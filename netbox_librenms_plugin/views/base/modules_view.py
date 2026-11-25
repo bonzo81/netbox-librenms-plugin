@@ -174,23 +174,6 @@ def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialC
     return not _clean_librenms_value(item.get("entPhysicalModelName"))
 
 
-def _reports_the_short_serial_of_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
-    """Return whether an entity optic candidate reports the serial text of *transceiver*; its serial has no identity."""
-    if _never_an_optic(item):
-        return False
-    # A synthetic row or an entity that took another transceiver is not this optic.
-    if item.get("_from_transceiver_api") or item.get(_TRANSCEIVER_API_MATCH):
-        return False
-    if not display(item.get("entPhysicalSerialNum")):
-        return False
-    # _names_another_part refuses another text, so an entity that passes it reports the same text.
-    if _names_another_part(item, transceiver, context):
-        return False
-    entity_model = _clean_librenms_value(item.get("entPhysicalModelName"))
-    optic_model = _clean_librenms_value(transceiver.get("model"))
-    return not (entity_model and optic_model and entity_model != optic_model)
-
-
 # Physical classes whose entities only hold hardware when they report no serial.
 _SERIAL_HOLDER_CLASSES = frozenset({"container", "port"})
 
@@ -2422,10 +2405,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         # Types that are containers, not real transceiver modules
 
-        # Index matches run first, so the short serial fallback can not take an entity that an index match takes.
-        for txr in sorted(
-            transceivers, key=lambda txr: _coerce_idx(txr.get("entity_physical_index")) not in inv_by_index
-        ):
+        for txr in transceivers:
             ent_idx = _coerce_idx(txr.get("entity_physical_index"))
             if ent_idx is None or ent_idx <= 0:
                 continue
@@ -2456,18 +2436,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if existing is None and index_taken:
                 # A synthetic row would duplicate the unrelated entity's index.
                 continue
-            optic_serial = txr.get("serial")
-            if existing is None and display(optic_serial) and not is_identity(optic_serial, serial_context):
-                # A serial without an identity names the same optic only on an entity optic with that text.
-                existing = next(
-                    (
-                        item
-                        for item in inventory_data
-                        if _reports_the_short_serial_of_the_optic(item, txr, serial_context)
-                        and (port_ifindex is None or _coerce_idx(item.get("ifIndex")) in {None, port_ifindex})
-                    ),
-                    None,
-                )
 
             model = _clean_librenms_value(txr.get("model"))
             serial = _clean_librenms_value(txr.get("serial"))
