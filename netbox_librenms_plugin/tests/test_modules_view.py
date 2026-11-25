@@ -1300,6 +1300,47 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["entPhysicalSerialNum"] == "AB-12"
         assert [item["entPhysicalIndex"] for item in inventory[1:]] == ([99] if synthesized else [])
 
+    @pytest.mark.parametrize("index_match_first", [True, False], ids=["index-first", "fallback-first"])
+    def test_an_entity_optic_absorbs_only_one_transceiver_with_a_short_serial(
+        self, settings, librenms_server, index_match_first
+    ):
+        """Two optics report serial 0; the one at the entity index takes the entity, the other keeps its own row."""
+        from netbox_librenms_plugin.serial_identity import SerialRules, display, is_identity
+
+        context = SerialRules.load().context(None)
+        assert display("0") and not is_identity("0", context)
+        view = _real_api_view(settings, librenms_server, librenms_id=114)
+        transceivers = [
+            {"entity_physical_index": 10, "model": "SFP-10G-SR", "serial": "0", "port_id": 1},
+            {"entity_physical_index": 20, "model": "SFP-10G-SR", "serial": "0", "port_id": 2},
+        ]
+        librenms_server.register(
+            "/api/v0/devices/114/transceivers",
+            {"status": "ok", "transceivers": transceivers if index_match_first else transceivers[::-1]},
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/114/ports",
+            {"status": "ok", "ports": [{"port_id": 1, "ifName": "Eth1"}, {"port_id": 2, "ifName": "Eth2"}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 10,
+                "entPhysicalClass": "port",
+                "entPhysicalModelName": "SFP-10G-SR",
+                "entPhysicalSerialNum": "0",
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed), serial_context=context)
+
+        assert error is None
+        assert sorted((item["entPhysicalIndex"], item.get("_librenms_port_id")) for item in inventory) == [
+            (10, 1),
+            (20, 2),
+        ]
+
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
     ):
