@@ -504,21 +504,15 @@ class _Attribution:
         # A root that reports no FPC row gives a named row no FPC, never the root's own serial.
         fpcs = self.junos_fpcs.get(root.get("entPhysicalIndex"), [])
         if _is_junos_fpc(row):
-            return [row]
-        if (slot := _junos_fpc_named_slot(row)) is None:
+            linked = [row]
+        elif (slot := _junos_fpc_named_slot(row)) is not None:
+            linked = [fpc for fpc in fpcs if _as_int(fpc.get("entPhysicalParentRelPos")) == slot]
+        else:
             return None
-        return [fpc for fpc in fpcs if _as_int(fpc.get("entPhysicalParentRelPos")) == slot]
-
-    def _fpc_member(self, fpc):
-        """Return the member of a Junos FPC row outside a recognized stack: its serial, else a blank serial's slot."""
-        if (member := self.serial_owner(fpc)) is not None:
-            return member
-        if display(fpc.get("entPhysicalSerialNum")):
+        # A blank FPC serial gives no link, so its rows keep the develop walk for blank serial chains.
+        if len(linked) == 1 and not display(linked[0].get("entPhysicalSerialNum")):
             return None
-        member = self.member_at(fpc.get("entPhysicalParentRelPos"))
-        siblings = self.junos_fpcs[fpc.get("entPhysicalContainedIn")]
-        owned = {owner.pk for other in siblings if other is not fpc and (owner := self.serial_owner(other))}
-        return None if member is None or member.pk in owned else member
+        return linked
 
     def _member_row_owner(self, row):
         """Return the member a member row resolves to: its serial first, then its detected position."""
@@ -580,10 +574,10 @@ class _Attribution:
         """Attribute a row of an unrecognized shape with the position and name heuristic."""
         # A Junos FPC, or a row that names "FPC <n>", resolves only through that one FPC, never an ancestor serial.
         if (fpcs := self._junos_link(row)) is not None:
-            member = self._fpc_member(fpcs[0]) if len(fpcs) == 1 else None
+            member = self.serial_owner(fpcs[0]) if len(fpcs) == 1 else None
             if member is None:
                 return None, UNATTRIBUTED_SOURCE
-            return member, "position" if fpcs[0] is row else "junos-member"
+            return member, "junos-member"
         parent_index = row.get("entPhysicalContainedIn", 0)
         visited = set()
         # A row whose serial has no identity can be a member row itself, so no member is inherited across it.
@@ -634,9 +628,9 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
     the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
     follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
     inherits its parent's member, or a position or leading name number of 1 or more names one.
-    Outside a recognized stack, a Junos FPC and a row that names "FPC <n>" resolve only through that
-    one FPC: its serial's member, else for a blank serial the member at its reported slot that no other
-    FPC owns by serial; otherwise they are unattributed. No row inherits a member across a row (itself
+    Outside a recognized stack, a Junos FPC that reports a serial, and a row whose description names
+    "FPC <n>", resolve only through that one FPC: the member that owns its serial, else unattributed.
+    A blank FPC serial gives no link, so its rows resolve as on develop. No row inherits a member across a row (itself
     included) whose serial has no identity, because such a row can be a member row; it and a child of
     an unattributed parent are unattributed instead.
     A row that no rule attributes has the source "default", or :data:`UNATTRIBUTED_SOURCE` when it

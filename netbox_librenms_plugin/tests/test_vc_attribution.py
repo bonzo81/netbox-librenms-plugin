@@ -600,14 +600,8 @@ class TestRecognizedStack:
         elif case == "short-fpc-1-without-slot":
             assert {owner[121], owner[4], owner[30], owner[1210]} == {(None, UNATTRIBUTED_SOURCE)}
         else:
-            # A blank FPC serial keeps the FPC's reported slot.
-            assert (owner[120], owner[2]) == ((master, "position"), (master, "junos-member"))
-            assert (owner[121], owner[4], owner[30]) == (
-                (member, "position"),
-                (member, "junos-member"),
-                (member, "junos-member"),
-            )
-            assert owner[1210] == (member, "parent-context")
+            # A blank FPC serial gives no link, so the rows resolve as develop does: by parent context, on the page.
+            assert {owner[index] for index in (2, 4, 30, 120, 121, 1210)} == {(None, "parent-context")}
 
     @pytest.mark.parametrize("serial", ["12", "0", "CARD999"], ids=["short", "zero", "identity"])
     def test_a_non_member_row_with_a_short_serial_keeps_its_member_row(self, serial):
