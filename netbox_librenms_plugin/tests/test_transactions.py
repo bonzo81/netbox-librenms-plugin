@@ -504,12 +504,14 @@ def _run_site_steps(name, steps, *, in_blocks, separate=False):
         event = events[0]
         payload = event["data"]
     prechange, postchange = event["snapshots"]["prechange"], event["snapshots"]["postchange"]
+    # NetBox 4.4 queues plain dicts without the public object; the production code reads it by the same gate.
+    carries_object = hasattr(event, "refresh_serialization_source") or "object" in event
     return (
         event["event_type"],
         prechange and prechange["description"],
         postchange and postchange["description"],
         payload["description"],
-        [index for index, site in enumerate(written) if site is event["object"]],
+        [index for index, site in enumerate(written) if site is event["object"]] if carries_object else None,
     )
 
 
