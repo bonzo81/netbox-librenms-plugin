@@ -1113,7 +1113,10 @@ def test_the_bulk_confirmation_blocks_a_stack_whose_member_serial_does_not_fit(c
 
 
 @pytest.mark.django_db
-def test_the_bulk_confirmation_names_a_member_of_a_stack_without_numbers_by_its_serial(client, live_librenms):
+@pytest.mark.parametrize("unnamed_device", [False, True])
+def test_the_bulk_confirmation_names_a_member_of_a_stack_without_numbers_by_its_serial(
+    client, live_librenms, unnamed_device
+):
     """No DeviceType matches, so the members have no position; the dialog shows the serial of each member."""
     from django.urls import reverse
 
@@ -1121,6 +1124,9 @@ def test_the_bulk_confirmation_names_a_member_of_a_stack_without_numbers_by_its_
     from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
 
     prerequisites = TestBulkImportIntegration()._prerequisites()
+    # A member without a name can not collide with an unrelated Device that has no name.
+    if unnamed_device:
+        make_device(None, serial="UNRELATED-UNNAMED")
     device_id = 391
     member_serial = "N" * 51
     row = _libre_device(

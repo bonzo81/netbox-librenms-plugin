@@ -1226,7 +1226,8 @@ def members_to_create(members, taken, context, name_of):
         if _member_serial_taken(serial, taken[serial], created_members):
             continue
         member_name = name_of(member, position, serial)
-        if Device.objects.filter(name=member_name).exists():
+        # A member without a name collides with no Device, also not with an unnamed one.
+        if member_name and Device.objects.filter(name=member_name).exists():
             logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
             continue
         created_members.add(serial, member)
