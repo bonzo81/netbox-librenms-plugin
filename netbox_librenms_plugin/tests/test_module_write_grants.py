@@ -1650,7 +1650,7 @@ VC_LIBRENMS_ID = 4242
 CARRIER, OPTIC_1, OPTIC_2, CARD = 10, 21, 23, 30
 
 
-def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1X1"):
+def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1X1", card=None):
     def module(index, parent, name, model, serial):
         return {
             "entPhysicalIndex": index,
@@ -1691,7 +1691,7 @@ def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1X1"):
         module(OPTIC_1, 20, "Optic 1", "GR-OPTIC", optic_1_serial),
         container(22, CARRIER, "Cage 2"),
         module(OPTIC_2, 22, "Optic 2", "GR-OPTIC", "SN-O2X2"),
-        module(CARD, 1, "Card Slot", "GR-CARD", "SN-CARD"),
+        {**module(CARD, 1, "Card Slot", "GR-CARD", "SN-CARD"), **(card or {})},
     ]
 
 
@@ -1708,7 +1708,7 @@ def vc_grants(settings, recording_server):
         map_device_to_librenms,
     )
 
-    def build(*, optic_1_on_member=False):
+    def build(*, optic_1_on_member=False, card=None):
         member_vendor = Manufacturer.objects.create(name="Grants Member Vendor", slug="grants-member-vendor")
         bays = ["Carrier Slot", "Cage 1", "Cage 2", "Card Slot"]
         page = make_device_with_module_bays("vc-grants-page", bays, serial="VCA-0001")
@@ -1717,7 +1717,9 @@ def vc_grants(settings, recording_server):
         make_module_type_with_bays("GR-CARRIER", bay_names=["Cage 1", "Cage 2"])
         make_module_type_with_bays("GR-OPTIC")
         make_module_type_with_bays("GR-CARD")
-        rows = _vc_rows(page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1X1")
+        rows = _vc_rows(
+            page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1X1", card=card
+        )
         recording = {
             "device_id": VC_LIBRENMS_ID,
             "responses": {
@@ -1941,6 +1943,46 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
 
     assert "Inventory rules or device identity changed. Refresh Modules and try again." in messages_of(response)
     assert _installed(member) == set()
+
+
+@pytest.mark.parametrize(
+    ("card", "withheld"),
+    [
+        ({"entPhysicalContainedIn": 0, "entPhysicalSerialNum": "12"}, True),
+        ({"entPhysicalContainedIn": 0, "entPhysicalSerialNum": ""}, False),
+        ({"entPhysicalSerialNum": "12"}, False),
+    ],
+    ids=["unattributed-short-serial", "unattributed-blank-serial", "attributed-by-the-page-serial"],
+)
+def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card, withheld):
+    """The card sits at the root and reports "12", so no rule names its member, and the page device must not take it."""
+    page, member = vc_grants(card=card)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{CARD}"[^>]*>', row)
+    action, fields = rendered_module_form(content, "install-selected")
+
+    assert bool([form for form in parsed.forms if str(CARD) in form["fields"].values()]) is (not withheld)
+    assert ("data-member-unattributed" in row) is withheld
+    assert (" disabled" in checkbox) is withheld
+    post(ui, action, {**fields, "select": [str(CARD)]})
+    assert _installed(page) == (set() if withheld else {("Card Slot", "GR-CARD")})
+    assert _installed(member) == set()
+
+
+def test_a_member_pick_offers_the_install_of_a_stack_row_that_no_member_reported(ui, vc_grants):
+    """The user names the member, so the table pinned to it offers the install there."""
+    page, member = vc_grants(card={"entPhysicalContainedIn": 0, "entPhysicalSerialNum": "12"})
+    content = render(ui, page)
+
+    response = verify(ui, content, page, member, CARD)
+
+    assert response.status_code == 200, response.content
+    action, fields = rendered_module_form(response.json()["formatted_row"]["actions"], "install-module", CARD)
+    post(ui, action, fields)
+    assert _installed(member) == {("Card Slot", "GR-CARD")}
+    assert _installed(page) == set()
 
 
 def test_the_member_select_names_only_the_members_the_user_may_view(client, vc_grants):

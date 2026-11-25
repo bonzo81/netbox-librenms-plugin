@@ -405,6 +405,9 @@ def _stack_rows(rows, contexts) -> _StackRows:
 # A leading member number of 1 or more, then "/", ":" or "-", as in "2/1/1".
 _NAME_HINT_RE = re.compile(r"^\D*([1-9]\d*)[/:\-].*")
 
+# The source of a row that no rule attributes while it or an ancestor reports a serial without an identity.
+UNATTRIBUTED_SOURCE = "unattributed"
+
 
 class _Attribution:
     """Attribute the rows of one inventory to Virtual Chassis members; see :func:`attribute_inventory`."""
@@ -444,6 +447,24 @@ class _Attribution:
             result = self._without_stack(row, resolving | {id(row)})
         self.results[id(row)] = result
         return result
+
+    def owner(self, row):
+        """Return ``(member | None, source)`` for one row; a page row below a serial without an identity is unattributed."""
+        member, source = self.resolve(row)
+        if member is None and self.vc_members and self._reports_serial_without_identity(row):
+            return None, UNATTRIBUTED_SOURCE
+        return member, source
+
+    def _reports_serial_without_identity(self, row):
+        """Return whether the row or an ancestor reports serial text that no member's rules give an identity."""
+        current, visited = row, set()
+        while isinstance(current, dict) and id(current) not in visited:
+            visited.add(id(current))
+            serial = current.get("entPhysicalSerialNum")
+            if display(serial) and not self.by_serial.admits(serial):
+                return True
+            current = self.by_index.get(current.get("entPhysicalContainedIn"))
+        return False
 
     def _member_row_owner(self, row):
         """Return the member a member row resolves to: its serial first, then its detected position."""
@@ -528,6 +549,8 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
     the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
     follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
     inherits its parent's member, or a position or leading name number of 1 or more names one.
+    A row that no rule attributes has the source "default", or :data:`UNATTRIBUTED_SOURCE` when it
+    or an ancestor reports a serial that has no identity, because such a serial names no member.
 
     Args:
         rows: The main inventory rows of one device; OOB controller rows are no part of it.
@@ -540,7 +563,7 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
 
     """
     attribution = _Attribution(rows, vc_members, context, member_context)
-    return [attribution.resolve(row) for row in rows]
+    return [attribution.owner(row) for row in rows]
 
 
 def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, serial_rules=None) -> dict | None:

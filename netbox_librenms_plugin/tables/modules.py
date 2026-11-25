@@ -36,6 +36,11 @@ TREE_PREFIX = "└─\u00a0"
 # Only an install keeps its visible label; carrier installs differ from each other only by that label.
 LABELLED_MODULE_ACTIONS = frozenset({"install", "install-carrier"})
 
+UNATTRIBUTED_ROW_REASON = (
+    "The plugin cannot tell which stack member reported this part, so it offers no action. "
+    "Select the member to show its actions."
+)
+
 
 def module_action_control(tag, action, css, attrs, title, icon, label):
     """Render one actions-column control; a secondary action is icon-only and named by aria-label."""
@@ -713,6 +718,11 @@ class LibreNMSModuleTable(tables.Table):
         # A row on a member the user may not view names none of its objects, so it offers no action.
         if record.get("member_withheld"):
             return ""
+        # The row can belong to any member, so no action may write it onto the page device.
+        if record.get("member_unattributed"):
+            return format_html(
+                '<span class="text-muted small" data-member-unattributed>{}</span>', UNATTRIBUTED_ROW_REASON
+            )
 
         buttons = []
 

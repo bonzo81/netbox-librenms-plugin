@@ -16,7 +16,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE, attribute_inventory
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
 from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
@@ -1560,6 +1560,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 and row.get("_source") != OOB_INVENTORY_SOURCE
                 and row.get("status") != "Integrated"
                 and not row.get("member_withheld")
+                and not row.get("member_unattributed")
                 and not _install_refused(row)
             )
             if row.get("depth", 0) == 0:
@@ -2159,6 +2160,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
         row["member_resolution_source"] = resolution_source
+        row["member_unattributed"] = resolution_source == UNATTRIBUTED_SOURCE
         row["member_withheld"] = target_context["withheld"]
         self._apply_carrier_install_rules(row, item, selected_device)
         self._attach_interface_match(row, item, target_context)
@@ -2277,6 +2279,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sub_row["selected_device_id"] = sub_selected_device.id
             sub_row["selected_device_name"] = sub_selected_device.name
             sub_row["member_resolution_source"] = sub_resolution_source
+            sub_row["member_unattributed"] = sub_resolution_source == UNATTRIBUTED_SOURCE
             sub_row["member_withheld"] = sub_target_context["withheld"]
             self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
             self._attach_interface_match(sub_row, sub_item, sub_target_context)
