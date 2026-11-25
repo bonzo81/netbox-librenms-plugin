@@ -2035,6 +2035,38 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_serial_no_member
     assert bool(_row_forms(parsed, CARD + 1)) is (not withheld)
 
 
+@pytest.mark.parametrize(("fpc_serial", "withheld"), [("12", True), ("VCB-0001", False)], ids=["short", "identity"])
+def test_a_card_below_a_junos_fpc_with_a_short_serial_is_offered_on_no_member(ui, vc_grants, fpc_serial, withheld):
+    """FPC 1 reports "12", so the card below it does not follow the root's master serial onto the page device."""
+
+    def row(index, parent, entity_class, descr, serial, **fields):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalContainedIn": parent,
+            "entPhysicalClass": entity_class,
+            "entPhysicalName": descr,
+            "entPhysicalDescr": descr,
+            "entPhysicalSerialNum": serial,
+            **fields,
+        }
+
+    rows = [
+        row(1, 0, "chassis", "Juniper Virtual Chassis Switch", "VCA-0001"),
+        row(120, 1, "container", "FPC: EX4400-24X @ 0/*/*", "VCA-0001", entPhysicalParentRelPos=0),
+        row(121, 1, "container", "FPC: EX4400-24X @ 1/*/*", fpc_serial, entPhysicalParentRelPos=1),
+        row(CARD, 121, "module", "Card Slot", "SN-CARD-1", entPhysicalModelName="GR-CARD"),
+    ]
+    page, member = vc_grants(rows=rows)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    (card,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    assert ("data-member-unattributed" in card) is withheld
+    assert (f'<option value="{member.pk}" selected>' in card) is (not withheld)
+    assert f'<option value="{page.pk}" selected>' not in card
+    assert bool(_row_forms(parsed, CARD)) is (not withheld)
+
+
 @pytest.mark.parametrize(("first_serial", "withheld"), [("VCB-0001", True), ("VCA-0001", False)], ids=["taken", "free"])
 def test_a_reported_position_gives_no_member_that_another_switch_owns_by_serial(ui, vc_grants, first_serial, withheld):
     """Switch 2 reports the member's serial at position 1, so position 2 can not give Switch 3 that member too."""
@@ -2071,7 +2103,7 @@ def test_a_stack_member_that_netbox_does_not_hold_takes_its_cards_off_every_memb
     [
         ({"entPhysicalContainedIn": 0, "entPhysicalSerialNum": "12"}, True),
         ({"entPhysicalContainedIn": 0, "entPhysicalSerialNum": ""}, False),
-        ({"entPhysicalSerialNum": "12"}, False),
+        ({"entPhysicalSerialNum": ""}, False),
     ],
     ids=["unattributed-short-serial", "unattributed-blank-serial", "attributed-by-the-page-serial"],
 )
@@ -2151,7 +2183,7 @@ def test_a_stack_row_that_no_member_reported_offers_no_module_type_fix(ui, vc_gr
 
 @pytest.mark.parametrize(
     ("card", "withheld"),
-    [({"entPhysicalContainedIn": 0}, True), ({}, False)],
+    [({"entPhysicalContainedIn": 0}, True), ({"entPhysicalSerialNum": ""}, False)],
     ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
 )
 def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix_or_bay_mapping(ui, vc_grants, card, withheld):
@@ -2171,7 +2203,7 @@ def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix_or_bay_ma
 
 @pytest.mark.parametrize(
     ("card", "withheld"),
-    [({"entPhysicalContainedIn": 0}, True), ({}, False)],
+    [({"entPhysicalContainedIn": 0}, True), ({"entPhysicalSerialNum": ""}, False)],
     ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
 )
 def test_a_stack_row_that_no_member_reported_offers_no_bay_mapping_suggestion(ui, vc_grants, card, withheld):
@@ -2189,7 +2221,7 @@ def test_a_stack_row_that_no_member_reported_offers_no_bay_mapping_suggestion(ui
 
 @pytest.mark.parametrize(
     ("card", "withheld"),
-    [({"entPhysicalContainedIn": 0}, True), ({}, False)],
+    [({"entPhysicalContainedIn": 0}, True), ({"entPhysicalSerialNum": ""}, False)],
     ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
 )
 def test_a_stack_row_that_no_member_reported_names_no_bay_in_its_type_mapping(ui, vc_grants, card, withheld):

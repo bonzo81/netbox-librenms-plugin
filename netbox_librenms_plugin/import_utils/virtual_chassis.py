@@ -499,25 +499,28 @@ class _Attribution:
         # Walk up to the stack root, which owns no member: a nearer serial wins over a member row.
         current = row
         visited = set()
+        # Whether the walk passed a row whose serial has no identity; such a row can be a member row itself.
+        crossed = False
         while isinstance(current, dict) and current.get("entPhysicalIndex") != self.stack.root_index:
             if id(current) in visited:
                 break
             visited.add(id(current))
             if current is not row and (member := self.serial_owner(current)) is not None:
-                return member, "ancestor-serial"
+                return (None, UNATTRIBUTED_SOURCE) if crossed else (member, "ancestor-serial")
             if current.get("entPhysicalIndex") in self.stack.positions:
                 member = self._member_row_owner(current)
                 # A member row that names no NetBox member belongs to a member that NetBox does not hold.
-                if member is None:
+                if member is None or crossed:
                     return None, UNATTRIBUTED_SOURCE
                 return member, "position" if current is row else "parent-context"
             # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows it.
             fpc = self.by_index.get(self.stack.fpc_named_by(current))
             if fpc is not None:
                 member = self._member_row_owner(fpc)
-                if member is None:
+                if member is None or crossed:
                     return None, UNATTRIBUTED_SOURCE
                 return member, "junos-member" if current is row else "parent-context"
+            crossed = crossed or self._has_serial_without_identity(current)
             current = self.by_index.get(current.get("entPhysicalContainedIn"))
         return None, "default"
 
@@ -538,15 +541,20 @@ class _Attribution:
         """Attribute a row of an unrecognized shape with the position and name heuristic."""
         parent_index = row.get("entPhysicalContainedIn", 0)
         visited = set()
+        # A row whose serial has no identity can be a member row itself, so no member is inherited across it.
+        crossed = self._has_serial_without_identity(row)
         while parent_index and parent_index in self.by_index and parent_index not in visited:
             visited.add(parent_index)
             parent = self.by_index[parent_index]
             if (member := self.serial_owner(parent)) is not None:
-                return member, "ancestor-serial"
+                return (None, UNATTRIBUTED_SOURCE) if crossed else (member, "ancestor-serial")
+            crossed = crossed or self._has_serial_without_identity(parent)
             parent_index = parent.get("entPhysicalContainedIn", 0)
         # A descendant's parentRelPos is its hardware slot, so it inherits its parent's member.
         inherits, member = self._inherited(row, resolving)
         if inherits:
+            if member is not None and self._has_serial_without_identity(row):
+                return None, UNATTRIBUTED_SOURCE
             return member, "parent-context"
         # This shape has no member rows, so any row's position or name hint from 1 names a member.
         if (member := self.member_at(_from_one(row.get("entPhysicalParentRelPos")))) is not None:
@@ -577,6 +585,8 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
     the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
     follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
     inherits its parent's member, or a position or leading name number of 1 or more names one.
+    No row inherits a member across a row (itself included) whose serial has no identity, because
+    such a row can be a member row; it is unattributed instead.
     A row that no rule attributes has the source "default", or :data:`UNATTRIBUTED_SOURCE` when it
     or an ancestor reports a serial that has no identity, because such a serial names no member.
 

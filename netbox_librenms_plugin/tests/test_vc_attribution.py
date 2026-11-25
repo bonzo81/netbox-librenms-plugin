@@ -466,6 +466,51 @@ class TestRecognizedStack:
         else:
             assert (owner[222], owner[223]) == ((second, "position"), (second, "parent-context"))
 
+    @pytest.mark.parametrize(("fpc_serial", "inherits"), [("12", False), ("ZZZ999", True)], ids=["short", "identity"])
+    def test_a_row_inherits_no_member_across_a_junos_fpc_with_a_short_serial(self, fpc_serial, inherits):
+        """FPC 1 reports "12", which turns off the stack shape and could be a member row, so the root's serial stops there."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-short-fpc-{fpc_serial}")
+        inventory = [
+            {**row, "entPhysicalSerialNum": fpc_serial} if row["entPhysicalIndex"] == 121 else row
+            for row in junos_vc_inventory()
+        ]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[120] == (master, "serial")
+        if inherits:
+            assert (owner[121][0], owner[1210][0]) == (member, member)
+        else:
+            assert {owner[121], owner[1210]} == {(None, UNATTRIBUTED_SOURCE)}
+
+    @pytest.mark.parametrize(("serial", "inherits"), [("12", False), ("CARD999", True)], ids=["short", "identity"])
+    def test_a_row_inherits_no_member_row_across_a_short_serial(self, serial, inherits):
+        """The module below Switch 1 reports "12", so neither it nor its card follows Switch 1 by parent context."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        first, second = _vc_members(["100071", "100072"])
+        inventory = [
+            _row(230, "stack", 0),
+            _row(231, "chassis", 230, position=1, entPhysicalSerialNum="SW-ONE-1"),
+            _row(232, "chassis", 230, position=2, entPhysicalSerialNum="SW-TWO-2"),
+            _row(233, "module", 231, entPhysicalModelName="CARRIER", entPhysicalSerialNum=serial),
+            _row(234, "module", 233, entPhysicalModelName="CARD", entPhysicalSerialNum="CARD123"),
+        ]
+
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[231] == (first, "position")
+        if inherits:
+            assert (owner[233], owner[234]) == ((first, "parent-context"), (first, "parent-context"))
+        else:
+            assert {owner[233], owner[234]} == {(None, UNATTRIBUTED_SOURCE)}
+
     @pytest.mark.parametrize("stored", [("", ""), ("SN-AAA", "SN-BBB")], ids=["blank", "fpc-serials"])
     def test_junos_fpcs_sharing_a_slot_follow_only_their_serials(self, stored):
         """Two FPCs that both report slot 1 get positions from row order, which names no member of a serial FPC."""
