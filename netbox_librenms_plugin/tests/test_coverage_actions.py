@@ -2019,9 +2019,19 @@ class TestDeviceValidationDetailsView:
         assert response.status_code == 200
         assert b'value="sync_serial"' not in response.content
 
-    @pytest.mark.parametrize("match_type", ["hostname", "serial", "primary_ip"])
-    def test_linking_a_chassis_member_preserves_its_name_and_serial(self, match_type):
-        from netbox_librenms_plugin.tests._html_helpers import open_tags
+    @pytest.mark.parametrize(
+        ("match_type", "reported"),
+        [
+            ("hostname", "CHASSIS-SERIAL"),
+            ("hostname", "C" * 51),
+            ("serial", None),
+            ("primary_ip", "CHASSIS-SERIAL"),
+            ("primary_ip", "C" * 51),
+        ],
+        ids=["hostname", "hostname-too-long", "serial", "primary_ip", "primary_ip-too-long"],
+    )
+    def test_linking_a_chassis_member_preserves_its_name_and_serial(self, match_type, reported):
+        """A link writes no serial, so a LibreNMS serial that does not fit the field hides no link."""
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -2029,7 +2039,7 @@ class TestDeviceValidationDetailsView:
         member.name = "SW01"
         member.serial = "MEMBER-OLD"
         hostname = "sw01" if match_type == "hostname" else "test-switch"
-        serial = member.serial if match_type == "serial" else "CHASSIS-SERIAL"
+        serial = member.serial if match_type == "serial" else reported
         ip = "198.18.0.8"
         if match_type == "primary_ip":
             member.primary_ip4 = make_ip(f"{ip}/24", assigned_object=make_interface(member, "eth0"))
@@ -2040,6 +2050,62 @@ class TestDeviceValidationDetailsView:
         _view, response = self._get("default")
 
         assert response.status_code == 200
+        link_forms = self._link_forms(response)
+        assert [form["action"] for form in link_forms] == ["link"]
+
+        request = make_view_request("post", link_forms[0], user=make_superuser(), HTTP_HX_REQUEST="true")
+        response = post_view(DeviceConflictActionView(), request, device_id=1)
+
+        assert response.status_code == 200
+        member.refresh_from_db()
+        assert stored_mapping_for_test(member) == {"default": 1}
+        assert member.serial == "MEMBER-OLD"
+        assert member.name == "SW01"
+
+    def test_a_write_peer_of_another_maker_hides_no_link_of_a_chassis_member(self):
+        """The member's maker strips "X-" and "Y-"; a plain Device stores "Y-ABC123", and a link writes no serial."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-chassis-peer")
+        member.serial = "ABC123"
+        member.save()
+        NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^[XY]-(.+)$",
+            replacement=r"\1",
+            manufacturer=member.device_type.manufacturer,
+        )
+        peer = make_device("import-details-chassis-peer-plain", serial="Y-ABC123")
+        plain_maker = Manufacturer.objects.create(name="Chassis peer plain maker", slug="chassis-peer-plain-maker")
+        Device.objects.filter(pk=peer.pk).update(
+            device_type=DeviceType.objects.create(manufacturer=plain_maker, model="Peer plain", slug="peer-plain")
+        )
+        self.primary_server.device_info_response(device_id=1, hostname="chassis-peer-reported", serial="X-ABC123")
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        link_forms = self._link_forms(response)
+        assert [(form["action"], form["existing_device_id"]) for form in link_forms] == [("link", str(member.pk))]
+
+        request = make_view_request("post", link_forms[0], user=make_superuser(), HTTP_HX_REQUEST="true")
+        response = post_view(DeviceConflictActionView(), request, device_id=1)
+
+        assert response.status_code == 200
+        member.refresh_from_db()
+        assert stored_mapping_for_test(member) == {"default": 1}
+        assert member.serial == "ABC123"
+
+    @staticmethod
+    def _link_forms(response):
+        """Return the submitted values of each Link, Update or Update Serial form in the dialog."""
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+
         action_url = url_for("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 1})
         link_forms = []
         for form in re.findall(r"<form\b.*?</form>", response.content.decode(), re.DOTALL):
@@ -2053,16 +2119,7 @@ class TestDeviceValidationDetailsView:
             }
             if data.get("action") in {"link", "update", "update_serial"}:
                 link_forms.append(data)
-        assert [form["action"] for form in link_forms] == ["link"]
-
-        request = make_view_request("post", link_forms[0], user=make_superuser(), HTTP_HX_REQUEST="true")
-        response = post_view(DeviceConflictActionView(), request, device_id=1)
-
-        assert response.status_code == 200
-        member.refresh_from_db()
-        assert stored_mapping_for_test(member) == {"default": 1}
-        assert member.serial == "MEMBER-OLD"
-        assert member.name == "SW01"
+        return link_forms
 
     def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
         from dcim.models import Platform

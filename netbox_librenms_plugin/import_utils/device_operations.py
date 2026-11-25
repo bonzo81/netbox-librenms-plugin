@@ -1298,8 +1298,10 @@ def validate_device_for_import(  # noqa: C901
                             existing_by_serial, existing_link, hostname, serial, libre_device, server_key
                         )
                         # Update & Link writes the serial, so a row that the write would duplicate blocks the match.
+                        # A chassis member gets a link only, and a link writes no serial.
                         if (
                             role["serial_action"] == "hostname_differs"
+                            and existing_by_serial.virtual_chassis_id is None
                             and not keeps_stored_serial(existing_by_serial.serial, incoming_serial, Device)
                             and _write_conflict(existing_by_serial, incoming_serial, serial_rules)
                         ):

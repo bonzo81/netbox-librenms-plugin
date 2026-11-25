@@ -677,7 +677,7 @@
           Import blocked: The incoming serial number is already assigned to another device in NetBox.
           Resolve the duplicate serial before linking.
         </div>
-      {% elif validation.serial_action == 'update_serial' and sync_info.serial_fit_refusal %}
+      {% elif validation.serial_action == 'update_serial' and sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
         <div class="alert alert-warning py-2 mb-3" data-serial-fit-refusal>
           <i class="mdi mdi-alert"></i>
           {{ sync_info.serial_fit_refusal }}
