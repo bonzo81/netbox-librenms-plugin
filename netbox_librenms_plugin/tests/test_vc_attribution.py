@@ -513,6 +513,34 @@ class TestRecognizedStack:
             # The PSU's fan crosses the PSU's link on its way to the root's serial.
             assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize("stack", [False, True], ids=["unrecognized", "recognized"])
+    def test_a_junos_fpc_link_is_read_from_the_description_only(self, stack):
+        """The anonymizer keeps "FPC <n>" only in descriptions, so a name-only link must give what replay gives."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-name-link-{stack}")
+        inventory = junos_vc_inventory()
+        if not stack:
+            fpc = {"entPhysicalName": "EX4400-24X-S", "entPhysicalModelName": "650-151094"}
+            descr = "FPC: EX4400-24X @ 2/*/*"
+            inventory.append(
+                _row(122, "container", 1, position=2, entPhysicalDescr=descr, entPhysicalSerialNum="12", **fpc)
+            )
+        live = [
+            {**row, "entPhysicalName": "FPC 1 Power Supply 0", "entPhysicalDescr": "Power Supply 0"}
+            if row["entPhysicalIndex"] == 4
+            else row
+            for row in inventory
+        ]
+        replayed = [{**row, "entPhysicalName": "NAME-0004"} if row["entPhysicalIndex"] == 4 else row for row in live]
+        rules = SerialRules.load()
+
+        def owner_of_the_psu(rows):
+            owners = attribute_inventory(rows, [master, member], rules.for_device(master))
+            return next(found for row, found in zip(rows, owners, strict=True) if row["entPhysicalIndex"] == 4)
+
+        assert owner_of_the_psu(live) == owner_of_the_psu(replayed)
+
     @pytest.mark.parametrize("case", ["short-fpc-2", "short-fpc-1-without-slot", "blank-serials"])
     def test_a_junos_row_that_names_an_fpc_follows_only_that_fpc(self, case):
         """Outside a recognized stack, "FPC 1 ..." rows resolve through FPC 1 and never through the root's serial."""

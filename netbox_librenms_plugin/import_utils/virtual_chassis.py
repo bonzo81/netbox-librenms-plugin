@@ -365,6 +365,14 @@ def extract_vc_stack(rows: list, contexts) -> VcStack:
     return VcStack(None, [], [], None)
 
 
+def _junos_fpc_named_slot(row: dict) -> int | None:
+    """Return the FPC slot that a Junos row's description names as "FPC <n> ...", or None."""
+    # The anonymizer keeps this prefix only in descriptions, so a name never links.
+    descr = row.get("entPhysicalDescr")
+    named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
+    return int(named.group("member")) if named else None
+
+
 class _StackRows(NamedTuple):
     """The inventory rows that :func:`extract_vc_members` reads as a stack, keyed by raw index."""
 
@@ -379,9 +387,8 @@ class _StackRows(NamedTuple):
         """Return the index of the FPC row that a Junos "FPC <n> ..." row directly under the root names."""
         if row.get("entPhysicalContainedIn") != self.root_index or row.get("entPhysicalIndex") in self.positions:
             return None
-        descr = row.get("entPhysicalDescr")
-        named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
-        return self.fpc_slots.get(int(named.group("member"))) if named else None
+        slot = _junos_fpc_named_slot(row)
+        return self.fpc_slots.get(slot) if slot is not None else None
 
 
 def _stack_rows(rows, contexts) -> _StackRows:
@@ -493,13 +500,9 @@ class _Attribution:
             return None
         if _is_junos_fpc(row):
             return [row]
-        for field in ("entPhysicalName", "entPhysicalDescr"):
-            text = row.get(field)
-            named = JUNOS_FPC_MEMBER_DESCR_RE.match(text) if isinstance(text, str) else None
-            if named:
-                slot = int(named.group("member"))
-                return [fpc for fpc in fpcs if _as_int(fpc.get("entPhysicalParentRelPos")) == slot]
-        return None
+        if (slot := _junos_fpc_named_slot(row)) is None:
+            return None
+        return [fpc for fpc in fpcs if _as_int(fpc.get("entPhysicalParentRelPos")) == slot]
 
     def _fpc_member(self, fpc):
         """Return the member of a Junos FPC row outside a recognized stack: its serial, else a blank serial's slot."""
