@@ -22,7 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
     module_tab_forms,
@@ -489,12 +489,17 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
 
 
 @transactional_db_with_all_apps()
-def test_a_forced_link_checks_member_serials_under_the_locked_new_type(librenms_server):
-    """The new type moves to a maker whose rule gives two stored serials the same identity."""
+@pytest.mark.parametrize("concurrent", [True, False])
+def test_a_forced_link_checks_member_serials_under_the_locked_new_type(librenms_server, concurrent):
+    """
+    The new type moves to a maker whose rule strips "PREFIX-" after the match: the master's "ABC123" then
+    names the hardware of the member "PREFIX-ABC123", although the stale plain type kept the two apart.
+    """
     from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
 
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import RETYPE_HELD
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.tests.view_test_helpers import make_request
@@ -533,16 +538,24 @@ def test_a_forced_link_checks_member_serials_under_the_locked_new_type(librenms_
     def change_before_the_first_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
             changed.append(True)
-            with second_connection() as other:
-                commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
+            if concurrent:
+                with second_connection() as other:
+                    commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(change_before_the_first_lock):
         response = post_view(view, request, device_id=9816)
 
     assert changed
-    assert response.headers.get("HX-Reswap") == "none"
-    assert Device.objects.values_list("device_type_id", "serial").get(pk=master.pk) == (old_type_id, "ABC123")
+    stored = Device.objects.values_list("device_type_id", "serial").get(pk=master.pk)
+    if concurrent:
+        assert RETYPE_HELD in response.content.decode()
+        assert stored == (old_type_id, "ABC123")
+        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) is None
+    else:
+        # Without the concurrent edit the same request links the master and stores the new type.
+        assert stored == (new_type.pk, "ABC123")
+        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) == {SERVER_KEY: 9816}
 
 
 @transactional_db_with_all_apps()
