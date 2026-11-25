@@ -498,9 +498,11 @@ class _Attribution:
 
     def _junos_link(self, row):
         """Return the FPC rows that a row under a Junos root is or names as "FPC <n>", or None for no link."""
-        fpcs = self.junos_fpcs.get(row.get("entPhysicalContainedIn"))
-        if not fpcs:
+        root = self.by_index.get(row.get("entPhysicalContainedIn"))
+        if not (isinstance(root, dict) and _is_junos_vc_root(root)):
             return None
+        # A root that reports no FPC row gives a named row no FPC, never the root's own serial.
+        fpcs = self.junos_fpcs.get(root.get("entPhysicalIndex"), [])
         if _is_junos_fpc(row):
             return [row]
         if (slot := _junos_fpc_named_slot(row)) is None:

@@ -513,6 +513,24 @@ class TestRecognizedStack:
             # The PSU's fan crosses the PSU's link on its way to the root's serial.
             assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize("fpc_reported", [False, True], ids=["no-fpc-rows", "fpc-1-reported"])
+    def test_a_junos_row_that_names_an_fpc_no_row_reports_is_unattributed(self, fpc_reported):
+        """The root reports the master's serial, but "FPC 1 Power Supply 0" names FPC 1, which no row reports."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-no-fpc-{fpc_reported}")
+        inventory = [
+            row
+            for row in junos_vc_inventory()
+            if row["entPhysicalIndex"] in {1, 4} | ({121} if fpc_reported else set())
+        ]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[4] == ((member, "junos-member") if fpc_reported else (None, UNATTRIBUTED_SOURCE))
+
     @pytest.mark.parametrize("stack", [False, True], ids=["unrecognized", "recognized"])
     def test_a_junos_fpc_link_is_read_from_the_description_only(self, stack):
         """The anonymizer keeps "FPC <n>" only in descriptions, so a name-only link must give what replay gives."""
