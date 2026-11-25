@@ -1990,6 +1990,24 @@ def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card
     assert _installed(member) == set()
 
 
+@pytest.mark.parametrize(
+    ("card", "withheld"),
+    [({"entPhysicalContainedIn": 0}, True), ({}, False)],
+    ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
+)
+def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix(ui, vc_grants, card, withheld):
+    """The Fix Device Type modal adds a bay template to the page device type, which can be the wrong member's type."""
+    page, _member = vc_grants(
+        card={"entPhysicalName": "Fan Tray 9", "entPhysicalDescr": "Fan Tray 9", "entPhysicalSerialNum": "12", **card}
+    )
+    content = render(ui, page)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+
+    assert "No Bay" in row
+    assert ("data-member-unattributed" in row) is withheld
+    assert ("Fix Device Type" in row) is (not withheld)
+
+
 def test_a_member_pick_offers_the_install_of_a_stack_row_that_no_member_reported(ui, vc_grants):
     """The user names the member, so the table pinned to it offers the install there."""
     page, member = vc_grants(card={"entPhysicalContainedIn": 0, "entPhysicalSerialNum": "12"})

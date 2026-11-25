@@ -2173,7 +2173,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # _build_row already ran the same pure _suggest_bay_mapping(item, all_bays,
         # scope_preserved=False) and only omits model_suggestion when it returned nothing, so
         # there is no second suggestion to recover here.
-        if row.get("status") == "No Bay" and "model_suggestion" not in row and not row["member_withheld"]:
+        # An unattributed row can belong to another member, whose device type the fix would not change.
+        if (
+            row.get("status") == "No Bay"
+            and "model_suggestion" not in row
+            and not row["member_withheld"]
+            and not row["member_unattributed"]
+        ):
             device_type = getattr(selected_device, "device_type", None)
             if device_type:
                 row["device_type_incomplete"] = True
