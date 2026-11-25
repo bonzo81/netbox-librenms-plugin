@@ -2022,6 +2022,14 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_short_serial(
         assert fields["selected_device_id"] == str(page.pk)
 
 
+def _assert_numbering_refused(content, message):
+    """Assert that the tab shows the numbering refusal *message* in place of the table, so no row offers a control."""
+    from django.utils.html import escape
+
+    assert escape(message) in content
+    assert "data-ent-index" not in content
+
+
 @pytest.mark.parametrize(
     ("second_serial", "withheld"), [("NEW123", True), ("", False)], ids=["unowned-serial", "blank"]
 )
@@ -2032,15 +2040,20 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_serial_no_member
     """Switch 2 reports the member's serial; row order names no member for Switch 3's unowned "NEW123".
 
     A blank Switch 3 takes position 1 in reversed order, the page device, which Switch 2 does not own.
+    In order, Switch 2's serial disagrees with its row order position, so the tab refuses.
     """
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_MISMATCH
+
     rows = _stack_rows((-1, -1), serials=("VCB-0001", second_serial))
     if reverse:
         rows[1:3] = rows[2:0:-1]
     page, member = vc_grants(rows=rows)
     content = render(ui, page)
     parsed = module_tab_forms(content)
-    # In order, a blank Switch 3 takes position 2, the member that Switch 2 owns by serial.
-    withheld = withheld or not reverse
+    if not reverse:
+        # In order, row order gives Switch 2 position 1, but its serial names the member at position 2.
+        _assert_numbering_refused(content, VC_NUMBERING_MISMATCH)
+        return
 
     (owned,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
     (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 1}".*?</tr>', content, flags=re.S)
@@ -2052,7 +2065,8 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_serial_no_member
 
 @pytest.mark.parametrize(("fpc_serial", "withheld"), [("12", True), ("VCB-0001", False)], ids=["short", "identity"])
 def test_a_card_below_a_junos_fpc_with_a_short_serial_is_offered_on_no_member(ui, vc_grants, fpc_serial, withheld):
-    """FPC 1 reports "12", so the card below it does not follow the root's master serial onto the page device."""
+    """FPC 2 reports "12", which turns off the stack shape, so the tab refuses and the card takes no member."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_UNRECOGNIZED
 
     def row(index, parent, entity_class, descr, serial, **fields):
         return {
@@ -2067,13 +2081,16 @@ def test_a_card_below_a_junos_fpc_with_a_short_serial_is_offered_on_no_member(ui
 
     rows = [
         row(1, 0, "chassis", "Juniper Virtual Chassis Switch", "VCA-0001"),
-        row(120, 1, "container", "FPC: EX4400-24X @ 0/*/*", "VCA-0001", entPhysicalParentRelPos=0),
-        row(121, 1, "container", "FPC: EX4400-24X @ 1/*/*", fpc_serial, entPhysicalParentRelPos=1),
+        row(120, 1, "container", "FPC: EX4400-24X @ 1/*/*", "VCA-0001", entPhysicalParentRelPos=1),
+        row(121, 1, "container", "FPC: EX4400-24X @ 2/*/*", fpc_serial, entPhysicalParentRelPos=2),
         row(CARD, 121, "module", "Card Slot", "SN-CARD-1", entPhysicalModelName="GR-CARD"),
     ]
     page, member = vc_grants(rows=rows)
     content = render(ui, page)
     parsed = module_tab_forms(content)
+    if withheld:
+        _assert_numbering_refused(content, VC_NUMBERING_UNRECOGNIZED)
+        return
 
     (card,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
     assert ("data-member-unattributed" in card) is withheld
@@ -2086,11 +2103,10 @@ def test_a_card_below_a_junos_fpc_with_a_short_serial_is_offered_on_no_member(ui
 def test_a_carrier_whose_typed_children_no_member_reported_offers_no_install_branch(
     ui, vc_grants, optic_serials, branch
 ):
-    """The optics report "12" and "34", so no member owns them; the carrier offers its own Install only."""
+    """The carrier sits outside the stack root and its optics report "12" and "34"; it offers its own Install only."""
     rows = _vc_rows("VCA-0001", "VCB-0001", optic_1_serial=optic_serials[0])
-    rows = [
-        {**row, "entPhysicalSerialNum": optic_serials[1]} if row["entPhysicalIndex"] == OPTIC_2 else row for row in rows
-    ]
+    changes = {OPTIC_2: {"entPhysicalSerialNum": optic_serials[1]}, CARRIER: {"entPhysicalContainedIn": 0}}
+    rows = [{**row, **changes.get(row["entPhysicalIndex"], {})} for row in rows]
     page, _member = vc_grants(rows=rows)
     content = render(ui, page)
     parsed = module_tab_forms(content)
@@ -2106,7 +2122,8 @@ def test_a_carrier_whose_typed_children_no_member_reported_offers_no_install_bra
 
 @pytest.mark.parametrize("third_fpc", ["12", None], ids=["short-fpc-3", "no-fpc-3"])
 def test_a_junos_row_follows_its_named_fpc_when_another_fpc_has_a_short_serial(ui, vc_grants, third_fpc):
-    """FPC 3 reports "12", which turns off the stack shape; the card that names FPC 2 still follows FPC 2's member."""
+    """The card that names FPC 2 follows FPC 2's member; FPC 3's "12" turns off the stack shape, so the tab refuses."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_UNRECOGNIZED
 
     def row(index, entity_class, descr, serial, **fields):
         return {
@@ -2133,6 +2150,9 @@ def test_a_junos_row_follows_its_named_fpc_when_another_fpc_has_a_short_serial(u
     page, member = vc_grants(rows=rows)
     content = render(ui, page)
     parsed = module_tab_forms(content)
+    if third_fpc is not None:
+        _assert_numbering_refused(content, VC_NUMBERING_UNRECOGNIZED)
+        return
 
     (card,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
     assert "data-member-unattributed" not in card
@@ -2143,7 +2163,8 @@ def test_a_junos_row_follows_its_named_fpc_when_another_fpc_has_a_short_serial(u
 
 @pytest.mark.parametrize(("fpc_serial", "withheld"), [("12", True), ("VCB-0001", False)], ids=["short", "identity"])
 def test_a_junos_row_that_names_an_fpc_with_a_short_serial_is_offered_on_no_member(ui, vc_grants, fpc_serial, withheld):
-    """The card names FPC 2, which reports "12", so it does not fall through to the root's serial of the page device."""
+    """The card names FPC 2; its "12" turns off the stack shape, so the card never takes the root's serial."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_UNRECOGNIZED
 
     def row(index, entity_class, descr, serial, **fields):
         return {
@@ -2168,6 +2189,9 @@ def test_a_junos_row_that_names_an_fpc_with_a_short_serial_is_offered_on_no_memb
     page, member = vc_grants(rows=rows)
     content = render(ui, page)
     parsed = module_tab_forms(content)
+    if withheld:
+        _assert_numbering_refused(content, VC_NUMBERING_UNRECOGNIZED)
+        return
 
     (card,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
     assert ("data-member-unattributed" in card) is withheld
@@ -2178,10 +2202,15 @@ def test_a_junos_row_that_names_an_fpc_with_a_short_serial_is_offered_on_no_memb
 
 @pytest.mark.parametrize(("first_serial", "withheld"), [("VCB-0001", True), ("VCA-0001", False)], ids=["taken", "free"])
 def test_a_reported_position_gives_no_member_that_another_switch_owns_by_serial(ui, vc_grants, first_serial, withheld):
-    """Switch 2 reports the member's serial at position 1, so position 2 can not give Switch 3 that member too."""
+    """Switch 2 reports the member's serial at position 1, so the tab refuses and Switch 3 never takes that member."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_MISMATCH
+
     page, member = vc_grants(rows=_stack_rows((1, 2), serials=(first_serial, "12")))
     content = render(ui, page)
     parsed = module_tab_forms(content)
+    if withheld:
+        _assert_numbering_refused(content, VC_NUMBERING_MISMATCH)
+        return
 
     (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 1}".*?</tr>', content, flags=re.S)
     assert ("data-member-unattributed" in row) is withheld
@@ -2189,21 +2218,15 @@ def test_a_reported_position_gives_no_member_that_another_switch_owns_by_serial(
     assert bool(_row_forms(parsed, CARD + 1)) is (not withheld)
 
 
-@pytest.mark.parametrize(("third_serial", "withheld"), [("NEW123", True), ("VCB-0001", False)], ids=["new", "owned"])
-def test_a_stack_member_that_netbox_does_not_hold_takes_its_cards_off_every_member(
-    ui, vc_grants, third_serial, withheld
-):
-    """Switch 4 reports position 3, which no NetBox member holds, so its card is never the page device's."""
-    rows = _stack_rows((1, 2, 3), serials=("VCA-0001", "CD-34", third_serial))
-    page, member = vc_grants(rows=rows)
-    content = render(ui, page)
-    parsed = module_tab_forms(content)
+@pytest.mark.parametrize("third_serial", ["NEW123", "VCB-0001"], ids=["new", "owned"])
+def test_a_stack_member_that_netbox_does_not_hold_takes_its_cards_off_every_member(ui, vc_grants, third_serial):
+    """Switch 4 reports position 3, which no NetBox member holds, so the tab refuses and no card is the page's."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_MISMATCH
 
-    (on_page,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
-    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 2}".*?</tr>', content, flags=re.S)
-    assert f'<option value="{page.pk}" selected>' in on_page
-    assert ("data-member-unattributed" in row) is withheld
-    assert bool(_row_forms(parsed, CARD + 2)) is (not withheld)
+    rows = _stack_rows((1, 2, 3), serials=("VCA-0001", "CD-34", third_serial))
+    page, _member = vc_grants(rows=rows)
+
+    _assert_numbering_refused(render(ui, page), VC_NUMBERING_MISMATCH)
 
 
 @pytest.mark.parametrize("occupant", [None, "GR-OTHER", "GR-CARD"], ids=["empty-bay", "other-type", "same-type"])
@@ -2304,7 +2327,8 @@ def test_an_attributed_card_takes_no_bay_suggestion_from_a_daughter_no_member_re
         "entPhysicalModelName": "GR-DAUGHTER",
         "entPhysicalSerialNum": daughter_serial,
     }
-    page, _member = vc_grants(extra_rows=[child])
+    # The card sits outside the stack root, so it is the page device's and its daughter inherits no member row.
+    page, _member = vc_grants(card={"entPhysicalContainedIn": 0}, extra_rows=[child])
     install_module(page, "Card Slot", "GR-CARD", "SN-CARD")
     content = render(ui, page)
     (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)

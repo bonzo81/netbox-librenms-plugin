@@ -278,7 +278,7 @@ class TestRecognizedStack:
             _row(194, "powerSupply", 192, entPhysicalModelName="PSU-2"),
         ]
 
-        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first), "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         if reported:
@@ -295,7 +295,7 @@ class TestRecognizedStack:
     @pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
     def test_a_row_order_position_attributes_only_a_member_row_with_a_blank_serial(self, serials, second, reverse):
         """Switch 1 owns its member by serial; row order names a member only for a Switch 2 that reports no serial."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE, VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         first, last = _vc_members(["100041", "100042"])
@@ -312,15 +312,19 @@ class TestRecognizedStack:
             _row(205, "powerSupply", 202, entPhysicalModelName="PSU-2"),
         ]
 
-        owners = attribute_inventory(inventory, [first, last], SerialRules.load().for_device(first))
+        context = SerialRules.load().for_device(first)
+        if owner_of[serials[0]].vc_position != (2 if reverse else 1):
+            # Switch 1's serial names the member at another position than row order gives it.
+            with pytest.raises(VCNumberingError):
+                attribute_inventory(inventory, [first, last], context, "reported")
+            return
+
+        owners = attribute_inventory(inventory, [first, last], context, "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert (owner[201], owner[203]) == ((owner_of[serials[0]], "serial"), (owner_of[serials[0]], "ancestor-serial"))
         if second is None:
             assert {owner[index] for index in (202, 204, 205)} == {(None, UNATTRIBUTED_SOURCE)}
-        elif reverse:
-            # Row order gives Switch 2 position 1, whose member Switch 1 owns by serial.
-            assert owner[202] == (None, UNATTRIBUTED_SOURCE)
         else:
             # A blank serial keeps the row-order position, as before.
             assert owner[202] == (last, "position")
@@ -328,9 +332,9 @@ class TestRecognizedStack:
     @pytest.mark.parametrize(
         ("serial", "position"), [("NEW123", 3), ("", 3), ("100052", 3)], ids=["new", "blank", "owned"]
     )
-    def test_a_member_row_that_names_no_netbox_member_is_unattributed(self, serial, position):
-        """Member 3 is new to NetBox, so neither it nor its card belongs to the page device."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+    def test_a_member_row_that_names_no_netbox_member_refuses_the_inventory(self, serial, position):
+        """Member 3 is new to NetBox, so the inventory gives neither it nor its card to the page device."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         first, second = _vc_members(["100051", "100052"])
@@ -343,14 +347,8 @@ class TestRecognizedStack:
             _row(215, "module", 213, entPhysicalModelName="CARD", entPhysicalSerialNum="CARD123"),
         ]
 
-        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
-
-        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
-        assert owner[214] == (first, "ancestor-serial")
-        if serial == "100052":
-            assert (owner[213], owner[215]) == ((second, "serial"), (second, "ancestor-serial"))
-        else:
-            assert {owner[213], owner[215]} == {(None, UNATTRIBUTED_SOURCE)}
+        with pytest.raises(VCNumberingError):
+            attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first), "reported")
 
     @pytest.mark.parametrize(
         ("first_serial", "second_serial", "positions", "withheld"),
@@ -366,7 +364,7 @@ class TestRecognizedStack:
         self, first_serial, second_serial, positions, withheld
     ):
         """Switch 1 reports member 2's serial, so position 2 can not give Switch 2 that member too."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         first, second = _vc_members(["100061", "100062"])
@@ -377,19 +375,23 @@ class TestRecognizedStack:
             _row(223, "module", 222, entPhysicalModelName="CARD", entPhysicalSerialNum="CARD123"),
         ]
 
-        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+        context = SerialRules.load().for_device(first)
+        if withheld:
+            # Switch 1 at position 1 names member 2 by serial, so the inventory refuses.
+            with pytest.raises(VCNumberingError):
+                attribute_inventory(inventory, [first, second], context, "reported")
+            return
+
+        owners = attribute_inventory(inventory, [first, second], context, "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
-        assert owner[221] == ({"100061": first, "100062": second}[first_serial], "serial")
-        if withheld:
-            assert {owner[222], owner[223]} == {(None, UNATTRIBUTED_SOURCE)}
-        else:
-            assert (owner[222], owner[223]) == ((second, "position"), (second, "parent-context"))
+        assert owner[221] == (first, "serial")
+        assert (owner[222], owner[223]) == ((second, "position"), (second, "parent-context"))
 
     @pytest.mark.parametrize(("fpc_serial", "inherits"), [("12", False), ("ZZZ999", True)], ids=["short", "identity"])
     def test_a_row_inherits_no_member_across_a_junos_fpc_with_a_short_serial(self, fpc_serial, inherits):
-        """FPC 1 reports "12", which turns off the stack shape and could be a member row, so the root's serial stops there."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        """FPC 1 reports "12", which turns off the stack shape, so the inventory refuses and no row inherits a member."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         master, member = make_junos_vc_members(f"junos-short-fpc-{fpc_serial}")
@@ -398,19 +400,22 @@ class TestRecognizedStack:
             for row in junos_vc_inventory()
         ]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+        context = SerialRules.load().for_device(master)
+        if not inherits:
+            with pytest.raises(VCNumberingError):
+                attribute_inventory(inventory, [master, member], context, "reported")
+            return
+
+        owners = attribute_inventory(inventory, [master, member], context, "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert owner[120] == (master, "serial")
-        if inherits:
-            assert (owner[121][0], owner[1210][0]) == (member, member)
-        else:
-            assert {owner[121], owner[1210]} == {(None, UNATTRIBUTED_SOURCE)}
+        assert (owner[121][0], owner[1210][0]) == (member, member)
 
     @pytest.mark.parametrize(("fpc_serial", "linked"), [("12", False), ("12350", True)], ids=["short", "unchanged"])
     def test_a_junos_row_that_names_an_fpc_with_a_short_serial_is_unattributed(self, fpc_serial, linked):
-        """The PSU and fan name FPC 1, which reports "12", so they do not fall through to the root's master serial."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        """The PSU and fan name FPC 1; when it reports "12" the inventory refuses, so they never take the root's serial."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         master, member = make_junos_vc_members(f"junos-short-link-{fpc_serial}")
@@ -422,16 +427,18 @@ class TestRecognizedStack:
             _row(41, "fan", 4, entPhysicalModelName="PSU-FAN"),
         ]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+        context = SerialRules.load().for_device(master)
+        if not linked:
+            with pytest.raises(VCNumberingError):
+                attribute_inventory(inventory, [master, member], context, "reported")
+            return
+
+        owners = attribute_inventory(inventory, [master, member], context, "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert owner[2][0] == master
-        if linked:
-            assert (owner[4], owner[30]) == ((member, "junos-member"), (member, "junos-member"))
-            assert owner[41] == (member, "parent-context")
-        else:
-            # The PSU's fan crosses the PSU's link on its way to the root's serial.
-            assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
+        assert (owner[4], owner[30]) == ((member, "junos-member"), (member, "junos-member"))
+        assert owner[41] == (member, "parent-context")
 
     @pytest.mark.parametrize("padded", [False, True], ids=["plain", "padded"])
     def test_a_padded_fpc_description_keeps_the_stack(self, padded):
@@ -448,7 +455,7 @@ class TestRecognizedStack:
         ]
         context = SerialRules.load().for_device(master)
 
-        owners = attribute_inventory(inventory, [master, member], context)
+        owners = attribute_inventory(inventory, [master, member], context, "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert [found["index"] for found in extract_vc_members(inventory, [context])] == [120, 121]
@@ -470,7 +477,7 @@ class TestRecognizedStack:
             for row in junos_vc_inventory()
         ]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert (owner[120], owner[121]) == ((master, "serial"), (member, "serial"))
@@ -482,23 +489,23 @@ class TestRecognizedStack:
         ids=["plain", "padded", "slot-only-padded", "slot-only"],
     )
     def test_a_padded_fpc_link_names_the_slot_as_the_anonymizer_reads_it(self, descr):
-        """The anonymizer trims the description, so a padded "FPC 1 ..." names FPC 1, whose "12" gives no member."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        """The anonymizer trims the description, so a padded "FPC 1 ..." names FPC 1 and follows its member."""
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         master, member = make_junos_vc_members(f"junos-padded-link-{len(descr)}")
-        changes = {121: {"entPhysicalSerialNum": "12"}, 4: {"entPhysicalDescr": descr}}
-        inventory = [{**row, **changes.get(row["entPhysicalIndex"], {})} for row in junos_vc_inventory()]
+        inventory = [
+            {**row, "entPhysicalDescr": descr} if row["entPhysicalIndex"] == 4 else row for row in junos_vc_inventory()
+        ]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
-        assert owner[4] == (None, UNATTRIBUTED_SOURCE)
+        assert owner[4] == (member, "junos-member")
 
-    @pytest.mark.parametrize(("other_serial", "unattributed"), [("", False), ("SN-BBB", True)], ids=["blank", "mixed"])
-    def test_a_link_to_a_slot_of_blank_fpcs_only_gives_no_link(self, other_serial, unattributed):
-        """Both FPCs report slot 1; when all of them are blank the PSU resolves as develop does, by parent context."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+    @pytest.mark.parametrize("other_serial", ["", "SN-BBB"], ids=["blank", "mixed"])
+    def test_fpcs_with_a_blank_serial_refuse_the_inventory(self, other_serial):
+        """Both FPCs report slot 1 and FPC 0 reports no serial, so no stack holds and no row gets a member."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         master, member = make_junos_vc_members(f"junos-blank-slot-{other_serial or 'blank'}")
@@ -509,10 +516,8 @@ class TestRecognizedStack:
             for row in junos_vc_inventory()
         ]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
-
-        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
-        assert owner[4] == ((None, UNATTRIBUTED_SOURCE) if unattributed else (None, "parent-context"))
+        with pytest.raises(VCNumberingError):
+            attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
 
     @pytest.mark.parametrize("bay", [True, False], ids=["named-bay", "no-bay"])
     def test_a_container_that_names_an_fpc_is_no_fpc(self, bay):
@@ -527,7 +532,7 @@ class TestRecognizedStack:
                 _row(141, "powerSupply", 140, entPhysicalDescr="Power Supply 1", entPhysicalSerialNum="PSU141X"),
             ]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert (owner[120], owner[121], owner[4]) == ((master, "serial"), (member, "serial"), (member, "junos-member"))
@@ -535,9 +540,9 @@ class TestRecognizedStack:
             assert (owner[140], owner[141]) == ((member, "junos-member"), (member, "parent-context"))
 
     @pytest.mark.parametrize("fpc_reported", [False, True], ids=["no-fpc-rows", "fpc-1-reported"])
-    def test_a_junos_row_that_names_an_fpc_no_row_reports_is_unattributed(self, fpc_reported):
-        """The root reports the master's serial, but "FPC 1 Power Supply 0" names FPC 1, which no row reports."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+    def test_a_junos_root_with_fewer_than_two_fpcs_refuses_the_inventory(self, fpc_reported):
+        """The root reports the master's serial, but no stack holds, so "FPC 1 Power Supply 0" never takes that serial."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         master, member = make_junos_vc_members(f"junos-no-fpc-{fpc_reported}")
@@ -547,14 +552,13 @@ class TestRecognizedStack:
             if row["entPhysicalIndex"] in {1, 4} | ({121} if fpc_reported else set())
         ]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
-
-        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
-        assert owner[4] == ((member, "junos-member") if fpc_reported else (None, UNATTRIBUTED_SOURCE))
+        with pytest.raises(VCNumberingError):
+            attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
 
     @pytest.mark.parametrize("stack", [False, True], ids=["unrecognized", "recognized"])
     def test_a_junos_fpc_link_is_read_from_the_description_only(self, stack):
         """The anonymizer keeps "FPC <n>" only in descriptions, so a name-only link must give what replay gives."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         master, member = make_junos_vc_members(f"junos-name-link-{stack}")
@@ -575,15 +579,21 @@ class TestRecognizedStack:
         rules = SerialRules.load()
 
         def owner_of_the_psu(rows):
-            owners = attribute_inventory(rows, [master, member], rules.for_device(master))
+            owners = attribute_inventory(rows, [master, member], rules.for_device(master), "reported")
             return next(found for row, found in zip(rows, owners, strict=True) if row["entPhysicalIndex"] == 4)
 
+        if not stack:
+            # FPC 2's "12" turns off the stack shape, so live inventory and replay both refuse.
+            for rows in (live, replayed):
+                with pytest.raises(VCNumberingError):
+                    owner_of_the_psu(rows)
+            return
         assert owner_of_the_psu(live) == owner_of_the_psu(replayed)
 
     @pytest.mark.parametrize("case", ["short-fpc-2", "short-fpc-1-without-slot", "blank-serials"])
-    def test_a_junos_row_that_names_an_fpc_follows_only_that_fpc(self, case):
-        """Outside a recognized stack, "FPC 1 ..." rows resolve through FPC 1 and never through the root's serial."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+    def test_a_junos_inventory_outside_a_recognized_stack_refuses(self, case):
+        """Outside a recognized stack, "FPC 1 ..." rows never resolve through the root's serial: the inventory refuses."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         master, member = make_junos_vc_members(f"junos-fpc-link-{case}")
@@ -611,18 +621,8 @@ class TestRecognizedStack:
         else:
             inventory = [{**row, "entPhysicalSerialNum": ""} for row in inventory]
 
-        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
-
-        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
-        if case == "short-fpc-2":
-            assert owner[121] == (member, "serial")
-            assert owner[122] == (None, UNATTRIBUTED_SOURCE)
-            assert (owner[4], owner[30]) == ((member, "junos-member"), (member, "junos-member"))
-        elif case == "short-fpc-1-without-slot":
-            assert {owner[121], owner[4], owner[30], owner[1210]} == {(None, UNATTRIBUTED_SOURCE)}
-        else:
-            # A blank FPC serial gives no link, so the rows resolve as develop does: by parent context, on the page.
-            assert {owner[index] for index in (2, 4, 30, 120, 121, 1210)} == {(None, "parent-context")}
+        with pytest.raises(VCNumberingError):
+            attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
 
     @pytest.mark.parametrize("serial", ["12", "0", "CARD999"], ids=["short", "zero", "identity"])
     def test_a_non_member_row_with_a_short_serial_keeps_its_member_row(self, serial):
@@ -638,7 +638,7 @@ class TestRecognizedStack:
             _row(234, "module", 233, entPhysicalModelName="CARD", entPhysicalSerialNum="CARD123"),
         ]
 
-        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first), "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert owner[231] == (first, "position")
@@ -665,7 +665,7 @@ class TestRecognizedStack:
             _row(4, "powerSupply", 1, position=2, entPhysicalDescr="FPC 1 Power Supply 0", entPhysicalModelName="PSU"),
         ]
 
-        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(second))
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(second), "reported")
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert owner[4] == (None, UNATTRIBUTED_SOURCE)
