@@ -79,11 +79,13 @@ from .virtual_chassis import (
     get_virtual_chassis_data,
     identify_vc_master,
     member_serial_unavailable_message,
+    members_to_create,
     numbering_refusal_text,
     prepare_virtual_chassis,
     unnamed_member_reason,
     unnamed_members,
     unnumbered_virtual_chassis,
+    unreadable_member_serials,
 )
 from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
@@ -718,21 +720,31 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     ]
     members = [(member, member.get("position")) for member in vc["members"] if member is not master]
     # The text comes from the LibreNMS members only: the lookup is unrestricted, so it selects and names nothing.
-    # The chassis create stores every non-master member serial before its lookup, so one refusal blocks the stack.
-    refused = [
-        f"{_stack_member_label(position, member.get('serial'))}: {refusal}"
-        for member, position in members
-        if (refusal := stored_form_refusal(member.get("serial"), Device))
-    ]
-    if refused:
-        return unnamed + refused
-    serials = [(position, display(member.get("serial"))) for member, position in members]
-    taken = resolve_devices_write([serial for _position, serial in serials], context, rules=serial_rules)
+    if unreadable := unreadable_member_serials(members):
+        return unnamed + [
+            f"{_stack_member_label(position, member.get('serial'))}: {refusal}"
+            for member, position, refusal in unreadable
+        ]
+    members = [(member, position, display(member.get("serial"))) for member, position in members]
+    taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
     # The member writer refuses the whole stack for an Unavailable member, so validation blocks it too.
-    return unnamed + [
+    unavailable = [
         f"{_stack_member_label(position, serial)}: {member_serial_unavailable_message(serial)}"
-        for position, serial in serials
+        for _member, position, serial in members
         if taken[serial].kind is ResolutionKind.UNAVAILABLE
+    ]
+    if unavailable:
+        return unnamed + unavailable
+    created = {
+        id(member)
+        for member, *_rest in members_to_create(
+            members, taken, context, lambda member, _position, _serial: member.get("suggested_name")
+        )
+    }
+    return unnamed + [
+        f"{_stack_member_label(position, serial)}: {refusal}"
+        for member, position, serial in members
+        if id(member) in created and (refusal := stored_form_refusal(serial, Device))
     ]
 
 

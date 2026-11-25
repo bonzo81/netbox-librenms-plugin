@@ -355,6 +355,15 @@ def direct_serial_sync_refusal(device) -> str:
     return ""
 
 
+def lookup_refusal(value) -> str:
+    """Return why no serial lookup can read the LibreNMS *value*, or "": it is not text or a number, or not storable."""
+    if not is_serial_value(value):
+        return MALFORMED_SERIAL
+    if not _storable(display(value)):
+        return UNSTORABLE_SERIAL
+    return ""
+
+
 def stored_form_refusal(value, model) -> str:
     """
     Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can.
@@ -363,11 +372,9 @@ def stored_form_refusal(value, model) -> str:
     the field: the writer refuses rather than store the text of a boolean or a list, fail in the
     database, or cut the text. Import validation reads the same reason, so a row that the create refuses is never ready.
     """
-    if not is_serial_value(value):
-        return MALFORMED_SERIAL
+    if refusal := lookup_refusal(value):
+        return refusal
     text = display(value)
-    if not _storable(text):
-        return UNSTORABLE_SERIAL
     max_length = model._meta.get_field("serial").max_length
     if max_length is not None and len(text) > max_length:
         return f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."

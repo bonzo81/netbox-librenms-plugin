@@ -29,6 +29,7 @@ from ..serial_identity import (
     compare,
     display,
     group,
+    lookup_refusal,
     naming_token,
     plain_context,
     resolve_devices_write,
@@ -1177,13 +1178,15 @@ def _create_member_devices(
     """Create a device for each non-master member at its stack position; return how many were created."""
     member_rack = master_device.rack
     member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
-    # The stored text, before any member write: a value that is not text or a number refuses the stack, as
-    # it refuses a single device import. Text keys: the JSON numbers 123 and 123.0 are one dict key.
     members = [
-        (member, position, stored_form(member.get("serial"), Device))
+        (member, position)
         for member, position in zip(members_info, positions, strict=True)
         if member is not master_member
     ]
+    if unreadable := unreadable_member_serials(members):
+        raise ValidationError({"serial": unreadable[0][2]})
+    # Text keys: the JSON numbers 123 and 123.0 are one dict key, but two serials.
+    members = [(member, position, display(member.get("serial"))) for member, position in members]
     # One lookup for the whole stack, after the serial identity locks. A holder's own rules can admit a serial
     # that the master's rules blank. The master holds its own entry's serial, apart from every other member.
     taken = resolve_devices_write(
@@ -1203,13 +1206,26 @@ def _create_member_devices(
             location=member_location,
             rack=member_rack,
             platform=master_device.platform,
-            serial=serial,
+            serial=stored_form(serial, Device),
             virtual_chassis=vc,
             vc_position=position,
             comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
         )
         created += 1
     return created
+
+
+def unreadable_member_serials(members) -> list:
+    """
+    Return ``(member, position, refusal)`` for each ``(member, position)`` whose serial no lookup can read.
+
+    One such serial refuses the whole stack before its lookup, also for a member that an existing Device holds.
+    A serial that is only too long refuses only a member that ``members_to_create`` yields. The chassis create
+    and import validation both apply this rule.
+    """
+    return [
+        (member, position, refusal) for member, position in members if (refusal := lookup_refusal(member.get("serial")))
+    ]
 
 
 def members_to_create(members, taken, context, name_of):
