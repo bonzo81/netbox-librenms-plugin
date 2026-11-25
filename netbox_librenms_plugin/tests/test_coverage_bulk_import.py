@@ -729,10 +729,12 @@ class TestProcessDeviceFilters:
                 live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
             )
 
+        # A serial predicate in the WHERE clause is a candidate read: the batch LIKE ANY form and an exact lookup.
         candidate_queries = [
             query["sql"]
             for query in captured.captured_queries
-            if 'BTRIM("dcim_device"."serial"' in query["sql"] and "LIKE ANY" in query["sql"]
+            if query["sql"].startswith("SELECT")
+            and '"dcim_device"."serial"' in query["sql"].partition(" FROM ")[2].partition(" WHERE ")[2]
         ]
         # The rewritten holder stores another form under another name, so its Update & Link offer runs the write lookup.
         assert len(candidate_queries) == (2 if rewrite else 1)
