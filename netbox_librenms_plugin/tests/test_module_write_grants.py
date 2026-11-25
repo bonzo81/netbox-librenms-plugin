@@ -1708,7 +1708,7 @@ def vc_grants(settings, recording_server):
         map_device_to_librenms,
     )
 
-    def build(*, optic_1_on_member=False, card=None):
+    def build(*, optic_1_on_member=False, card=None, extra_rows=()):
         member_vendor = Manufacturer.objects.create(name="Grants Member Vendor", slug="grants-member-vendor")
         bays = ["Carrier Slot", "Cage 1", "Cage 2", "Card Slot"]
         page = make_device_with_module_bays("vc-grants-page", bays, serial="VCA-0001")
@@ -1719,7 +1719,7 @@ def vc_grants(settings, recording_server):
         make_module_type_with_bays("GR-CARD")
         rows = _vc_rows(
             page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1X1", card=card
-        )
+        ) + list(extra_rows)
         recording = {
             "device_id": VC_LIBRENMS_ID,
             "responses": {
@@ -1988,6 +1988,32 @@ def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card
     post(ui, action, {**fields, "select": [str(CARD)]})
     assert _installed(page) == (before if withheld or installed else {("Card Slot", "GR-CARD")})
     assert _installed(member) == set()
+
+
+@pytest.mark.parametrize(
+    ("card", "withheld"),
+    [({"entPhysicalContainedIn": 0, "entPhysicalSerialNum": "12"}, True), ({}, False)],
+    ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
+)
+def test_a_stack_row_that_no_member_reported_offers_no_module_type_fix(ui, vc_grants, card, withheld):
+    """The Fix Model modal adds a bay template to the occupant's type, which can hold another member's part."""
+    child = {
+        "entPhysicalIndex": CARD + 1,
+        "entPhysicalContainedIn": CARD,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Daughter Card",
+        "entPhysicalDescr": "Daughter Card",
+        "entPhysicalModelName": "GR-DAUGHTER",
+        "entPhysicalSerialNum": "SN-DAUGHTER",
+    }
+    page, _member = vc_grants(card=card, extra_rows=[child])
+    install_module(page, "Card Slot", "GR-CARD", "SN-CARD")
+    content = render(ui, page)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+
+    assert "Installed" in row
+    assert ("data-member-unattributed" in row) is withheld
+    assert ("Fix Model" in row) is (not withheld)
 
 
 @pytest.mark.parametrize(

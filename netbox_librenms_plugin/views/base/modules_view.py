@@ -2343,12 +2343,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # If the installed module's type has no bay templates but has LibreNMS
         # sub-items, flag the parent row so the table can render a "Fix Model"
         # badge linking directly to the module type for quick editing.
-        if parent_installed_module and not child_bays:
+        # The fix changes the occupant's type, so a row that no member reported, or such a child, offers none.
+        if parent_installed_module and not child_bays and not row["member_unattributed"]:
             first_no_bay_child_idx = None
             for i in range(parent_row_idx + 1, len(table_data)):
                 if (
                     table_data[i].get("selected_device_id") == selected_device.id
                     and table_data[i].get("no_bay_reason") == "empty_parent_bays"
+                    and not table_data[i].get("member_unattributed")
                 ):
                     first_no_bay_child_idx = i
                     break
