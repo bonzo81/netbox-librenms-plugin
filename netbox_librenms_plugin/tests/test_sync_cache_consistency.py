@@ -415,6 +415,46 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
 
 
 @pytest.mark.django_db
+def test_module_cache_status_refuses_a_current_snapshot_under_a_broken_serial_rule(client, settings):
+    """The stamp signs the current host, OOB, schema and rule rows, so only the rule check refuses the snapshot."""
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialContext, SerialRules
+
+    def chain_context(manufacturer_id):
+        # The chain that SerialRules.context builds, without its rule check.
+        rows = sorted(NormalizationRule.objects.filter(scope="serial"), key=lambda rule: (rule.priority, rule.pk))
+        own = [rule for rule in rows if rule.manufacturer_id == manufacturer_id]
+        return SerialContext(manufacturer_id, (*own, *(rule for rule in rows if rule.manufacturer_id is None)))
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-current-broken-rule", librenms_cf={"primary": {"id": 6413}})
+    manufacturer_id = device.device_type.manufacturer_id
+    _seed_snapshot("ports", device, "primary")
+    rule = NormalizationRule.objects.create(
+        scope="serial", manufacturer_id=manufacturer_id, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    assert chain_context(manufacturer_id).fingerprint == SerialRules.load().for_device(device).fingerprint
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    cache.set(
+        _cache_key("inventory", device, "primary"),
+        module_inventory_cache_payload([], 6413, None, serial_context=chain_context(manufacturer_id)),
+        timeout=300,
+    )
+    client.force_login(make_superuser("cache-status-module-current-broken-rule-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    response = client.get(url, {"server_key": "primary"})
+
+    assert response.status_code == 200
+    tabs = response.json()["tabs"]
+    assert tabs["modules"]["snapshot_available"] is False
+    assert (tabs["interfaces"]["state"], tabs["interfaces"]["snapshot_available"]) == ("ready", True)
+
+
+@pytest.mark.django_db
 def test_module_cache_status_offers_no_snapshot_under_an_unavailable_chassis_context(client, settings):
     """The Modules tab shows no rows when the chassis master is outside the chassis, so status must not call it ready."""
     from dcim.models import Device, VirtualChassis
