@@ -402,6 +402,33 @@ class TestRecognizedStack:
             # A blank serial keeps the row-order position, as before.
             assert owner[202] == (last if not reverse else first, "position")
 
+    @pytest.mark.parametrize(
+        ("serial", "position"), [("NEW123", 3), ("", 3), ("100052", 3)], ids=["new", "blank", "owned"]
+    )
+    def test_a_member_row_that_names_no_netbox_member_is_unattributed(self, serial, position):
+        """Member 3 is new to NetBox, so neither it nor its card belongs to the page device."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        first, second = _vc_members(["100051", "100052"])
+        inventory = [
+            _row(210, "stack", 0),
+            _row(211, "chassis", 210, position=1, entPhysicalSerialNum="100051"),
+            _row(212, "chassis", 210, position=2, entPhysicalSerialNum="CD-34"),
+            _row(213, "chassis", 210, position=position, entPhysicalSerialNum=serial),
+            _row(214, "powerSupply", 211, entPhysicalModelName="PSU-1"),
+            _row(215, "module", 213, entPhysicalModelName="CARD", entPhysicalSerialNum="CARD123"),
+        ]
+
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[214] == (first, "ancestor-serial")
+        if serial == "100052":
+            assert (owner[213], owner[215]) == ((second, "serial"), (second, "ancestor-serial"))
+        else:
+            assert {owner[213], owner[215]} == {(None, UNATTRIBUTED_SOURCE)}
+
     @pytest.mark.parametrize("stored", [("", ""), ("SN-AAA", "SN-BBB")], ids=["blank", "fpc-serials"])
     def test_junos_fpcs_sharing_a_slot_follow_only_their_serials(self, stored):
         """Two FPCs that both report slot 1 get positions from row order, which names no member of a serial FPC."""

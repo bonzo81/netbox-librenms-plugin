@@ -1955,7 +1955,7 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
 
 
 def _stack_rows(positions, serials=("AB-12", "CD-34")):
-    """Return a stack root with two chassis members that report *serials* and hold one card each."""
+    """Return a stack root with chassis members 2, 3, ... that report *serials*; card CARD + n sits in member n + 2."""
 
     def row(index, parent, entity_class, name, serial, **fields):
         return {
@@ -1968,16 +1968,16 @@ def _stack_rows(positions, serials=("AB-12", "CD-34")):
             **fields,
         }
 
+    pairs = list(enumerate(zip(serials, positions, strict=True)))
     members = [
-        row(index, 1, "chassis", f"Switch {index}", serial, entPhysicalParentRelPos=position)
-        for index, serial, position in zip((2, 3), serials, positions, strict=True)
+        row(2 + n, 1, "chassis", f"Switch {2 + n}", serial, entPhysicalParentRelPos=position)
+        for n, (serial, position) in pairs
     ]
-    return [
-        row(1, 0, "stack", "Stack", ""),
-        *members,
-        row(CARD, 2, "module", "Card Slot", "SN-CARD", entPhysicalModelName="GR-CARD"),
-        row(CARD + 1, 3, "module", "Card Slot", "SN-CARD-2", entPhysicalModelName="GR-CARD"),
+    cards = [
+        row(CARD + n, 2 + n, "module", "Card Slot", f"SN-CARD-{n + 1}", entPhysicalModelName="GR-CARD")
+        for n, _member in pairs
     ]
+    return [row(1, 0, "stack", "Stack", ""), *members, *cards]
 
 
 @pytest.mark.parametrize(
@@ -2028,6 +2028,23 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_serial_no_member
     assert f'<option value="{member.pk}" selected>' in owned
     assert ("data-member-unattributed" in row) is withheld
     assert bool(_row_forms(parsed, CARD + 1)) is (not withheld)
+
+
+@pytest.mark.parametrize(("third_serial", "withheld"), [("NEW123", True), ("VCB-0001", False)], ids=["new", "owned"])
+def test_a_stack_member_that_netbox_does_not_hold_takes_its_cards_off_every_member(
+    ui, vc_grants, third_serial, withheld
+):
+    """Switch 4 reports position 3, which no NetBox member holds, so its card is never the page device's."""
+    rows = _stack_rows((1, 2, 3), serials=("VCA-0001", "CD-34", third_serial))
+    page, member = vc_grants(rows=rows)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    (on_page,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 2}".*?</tr>', content, flags=re.S)
+    assert f'<option value="{page.pk}" selected>' in on_page
+    assert ("data-member-unattributed" in row) is withheld
+    assert bool(_row_forms(parsed, CARD + 2)) is (not withheld)
 
 
 @pytest.mark.parametrize("occupant", [None, "GR-OTHER", "GR-CARD"], ids=["empty-bay", "other-type", "same-type"])
