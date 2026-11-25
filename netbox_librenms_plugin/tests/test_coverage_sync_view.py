@@ -982,7 +982,9 @@ class TestVirtualChassisInventory:
         from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
 
         (form,) = [form for form in module_tab_forms(html).forms if "assign-vc-serial" in form["action"]]
-        fields = dict(form["fields"])
+        # A browser does not submit a disabled select.
+        selects = form["selects"]
+        fields = {name: value for name, value in form["fields"].items() if selects.get(name, {}).get("enabled", True)}
         (row,) = (
             name.rsplit("_", 1)[1]
             for name, value in fields.items()
