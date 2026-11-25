@@ -2999,6 +2999,7 @@ def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text
     replace_url, replace_fields = rendered_module_form(preview.content.decode(), "replace-module", 100)
     response = client.post(replace_url, replace_fields)
     assert response.status_code == 302
+    assert not Module.objects.filter(pk=installed.pk).exists()
     assert Module.objects.get(module_bay=bay).serial == raw_serial
     assert cache.get(key)["inventory"][0]["entPhysicalSerialNum"] == raw_serial
 
