@@ -513,6 +513,56 @@ class TestRecognizedStack:
             # The PSU's fan crosses the PSU's link on its way to the root's serial.
             assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize("case", ["short-fpc-2", "short-fpc-1-without-slot", "blank-serials"])
+    def test_a_junos_row_that_names_an_fpc_follows_only_that_fpc(self, case):
+        """Outside a recognized stack, "FPC 1 ..." rows resolve through FPC 1 and never through the root's serial."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-fpc-link-{case}")
+        inventory = junos_vc_inventory()
+        if case == "short-fpc-2":
+            fpc = {"entPhysicalName": "EX4400-24X-S", "entPhysicalModelName": "650-151094"}
+            inventory.append(
+                _row(
+                    122,
+                    "container",
+                    1,
+                    position=2,
+                    entPhysicalDescr="FPC: EX4400-24X @ 2/*/*",
+                    entPhysicalSerialNum="12",
+                    **fpc,
+                )
+            )
+        elif case == "short-fpc-1-without-slot":
+            inventory = [
+                {**row, "entPhysicalSerialNum": "12", "entPhysicalParentRelPos": -1}
+                if row["entPhysicalIndex"] == 121
+                else row
+                for row in inventory
+            ]
+        else:
+            inventory = [{**row, "entPhysicalSerialNum": ""} for row in inventory]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        if case == "short-fpc-2":
+            assert owner[121] == (member, "serial")
+            assert owner[122] == (None, UNATTRIBUTED_SOURCE)
+            assert (owner[4], owner[30]) == ((member, "junos-member"), (member, "junos-member"))
+        elif case == "short-fpc-1-without-slot":
+            assert {owner[121], owner[4], owner[30], owner[1210]} == {(None, UNATTRIBUTED_SOURCE)}
+        else:
+            # A blank FPC serial keeps the FPC's reported slot.
+            assert (owner[120], owner[2]) == ((master, "position"), (master, "junos-member"))
+            assert (owner[121], owner[4], owner[30]) == (
+                (member, "position"),
+                (member, "junos-member"),
+                (member, "junos-member"),
+            )
+            assert owner[1210] == (member, "parent-context")
+
     @pytest.mark.parametrize("serial", ["12", "0", "CARD999"], ids=["short", "zero", "identity"])
     def test_a_non_member_row_with_a_short_serial_keeps_its_member_row(self, serial):
         """The stack shape names the member rows, so a carrier below Switch 1 that reports "12" is no member."""

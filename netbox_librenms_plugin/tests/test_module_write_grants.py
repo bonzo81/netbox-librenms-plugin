@@ -2067,6 +2067,43 @@ def test_a_card_below_a_junos_fpc_with_a_short_serial_is_offered_on_no_member(ui
     assert bool(_row_forms(parsed, CARD)) is (not withheld)
 
 
+@pytest.mark.parametrize("third_fpc", ["12", None], ids=["short-fpc-3", "no-fpc-3"])
+def test_a_junos_row_follows_its_named_fpc_when_another_fpc_has_a_short_serial(ui, vc_grants, third_fpc):
+    """FPC 3 reports "12", which turns off the stack shape; the card that names FPC 2 still follows FPC 2's member."""
+
+    def row(index, entity_class, descr, serial, **fields):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalClass": entity_class,
+            "entPhysicalName": descr,
+            "entPhysicalDescr": descr,
+            "entPhysicalSerialNum": serial,
+            **fields,
+        }
+
+    rows = [
+        {**row(1, "chassis", "Juniper Virtual Chassis Switch", "VCA-0001"), "entPhysicalContainedIn": 0},
+        row(120, "container", "FPC: EX4400-24X @ 1/*/*", "VCA-0001", entPhysicalParentRelPos=1),
+        row(121, "container", "FPC: EX4400-24X @ 2/*/*", "VCB-0001", entPhysicalParentRelPos=2),
+        {
+            **row(CARD, "module", "FPC 2 Card 0", "SN-CARD-1", entPhysicalModelName="GR-CARD"),
+            "entPhysicalName": "Card Slot",
+        },
+    ]
+    if third_fpc is not None:
+        rows.append(row(122, "container", "FPC: EX4400-24X @ 3/*/*", third_fpc, entPhysicalParentRelPos=3))
+    page, member = vc_grants(rows=rows)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    (card,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    assert "data-member-unattributed" not in card
+    assert f'<option value="{member.pk}" selected>' in card
+    assert f'<option value="{page.pk}" selected>' not in card
+    assert _row_forms(parsed, CARD)
+
+
 @pytest.mark.parametrize(("fpc_serial", "withheld"), [("12", True), ("VCB-0001", False)], ids=["short", "identity"])
 def test_a_junos_row_that_names_an_fpc_with_a_short_serial_is_offered_on_no_member(ui, vc_grants, fpc_serial, withheld):
     """The card names FPC 2, which reports "12", so it does not fall through to the root's serial of the page device."""
