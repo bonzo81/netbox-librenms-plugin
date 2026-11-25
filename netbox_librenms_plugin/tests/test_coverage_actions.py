@@ -4706,6 +4706,7 @@ class TestDeviceConflictActionBranches:
         from dcim.models import Device, DeviceType, Manufacturer
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import RETYPE_HELD
 
         view = self._make_view()
         tag = f"branches-retype-{action}".replace("_", "-")
@@ -4732,12 +4733,15 @@ class TestDeviceConflictActionBranches:
             # The serial check runs first under the new type and names the holder that this user can see.
             self._assert_htmx_error(response, f"Serial conflict: 'XABC' is already assigned to device '{holder.name}'")
         else:
+            self._assert_htmx_error(response, RETYPE_HELD)
             assert holder.name.encode() not in response.content
         assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
 
     @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
     def test_a_forced_type_change_refuses_two_serials_that_the_new_rules_key_to_one(self, shape):
         from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.serial_identity import RETYPE_HELD
 
         view = self._make_view()
         tag = f"branches-retype-{shape}"
@@ -4753,7 +4757,7 @@ class TestDeviceConflictActionBranches:
 
         response = post_view(view, request, device_id=42)
 
-        assert response.headers.get("HX-Reswap") == "none"
+        self._assert_htmx_error(response, RETYPE_HELD)
         assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
 
     @pytest.mark.parametrize("action", ["update", "update_serial"])
