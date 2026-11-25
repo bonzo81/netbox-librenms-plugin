@@ -726,7 +726,8 @@ def attribute_inventory(rows: list, vc_members: list, context, numbering_mode, m
         member_context: Return the context of one member's Device serial; None uses *context* for every member.
 
     Returns:
-        list[tuple]: ``(member Device | None, source)`` per row, where None means the page device.
+        list[tuple]: ``(member Device | None, source)`` per row. None means the page device, except with the
+        source :data:`UNATTRIBUTED_SOURCE`, where the row needs an explicit member selection.
 
     Raises:
         VCNumberingError: The members have rows, and the inventory describes no stack, or a member
