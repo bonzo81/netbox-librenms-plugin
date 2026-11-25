@@ -1332,6 +1332,24 @@ class TestMergeTransceiverDataPortIdentity:
         ) == [(10, 1, False), (20, 2, True)]
 
     @staticmethod
+    def _adoptable_interface(device, occupant):
+        """Add an "xcvr" template to the occupant's type after the install, and a standalone "xcvr" it can adopt."""
+        from dcim.models import InterfaceTemplate
+
+        from netbox_librenms_plugin.tests.conftest import make_interface
+
+        InterfaceTemplate.objects.create(module_type=occupant.module_type, name="xcvr", type="10gbase-x-sfpp")
+        make_interface(device, "xcvr")
+
+    @staticmethod
+    def _mismatched_interface(device, occupant):
+        """Add an "xcvr" template to the occupant's type after the install, and an occupant "xcvr" of another type."""
+        from dcim.models import Interface, InterfaceTemplate
+
+        InterfaceTemplate.objects.create(module_type=occupant.module_type, name="xcvr", type="10gbase-x-sfpp")
+        Interface.objects.create(device=device, module=occupant, name="xcvr", type="1000base-t")
+
+    @staticmethod
     def _render_unlinked_optic_tab(
         client,
         settings,
@@ -1343,12 +1361,13 @@ class TestMergeTransceiverDataPortIdentity:
         optic_type=True,
         entity=None,
         port=None,
-        occupant_interface=None,
+        bay=None,
+        prepare=None,
     ):
         """Render the Modules tab of a device whose optic no entity links to; return the content and the optic index.
 
         *entity* overrides fields of the one inventory entity; *port* is a LibreNMS port that the optic reports.
-        *occupant_interface* names a standalone interface that the occupant's interface template can adopt.
+        *bay* names the one device bay; *prepare* edits the device and the occupant (or None) before the render.
         """
         from django.urls import reverse
 
@@ -1362,22 +1381,13 @@ class TestMergeTransceiverDataPortIdentity:
         )
 
         librenms_id, server_key, optic = 4300, "optic-tab", 99
-        bay = port["ifName"] if port else f"Transceiver {optic}"
+        bay = bay or (port["ifName"] if port else f"Transceiver {optic}")
         device = make_device_with_module_bays(name, [bay])
         if optic_type:
             make_module_type_with_bays("SFP-10G-SR")
-        if occupant_model:
-            occupant = install_module(device, bay, occupant_model, serial="OCCUPANT9876")
-        if occupant_interface:
-            from dcim.models import InterfaceTemplate
-
-            from netbox_librenms_plugin.tests.conftest import make_interface
-
-            # The template comes after the install, so the standalone interface stays out of the module.
-            InterfaceTemplate.objects.create(
-                module_type=occupant.module_type, name=occupant_interface, type="10gbase-x-sfpp"
-            )
-            make_interface(device, occupant_interface)
+        occupant = install_module(device, bay, occupant_model, serial="OCCUPANT9876") if occupant_model else None
+        if prepare:
+            prepare(device, occupant)
         entity = {
             "entPhysicalIndex": 10,
             "entPhysicalContainedIn": 0,
@@ -1533,7 +1543,7 @@ class TestMergeTransceiverDataPortIdentity:
             name,
             optic_serial,
             occupant_model="SFP-10G-SR",
-            occupant_interface="xcvr",
+            prepare=self._adoptable_interface,
         )
         device = Device.objects.get(name=name)
         occupant = Module.objects.get(device=device)
@@ -1573,6 +1583,28 @@ class TestMergeTransceiverDataPortIdentity:
         assert Interface.objects.get(device=device, name="xcvr").module_id == (None if refused else occupant.pk)
         texts = [str(message.message) for message in get_messages(response.wsgi_request)]
         assert (UNLINKED_OPTIC_REFUSAL in texts) is refused, texts
+
+    @pytest.mark.parametrize(
+        ("optic_serial", "offered"), [("AB-12", False), ("OPTIC12345", True)], ids=["short-serial", "identity-serial"]
+    )
+    def test_an_unlinked_optic_with_a_short_serial_offers_no_interface_type_review_of_the_occupant(
+        self, client, settings, recording_server, optic_serial, offered
+    ):
+        """Apply Selected Types writes the occupant's interfaces, and nothing links the optic to it; the badge stays."""
+        content, optic = self._render_unlinked_optic_tab(
+            client,
+            settings,
+            recording_server,
+            f"optic-review-{optic_serial}",
+            optic_serial,
+            occupant_model="SFP-10G-SR",
+            prepare=self._mismatched_interface,
+        )
+        (row,) = re.findall(rf'<tr[^>]*data-ent-index="{optic}".*?</tr>', content, flags=re.S)
+        (status,) = re.findall(r'<td data-col="status">.*?</td>', row, flags=re.S)
+
+        assert "mdi-swap-vertical" in status
+        assert ('data-action="review-interface-types"' in row) is offered
 
     @pytest.mark.parametrize("netbox_change", ["type-added", "occupant-removed"])
     @pytest.mark.parametrize(

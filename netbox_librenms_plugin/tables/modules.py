@@ -945,6 +945,8 @@ class LibreNMSModuleTable(tables.Table):
             getattr(self, "can_review_interface_types", False)
             and record.get("interface_type_mismatch_count")
             and record.get("installed_module_id")
+            # Nothing links an unlinked optic to the occupant, so the row writes none of its interfaces.
+            and not record.get("unlinked_optic")
         ):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_interface_type_preview",
