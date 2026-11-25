@@ -60,10 +60,17 @@ def _render_sync_page(model_name):
     def meta(obj, attr):
         return obj._meta[attr]
 
+    # The plugin package needs NetBox, so the serial text filter is a stub.
+    @stubs.filter(name="page_text")
+    def page_text(value):
+        return "" if value is None else str(value)
+
     base = ("django.template.loaders.locmem.Loader", {"generic/object.html": "{% block content %}{% endblock %}"})
     engine = Engine(dirs=[str(TEMPLATES_DIR)], loaders=[base, "django.template.loaders.filesystem.Loader"])
     engine.template_builtins.append(stubs)
-    engine.template_libraries.update({name: Library() for name in ("buttons", "helpers", "plugins", "static", "i18n")})
+    engine.template_libraries.update(
+        {name: Library() for name in ("buttons", "helpers", "plugins", "static", "i18n", "librenms_serial")}
+    )
     engine.template_libraries["django_tables2"] = stubs
 
     # The widest values seen live: a long FQDN name, an unmatched hardware string, and a missing OS platform.

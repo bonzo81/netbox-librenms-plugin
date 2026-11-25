@@ -206,7 +206,13 @@ def _mismatch_modal(**context):
     def url(name, **kwargs):
         return SERIAL_URL if name.endswith(":update_module_serial") else REPLACE_URL
 
+    # The plugin package needs NetBox, so the serial text filter is a stub.
+    @urls.filter(name="page_text")
+    def page_text(value):
+        return "" if value is None else str(value)
+
     engine.template_builtins.append(urls)
+    engine.template_libraries["librenms_serial"] = Library()
     template = Path(__file__).parents[2] / "templates/netbox_librenms_plugin/htmx/module_mismatch_modal.html"
     base = {
         "installed_module": SimpleNamespace(pk=55, module_type=SimpleNamespace(model="Test Card")),
