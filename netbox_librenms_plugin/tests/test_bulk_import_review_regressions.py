@@ -875,7 +875,7 @@ def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved(l
 @pytest.mark.parametrize("background", [False, True], ids=["view", "job"])
 def test_bulk_import_reports_the_unverified_serial_without_netbox_details(client, live_librenms, caplog, background):
     from core.models import Job
-    from dcim.models import Device
+    from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Platform, Site, VirtualChassis
 
     from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_SERIAL_UNVERIFIED
     from netbox_librenms_plugin.jobs import ImportDevicesJob
@@ -889,7 +889,21 @@ def test_bulk_import_reports_the_unverified_serial_without_netbox_details(client
     live_librenms.server.register(f"/api/v0/devices/{blocked_id}", {"status": "ok", "devices": [blocked_row]})
     prerequisites, ready_row = _importable_row(live_librenms, ready_id, "checked-serial")
     role_id = prerequisites["device_role_id"]
-    user = make_superuser("unverified-serial-user")
+    if background:
+        user = make_superuser("unverified-serial-user")
+    else:
+        # The requester may import the ready row but may not view the holder or its chassis.
+        user = make_user_with_perms(
+            "unverified-serial-user",
+            [("view", Device), ("add", Device), ("change", Device)],
+            constraints={"name": ready_row["hostname"]},
+        )
+        for model in (Site, Location, DeviceType, DeviceRole, Manufacturer, Platform):
+            user = grant(user, "view", model)
+        chassis = member.virtual_chassis
+        hidden_pks = (member.pk, chassis.master_id)
+        assert not Device.objects.restrict(user, "view").filter(pk__in=hidden_pks).exists()
+        assert not VirtualChassis.objects.restrict(user, "view").filter(pk=chassis.pk).exists()
 
     if background:
         job = Job.objects.create(name="Bulk serial precheck", user=user, job_id=uuid4(), data={})
