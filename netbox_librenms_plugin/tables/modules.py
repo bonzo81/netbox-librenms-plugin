@@ -20,6 +20,7 @@ from netbox_librenms_plugin.module_grants import (
     installed_module_target,
     sign_module_grant,
 )
+from netbox_librenms_plugin.serial_identity import page_text
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     coerce_positive_int,
@@ -358,13 +359,14 @@ class LibreNMSModuleTable(tables.Table):
 
     def render_serial(self, value, record):
         """Render the LibreNMS serial, mark a stored form that differs, and say why a serial update is not offered."""
-        html = format_html("{}", value or "-")
+        value = page_text(value) or "-"
+        html = format_html("{}", value)
         if record.get("serial_stored_form_differs"):
             # The bay loader does not apply the viewer's Module scope, so the badge names no stored serial.
             html = format_html(
                 '{} <span class="badge text-bg-info" title="NetBox stores another form of this serial, which names '
                 'the same hardware. Update the serial to store the LibreNMS text.">stored form differs</span>',
-                value or "-",
+                value,
             )
         if refusal := record.get("serial_fit_refusal"):
             # The minimum width keeps a narrow column from wrapping the reason one word per line.

@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_serial %}
 {# Modal-content fragment for the module replace / move dialog. #}
 {# Rendered by ModuleMismatchPreviewView.get and swapped into #htmx-modal-content. #}
 <div class="modal-header">
@@ -38,7 +39,7 @@
         <tr>
             <td><strong>Serial</strong></td>
             <td class="text-break{% if serial_mismatch %} text-warning fw-semibold{% endif %}">{{ installed_serial|default:"-" }}</td>
-            <td class="text-break{% if serial_mismatch %} text-warning fw-semibold{% endif %}">{{ librenms_serial|default:"-" }}</td>
+            <td class="text-break{% if serial_mismatch %} text-warning fw-semibold{% endif %}">{{ librenms_serial|page_text|default:"-" }}</td>
         </tr>
     </tbody>
 </table>
@@ -83,7 +84,7 @@
 <div class="alert alert-danger py-2 mb-3">
     <i class="mdi mdi-alert-circle me-1"></i>
     <div>
-        <strong>Serial conflict:</strong> <code>{{ librenms_serial }}</code> is currently installed at
+        <strong>Serial conflict:</strong> <code>{{ librenms_serial|page_text }}</code> is currently installed at
         <strong>{{ serial_conflict.device.name }}</strong> /
         Bay: <strong>{{ serial_conflict.module_bay.name }}</strong>.
         <br><small>
@@ -113,7 +114,7 @@
 <div class="alert alert-warning py-2 mb-3">
     <i class="mdi mdi-alert me-1"></i>
     <div>
-        <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> is assigned to multiple
+        <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial|page_text }}</code> is assigned to multiple
         modules. Please resolve the conflict manually before proceeding.
     </div>
 </div>

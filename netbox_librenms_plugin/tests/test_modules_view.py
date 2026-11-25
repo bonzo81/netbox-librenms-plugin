@@ -8402,6 +8402,45 @@ def test_update_serial_is_offered_for_a_stored_form_only_when_the_serial_fits(cl
 
 
 @pytest.mark.django_db
+def test_the_modules_tab_renders_a_serial_with_an_unpaired_surrogate(client, settings):
+    """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the table shows a replacement character."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    device = make_device_with_module_bays("surrogate-serial-modules", ["Slot 1"])
+    module = install_module(device, "Slot 1", "SURROGATE-SERIAL-CARD", serial="STORED-CARD")
+    item = {
+        "entPhysicalIndex": 86,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalModelName": module.module_type.model,
+        "entPhysicalSerialNum": "ABC\ud800DEF",
+    }
+    payload = trusted_module_inventory_payload(device, [item], librenms_id=9306)
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9306", (True, {"device_id": 9306, "hostname": device.name}), 300)
+    client.force_login(make_superuser("surrogate-serial-modules-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    table_html = response.context["module_sync"]["table"].as_html(response.wsgi_request)
+    assert "ABC\ufffdDEF" in table_html
+    assert "ABC\ufffdDEF" in response.content.decode()
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("master_link_broken", [True, False])
 def test_a_chassis_page_without_member_serials_offers_no_module_action(client, settings, master_link_broken):
     """Without member serials a row has no owner, so it must not fall back to the page device's bays."""

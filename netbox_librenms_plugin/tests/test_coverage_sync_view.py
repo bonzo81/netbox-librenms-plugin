@@ -337,6 +337,17 @@ class TestSyncPageRouting:
         reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
         assert (escape(reason) in content) is (not fits)
 
+    def test_a_serial_with_an_unpaired_surrogate_renders(self, logged_in_client, settings, librenms_server):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the page shows a replacement character."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-surrogate-serial", serial="KEPT-SERIAL", librenms_cf=6663)
+        _register_device(librenms_server, 6663, device.name, serial="ABC\ud800DEF")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.status_code == 200
+        assert response.content.decode().count("ABC\ufffdDEF") >= 2
+
     @pytest.mark.parametrize(("stored", "reported", "matches"), [("100200", 100200, True), ("0", 0, False)])
     def test_a_numeric_serial_matches_its_stored_text_when_it_has_an_identity(
         self, logged_in_client, settings, librenms_server, stored, reported, matches
