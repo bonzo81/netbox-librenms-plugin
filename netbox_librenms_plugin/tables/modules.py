@@ -41,12 +41,13 @@ UNATTRIBUTED_ROW_REASON = (
     "Select the member to show its actions."
 )
 # The row flags of every action that writes a module or the device type: installs, Replace, Move, serial and
-# interface updates, and Mark Built-in.
+# interface updates, the interface type review, and Mark Built-in.
 UNATTRIBUTED_ROW_WITHHELD_WRITES = {
     "can_install": False,
     "has_installable_children": False,
     "can_update_serial": False,
     "can_update_interface_binding": False,
+    "interface_type_mismatch_count": 0,
     "can_replace": False,
     "can_move_from": False,
     "built_in": None,

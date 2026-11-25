@@ -1945,7 +1945,7 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
     assert _installed(member) == set()
 
 
-@pytest.mark.parametrize("installed", [False, True], ids=["empty-bay", "installed-other-type"])
+@pytest.mark.parametrize("occupant", [None, "GR-OTHER", "GR-CARD"], ids=["empty-bay", "other-type", "same-type"])
 @pytest.mark.parametrize(
     ("card", "withheld"),
     [
@@ -1955,21 +1955,26 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
     ],
     ids=["unattributed-short-serial", "unattributed-blank-serial", "attributed-by-the-page-serial"],
 )
-def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card, withheld, installed):
+def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card, withheld, occupant):
     """The card sits at the root and reports "12", so no rule names its member, and the page device must not take it.
 
-    With another type in the bay, the row keeps the read-only Report VC issue control and loses Replace.
+    With a module in the bay, the row keeps the read-only Report VC issue control and loses Replace and the
+    interface type review.
     """
-    from dcim.models import InterfaceTemplate
+    from dcim.models import Interface, InterfaceTemplate, ModuleType
 
     from netbox_librenms_plugin.tests.conftest import make_module_type_with_bays
 
     page, member = vc_grants(card=card)
-    if installed:
-        other = make_module_type_with_bays("GR-OTHER")
+    if occupant:
+        occupant_type = (
+            make_module_type_with_bays("GR-OTHER") if occupant == "GR-OTHER" else ModuleType.objects.get(model=occupant)
+        )
         # A template name without a member position is what the VC naming report is for.
-        InterfaceTemplate.objects.create(module_type=other, name="mgmt", type="1000base-t")
-        install_module(page, "Card Slot", "GR-OTHER", "OLD")
+        InterfaceTemplate.objects.create(module_type=occupant_type, name="mgmt", type="1000base-t")
+        module = install_module(page, "Card Slot", occupant, "OLD")
+        # The interface differs from its template, so the row offers the interface type review.
+        Interface.objects.filter(module=module, name="mgmt").update(type="10gbase-x-sfpp")
     before = _installed(page)
     content = render(ui, page)
     parsed = module_tab_forms(content)
@@ -1978,15 +1983,19 @@ def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card
     action, fields = rendered_module_form(content, "install-selected")
 
     assert bool([form for form in parsed.forms if str(CARD) in form["fields"].values()]) is (
-        not withheld and not installed
+        not withheld and not occupant
     )
     assert ("data-member-unattributed" in row) is withheld
     assert (" disabled" in checkbox) is withheld
-    if installed:
+    if occupant:
         assert 'data-action="report-vc-issue"' in row
+    if occupant == "GR-OTHER":
         assert ('data-action="replace"' in row) is (not withheld)
+    if occupant == "GR-CARD":
+        assert "Installed" in row
+        assert ('data-action="review-interface-types"' in row) is (not withheld)
     post(ui, action, {**fields, "select": [str(CARD)]})
-    assert _installed(page) == (before if withheld or installed else {("Card Slot", "GR-CARD")})
+    assert _installed(page) == (before if withheld or occupant else {("Card Slot", "GR-CARD")})
     assert _installed(member) == set()
 
 
