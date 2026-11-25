@@ -513,6 +513,32 @@ class TestRecognizedStack:
             # The PSU's fan crosses the PSU's link on its way to the root's serial.
             assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize("padded", [False, True], ids=["plain", "padded"])
+    def test_a_padded_fpc_description_keeps_the_stack(self, padded):
+        """FPC 0's description carries spaces at both ends; the stack keeps both FPCs and the members stay the same."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import extract_vc_members
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-padded-fpc-{padded}")
+        inventory = [
+            {**row, "entPhysicalDescr": f"  {row['entPhysicalDescr']}  "}
+            if padded and row["entPhysicalIndex"] == 120
+            else row
+            for row in junos_vc_inventory()
+        ]
+        context = SerialRules.load().for_device(master)
+
+        owners = attribute_inventory(inventory, [master, member], context)
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert [found["index"] for found in extract_vc_members(inventory, [context])] == [120, 121]
+        assert (owner[120], owner[121], owner[2], owner[4]) == (
+            (master, "serial"),
+            (member, "serial"),
+            (master, "junos-member"),
+            (member, "junos-member"),
+        )
+
     def test_a_container_described_as_only_its_fpc_slot_is_an_fpc(self):
         """A container described "FPC 1" is FPC 1 itself, so the stack keeps both FPCs and its PSU follows FPC 1."""
         from netbox_librenms_plugin.serial_identity import SerialRules
