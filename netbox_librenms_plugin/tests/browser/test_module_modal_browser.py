@@ -1,5 +1,6 @@
-"""Browser-level checks for the module tab: the mismatch modal and two racing row actions."""
+"""Browser-level checks for the module tab, its mismatch modal and the VC serials dialog."""
 
+import pytest
 from test_sync_cache_browser import NETBOX_TABLE_CSS, _add_page_scripts
 
 
@@ -278,3 +279,88 @@ def test_an_unbroken_long_serial_stays_inside_the_mismatch_modal_on_a_narrow_scr
     assert all(overflow <= 0 for overflow in state["cellOverflows"]), state
     assert state["scrollWidth"] <= state["clientWidth"] + 1, state
     assert all(right <= state["dialogRight"] + 1 for right in state["cellRights"]), state
+
+
+def _vc_serials_modal(items):
+    """Render the VC serials dialog of librenms_sync_base.html with a hand-made context in the view's shape."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from django.template import Context, Engine, Library
+
+    templates = Path(__file__).parents[2] / "templates"
+    engine = Engine(dirs=[str(templates)])
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name, **kwargs):
+        return "https://plugin.example.com/devices/1/assign-vc-serial/"
+
+    engine.template_builtins.append(urls)
+    source = (templates / "netbox_librenms_plugin/librenms_sync_base.html").read_text()
+    # The dialog is the body of one {% if %} block, so the slice holds balanced tags.
+    start = source.index("<!-- VC Member Serials Modal -->")
+    dialog = source[start : source.index("{% endif %}", source.index("</table>", start))]
+    members = [SimpleNamespace(pk=pk, name=f"core-stack-building-a-m{pk}") for pk in (1, 2)]
+    device = SimpleNamespace(pk=1, virtual_chassis=SimpleNamespace(members=SimpleNamespace(all=members)))
+    context = {"object": device, "vc_inventory_serials": items, "csrf_token": "test-token"}
+    return engine.from_string(dialog).render(Context(context, use_l10n=False))
+
+
+# NetBox replaces each select with a Tom Select control, which keeps the selected name on one line.
+TOM_SELECT_STAND_IN = """() => {
+    for (const select of document.querySelectorAll('#vc-serials-form select')) {
+        const control = document.createElement('div');
+        control.className = 'ts-control';
+        control.textContent = select.selectedOptions[0].textContent.trim();
+        select.hidden = true;
+        select.after(control);
+    }
+}"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_a_long_vc_member_serial_wraps_in_a_table_without_a_scroll_wrapper(page, width):
+    """A scroll wrapper clips the member dropdown, so the 50-character serial must wrap in its cell instead."""
+    from types import SimpleNamespace
+
+    serial = "N" * 50
+    items = [
+        {"model": "EX4400-24X-S", "serial": serial, "librenms_serial": serial, "assigned_member": None},
+        {
+            "model": "EX4400-48MP",
+            "serial": "SHORT-B",
+            "librenms_serial": "SHORT-B",
+            "assigned_member": None,
+            "selected_member": SimpleNamespace(pk=1),
+        },
+    ]
+    page.set_viewport_size({"width": width, "height": 800})
+    page.set_content(
+        f"<style>{NETBOX_TABLE_CSS} .modal-dialog {{ margin: 0 16px; max-width: 1140px; }}"
+        " .ts-control { overflow: hidden; white-space: nowrap; padding: .25rem 1.75rem .25rem .5rem; }</style>"
+        f"{_vc_serials_modal(items)}"
+    )
+    page.evaluate(TOM_SELECT_STAND_IN)
+
+    state = page.evaluate(
+        """() => {
+            const table = document.querySelector('#vc-serials-form table');
+            const body = table.closest('.modal-body');
+            const cell = table.tBodies[0].rows[0].cells[1];
+            return {
+                wrapper: Boolean(table.closest('.table-responsive')),
+                controls: Array.from(table.querySelectorAll('.ts-control')).map((control) => control.textContent),
+                text: cell.textContent.trim(),
+                overflow: cell.scrollWidth - cell.clientWidth,
+                bodyOverflow: body.scrollWidth - body.clientWidth,
+            };
+        }"""
+    )
+
+    assert state["wrapper"] is False, state
+    assert state["controls"] == ["Select member...", "core-stack-building-a-m1"], state
+    assert state["text"] == serial, state
+    assert state["overflow"] <= 0, state
+    # A member column that keeps the selected name on one line must not push the table out of the dialog.
+    assert state["bodyOverflow"] <= 1, state
