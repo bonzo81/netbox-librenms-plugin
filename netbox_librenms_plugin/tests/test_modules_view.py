@@ -1214,15 +1214,9 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert [(item["entPhysicalModelName"], item["_librenms_port_id"]) for item in inventory] == [("SFP-10G-SR", 42)]
 
-    @pytest.mark.parametrize(
-        ("port_serial", "port_row"),
-        [("AB-12", ("SFP-10G-SR", 42)), ("CD-34", (None, None))],
-        ids=["same-short-serial", "other-short-serial"],
-    )
-    def test_a_port_ifindex_match_keeps_the_optic_when_both_report_one_short_serial(
-        self, settings, librenms_server, port_serial, port_row
-    ):
-        """The optic index names a PSU; the port at the optic's ifIndex reports the optic's short serial text."""
+    @pytest.mark.parametrize("port_serial", ["AB-12", "CD-34"], ids=["same-short-serial", "other-short-serial"])
+    def test_a_port_ifindex_match_takes_no_optic_by_a_short_serial(self, settings, librenms_server, port_serial):
+        """The optic index names a PSU; the port at the optic's ifIndex reports short serial text, which names no part."""
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=112)
@@ -1253,7 +1247,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert inventory[0] == inventory_seed[0]
         assert len(inventory) == 2
-        assert (inventory[1].get("entPhysicalModelName"), inventory[1].get("_librenms_port_id")) == port_row
+        assert (inventory[1].get("entPhysicalModelName"), inventory[1].get("_librenms_port_id")) == (None, None)
 
     @pytest.mark.parametrize(
         ("entity_class", "entity_model"),
@@ -1339,9 +1333,21 @@ class TestMergeTransceiverDataPortIdentity:
 
     @staticmethod
     def _render_unlinked_optic_tab(
-        client, settings, recording_server, name, optic_serial, *, occupant_model=None, optic_type=True
+        client,
+        settings,
+        recording_server,
+        name,
+        optic_serial,
+        *,
+        occupant_model=None,
+        optic_type=True,
+        entity=None,
+        port=None,
     ):
-        """Render the Modules tab of a device whose optic no entity links to; return the content and the optic index."""
+        """Render the Modules tab of a device whose optic no entity links to; return the content and the optic index.
+
+        *entity* overrides fields of the one inventory entity; *port* is a LibreNMS port that the optic reports.
+        """
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import (
@@ -1354,11 +1360,12 @@ class TestMergeTransceiverDataPortIdentity:
         )
 
         librenms_id, server_key, optic = 4300, "optic-tab", 99
-        device = make_device_with_module_bays(name, [f"Transceiver {optic}"])
+        bay = port["ifName"] if port else f"Transceiver {optic}"
+        device = make_device_with_module_bays(name, [bay])
         if optic_type:
             make_module_type_with_bays("SFP-10G-SR")
         if occupant_model:
-            install_module(device, f"Transceiver {optic}", occupant_model, serial="OCCUPANT9876")
+            install_module(device, bay, occupant_model, serial="OCCUPANT9876")
         entity = {
             "entPhysicalIndex": 10,
             "entPhysicalContainedIn": 0,
@@ -1366,15 +1373,17 @@ class TestMergeTransceiverDataPortIdentity:
             "entPhysicalName": "Port 1",
             "entPhysicalModelName": "SFP-10G-SR",
             "entPhysicalSerialNum": "AB-12",
+            **(entity or {}),
         }
+        transceiver = {"entity_physical_index": optic, "model": "SFP-10G-SR", "serial": optic_serial}
         recording = {
             "device_id": librenms_id,
             "responses": {
                 f"GET /api/v0/inventory/{librenms_id}/all": {"status": "ok", "inventory": [entity]},
-                f"GET /api/v0/devices/{librenms_id}/ports": {"status": "ok", "ports": []},
+                f"GET /api/v0/devices/{librenms_id}/ports": {"status": "ok", "ports": [port] if port else []},
                 f"GET /api/v0/devices/{librenms_id}/transceivers": {
                     "status": "ok",
-                    "transceivers": [{"entity_physical_index": optic, "model": "SFP-10G-SR", "serial": optic_serial}],
+                    "transceivers": [{**transceiver, "port_id": port["port_id"]} if port else transceiver],
                 },
             },
         }
@@ -1418,6 +1427,38 @@ class TestMergeTransceiverDataPortIdentity:
         assert len(installs) == int(install_offered)
         assert ("data-serial-fit-refusal" in row) is (not install_offered)
         assert (" disabled" in checkbox) is (not install_offered)
+
+    @pytest.mark.parametrize(
+        ("optic_serial", "install_offered"),
+        [("AB-12", False), ("OPTIC12345", True)],
+        ids=["short-serial", "identity-serial"],
+    )
+    def test_a_port_at_the_optic_ifindex_with_the_same_short_serial_text_is_no_optic(
+        self, client, settings, recording_server, optic_serial, install_offered
+    ):
+        """The cage and the optic share the port ifIndex and report "AB-12"; equal short text names no part."""
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        content, optic = self._render_unlinked_optic_tab(
+            client,
+            settings,
+            recording_server,
+            f"optic-cage-{optic_serial}",
+            optic_serial,
+            entity={"entPhysicalModelName": "PORT-CAGE", "ifIndex": 9},
+            port={"port_id": 42, "ifIndex": 9, "ifName": "Eth9"},
+        )
+        installs = [
+            form
+            for form in module_tab_forms(content).forms
+            if "install-module" in form["action"] and form["fields"].get("ent_index") == str(optic)
+        ]
+        (cage,) = re.findall(r'<tr[^>]*data-ent-index="10".*?</tr>', content, flags=re.S)
+        (row,) = re.findall(rf'<tr[^>]*data-ent-index="{optic}".*?</tr>', content, flags=re.S)
+        assert "PORT-CAGE" in cage
+        assert "SFP-10G-SR" in row
+        assert len(installs) == int(install_offered)
+        assert ("data-serial-fit-refusal" in row) is (not install_offered)
 
     @pytest.mark.parametrize(
         ("optic_serial", "replace_offered"),
