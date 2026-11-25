@@ -29,8 +29,7 @@ def second_connection():
 def locks_row(sql, model, pk):
     """Return whether the SQL statement *sql* locks the *model* row *pk*, at any lock strength.
 
-    Limits: it reads a key of the row either only outside NOT, or only inside NOT groups of OR-joined id keys;
-    any other WHERE shape raises AssertionError.
+    Limit: it reads only positive id predicates; a locking statement whose WHERE clause holds NOT raises AssertionError.
     """
     table = re.escape(model._meta.db_table)
     keyword = r"(?:WHERE|ON|USING|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ORDER|LIMIT|FOR)\b"
@@ -40,6 +39,9 @@ def locks_row(sql, model, pk):
     # A clause without OF locks every table; OF locks only the tables it names.
     clauses = row_lock.findall(sql)
     where = sql.partition(" WHERE ")[2]
+    # A NOT can select a row without naming it, as NOT (id = 3) selects row 7.
+    if row_lock.search(sql) and re.search(r"\bNOT\b", where):
+        raise AssertionError(f"locks_row reads no locking statement with NOT: {sql}")
     # A self-join reads the table more than once, so every alias must be checked.
     for read in source.finditer(sql):
         name = read.group(2)
@@ -48,46 +50,9 @@ def locks_row(sql, model, pk):
             continue
         qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
         # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
-        column = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"?'
-        key = rf"{column} (?:= {pk}\b|IN \([^)]*\b{pk}\b)"
-        any_key = rf"{column} (?:= \d+\b|IN \([^)]*\))"
-        # Only a positive predicate selects the row: a NOT before the key or before any enclosing group excludes it.
-        negated = {_negated(sql, where, found.start(), any_key) for found in re.finditer(key, where)}
-        if negated == {True, False}:
-            raise AssertionError(f"locks_row reads no key of the row both inside and outside NOT: {sql}")
-        if negated == {False}:
+        if re.search(rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)', where):
             return True
     return False
-
-
-def _negated(sql, where, position, any_key):
-    """Return whether NOT comes directly before *position* or before a group of *where* that encloses it.
-
-    A negated group must hold only *any_key* predicates joined by OR; any other group raises AssertionError.
-    """
-    # It reads no string literals and no double negation; the captured lock statements have neither.
-    opened = []
-    for index, char in enumerate(where[:position]):
-        if char == "(":
-            opened.append(index)
-        elif char == ")" and opened:
-            opened.pop()
-    negated = [start for start in [position, *opened] if re.search(r"\bNOT\s*$", where[:start])]
-    for start in negated:
-        body = where[start + 1 : _group_end(where, start)] if start != position else ""
-        if re.sub(r"[()\s]|\bOR\b", "", re.sub(any_key, "", body)):
-            raise AssertionError(f"locks_row reads no NOT group other than id keys joined by OR: {sql}")
-    return bool(negated)
-
-
-def _group_end(where, start):
-    """Return the index of the parenthesis that closes the group that opens at *start*."""
-    depth = 0
-    for index in range(start, len(where)):
-        depth += {"(": 1, ")": -1}.get(where[index], 0)
-        if depth == 0:
-            return index
-    raise AssertionError(f"locks_row found no end of the group at {start}: {where}")
 
 
 def first_row_lock(statements, model, pk):
