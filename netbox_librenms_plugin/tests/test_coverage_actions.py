@@ -3254,7 +3254,12 @@ def _seed_decorated_serial_rule():
     )
 
 
-def _serial_match_lost(device, change):
+def _hidden_twin_scope(change, *devices):
+    """Return Device grant constraints that hide a later twin from the requester in the ``hidden-duplicate`` case."""
+    return {"pk__in": [device.pk for device in devices]} if change == "hidden-duplicate" else None
+
+
+def _serial_match_lost(device, change, requester):
     """Return a write that, after validation, makes *device* no longer the one holder of its serial; it runs once."""
     done = []
 
@@ -3265,7 +3270,10 @@ def _serial_match_lost(device, change):
             return
         done.append(change)
         if change == "hidden-duplicate":
-            make_device(f"{device.name}-twin", serial=f"S/N {device.serial}")
+            twin = make_device(f"{device.name}-twin", serial=f"S/N {device.serial}")
+            # A recheck that searches only the requester's Devices must miss the twin.
+            for action in ("view", "change"):
+                assert not Device.objects.restrict(requester, action).filter(pk=twin.pk).exists()
         else:
             Device.objects.filter(pk=device.pk).update(serial="REPLACED-SERIAL-9")
 
@@ -4574,9 +4582,17 @@ class TestDeviceConflictActionBranches:
         view = self._make_view()
         target = make_device(f"branches-serial-{action}-{change}".replace("_", "-"), serial="SERIAL-MATCH-1")
         self._register_device(42, f"{target.name}-source", serial="SERIAL-MATCH-1")
-        request = self._request(action, target, f"{target.name}-user")
+        user = make_view_user(
+            f"{target.name}-user", [("change", Device)], constraints=_hidden_twin_scope(change, target)
+        )
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "action": action, "existing_device_id": str(target.pk)},
+            user=user,
+            HTTP_HX_REQUEST="true",
+        )
 
-        response = self._post_after_validation(view, request, 42, _serial_match_lost(target, change))
+        response = self._post_after_validation(view, request, 42, _serial_match_lost(target, change, user))
 
         assert response.headers.get("HX-Reswap") == "none"
         assert _SERIAL_MATCH_LOST.encode() in response.content
@@ -6625,14 +6641,19 @@ class TestAddAsOOBViewPost:
             f"oob-serial-lost-{change}", serial="OOB-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
         )
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        user = make_view_user(
+            f"oob-serial-lost-{change}-user",
+            [("change", Device)],
+            constraints=_hidden_twin_scope(change, existing_device),
+        )
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
-            user=self._device_writer(f"oob-serial-lost-{change}-user"),
+            user=user,
             HTTP_HX_REQUEST="true",
         )
 
-        response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change))
+        response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change, user))
 
         assert response["HX-Reswap"] == "none"
         assert _SERIAL_MATCH_LOST.encode() in response.content
@@ -7194,14 +7215,19 @@ class TestPromoteToHostViewPost:
             f"promote-serial-lost-{change}", serial="PROMOTE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
         )
         self._register_host_device(17, f"promote-serial-lost-{change}-host", serial=existing_device.serial)
+        user = make_view_user(
+            f"promote-serial-lost-{change}-user",
+            [("change", Device)],
+            constraints=_hidden_twin_scope(change, existing_device),
+        )
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
-            user=self._device_writer(f"promote-serial-lost-{change}-user"),
+            user=user,
             HTTP_HX_REQUEST="true",
         )
 
-        response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change))
+        response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change, user))
 
         assert response["HX-Reswap"] == "none"
         assert _SERIAL_MATCH_LOST.encode() in response.content
@@ -7375,7 +7401,7 @@ class _MergeViewHarness:
             self.librenms_server = server
             yield
 
-    def _post_merge(self, winner, donor, *, device_id=99, after_validation=None):
+    def _post_merge(self, winner, donor, *, device_id=99, after_validation=None, user=None):
         from dcim.models import Device
         from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
 
@@ -7394,10 +7420,7 @@ class _MergeViewHarness:
         request = make_view_request(
             "post",
             {"server_key": self.server_key, "winner_pk": str(winner.pk)},
-            user=make_view_user(
-                f"merge-user-{winner.pk}-{donor.pk}",
-                [("change", Device)],
-            ),
+            user=user or make_view_user(f"merge-user-{winner.pk}-{donor.pk}", [("change", Device)]),
             HTTP_HX_REQUEST="true",
         )
         view = MergeNetBoxDevicesView()
@@ -7710,7 +7733,13 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
             f"merge-serial-lost-{change}-donor", serial="MERGE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
         )
 
-        resp = self._post_merge(winner, donor, after_validation=_serial_match_lost(donor, change))
+        user = make_view_user(
+            f"merge-serial-lost-{change}-user",
+            [("change", Device)],
+            constraints=_hidden_twin_scope(change, winner, donor),
+        )
+
+        resp = self._post_merge(winner, donor, after_validation=_serial_match_lost(donor, change, user), user=user)
 
         assert resp["HX-Reswap"] == "none"
         assert _SERIAL_MATCH_LOST.encode() in resp.content
