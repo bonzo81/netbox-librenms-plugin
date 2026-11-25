@@ -44,15 +44,20 @@ def locks_row(sql, model, pk):
             continue
         qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
         # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
-        key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
+        column = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"?'
+        key = rf"{column} (?:= {pk}\b|IN \([^)]*\b{pk}\b)"
+        any_key = rf"{column} (?:= \d+\b|IN \([^)]*\))"
         # Only a positive predicate selects the row: a NOT before the key or before any enclosing group excludes it.
-        if any(not _negated(where, found.start()) for found in re.finditer(key, where)):
+        if any(not _negated(sql, where, found.start(), any_key) for found in re.finditer(key, where)):
             return True
     return False
 
 
-def _negated(where, position):
-    """Return whether NOT comes directly before *position* or before a group of *where* that encloses it."""
+def _negated(sql, where, position, any_key):
+    """Return whether NOT comes directly before *position* or before a group of *where* that encloses it.
+
+    A negated group must hold only *any_key* predicates joined by OR; any other group raises AssertionError.
+    """
     # It reads no string literals and no double negation; the captured lock statements have neither.
     opened = []
     for index, char in enumerate(where[:position]):
@@ -60,7 +65,22 @@ def _negated(where, position):
             opened.append(index)
         elif char == ")" and opened:
             opened.pop()
-    return any(re.search(r"\bNOT\s*$", where[:start]) for start in [position, *opened])
+    negated = [start for start in [position, *opened] if re.search(r"\bNOT\s*$", where[:start])]
+    for start in negated:
+        body = where[start + 1 : _group_end(where, start)] if start != position else ""
+        if re.sub(r"[()\s]|\bOR\b", "", re.sub(any_key, "", body)):
+            raise AssertionError(f"locks_row reads no NOT group other than id keys joined by OR: {sql}")
+    return bool(negated)
+
+
+def _group_end(where, start):
+    """Return the index of the parenthesis that closes the group that opens at *start*."""
+    depth = 0
+    for index in range(start, len(where)):
+        depth += {"(": 1, ")": -1}.get(where[index], 0)
+        if depth == 0:
+            return index
+    raise AssertionError(f"locks_row found no end of the group at {start}: {where}")
 
 
 def first_row_lock(statements, model, pk):

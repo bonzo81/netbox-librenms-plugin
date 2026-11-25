@@ -1835,10 +1835,28 @@ class TestConvertLegacyLibreNMSIdView:
             'SELECT 1 FROM "dcim_device" WHERE NOT (("dcim_device"."id" = 7)) FOR UPDATE',
             'SELECT 1 FROM "dcim_device" WHERE NOT ( ( ("dcim_device"."id" IN (3, 7)) ) ) FOR UPDATE',
             'SELECT 1 FROM "dcim_device" WHERE NOT ("dcim_device"."id" = 3 OR "dcim_device"."id" = 7) FOR UPDATE',
-            'SELECT 1 FROM "dcim_device" WHERE NOT ("dcim_device"."name" IN (\'a\') AND ("dcim_device"."id" = 7)) FOR UPDATE',
+            'SELECT 1 FROM "dcim_device" WHERE NOT (("dcim_device"."id" = 3) OR ("dcim_device"."id" = 7)) FOR UPDATE',
             selecting,
         ]
         assert first_row_lock(statements, Device, 7) == len(statements) - 1
+
+    @pytest.mark.parametrize(
+        "where",
+        [
+            'NOT ("dcim_device"."name" IN (\'a\') AND ("dcim_device"."id" = 7))',
+            'NOT ("dcim_device"."id" = 3 AND "dcim_device"."id" = 7)',
+            'NOT ("dcim_device"."id" = 7 OR "dcim_device"."name" = \'a\')',
+        ],
+        ids=["other-predicate-and", "key-and", "other-predicate-or"],
+    )
+    def test_the_row_lock_check_refuses_a_negated_group_it_can_not_read(self, where):
+        """``NOT (name IN ('a') AND id = 7)`` selects Device 7 named "b"; a NOT group of other than OR-joined keys fails."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import locks_row
+
+        with pytest.raises(AssertionError):
+            locks_row(f'SELECT 1 FROM "dcim_device" WHERE {where} FOR UPDATE', Device, 7)
 
     @pytest.mark.parametrize("hidden_twin", [True, False])
     def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(
