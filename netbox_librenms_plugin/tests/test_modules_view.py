@@ -1295,7 +1295,9 @@ class TestMergeTransceiverDataPortIdentity:
         )
 
         assert error is None
-        assert inventory[0] == inventory_seed[0]
+        # An absorbed optic gives the entity its model, so the Modules tab can resolve the type.
+        assert inventory[0]["entPhysicalModelName"] == (entity_model if synthesized else "SFP-10G-SR")
+        assert inventory[0]["entPhysicalSerialNum"] == "AB-12"
         assert [item["entPhysicalIndex"] for item in inventory[1:]] == ([99] if synthesized else [])
 
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(

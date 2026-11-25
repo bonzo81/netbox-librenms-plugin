@@ -2451,6 +2451,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if existing is None and index_taken:
                 # A synthetic row would duplicate the unrelated entity's index.
                 continue
+            if existing is None:
+                # A serial without an identity names the same optic only on an entity optic with that text.
+                existing = next(
+                    (
+                        item
+                        for item in inventory_data
+                        if _reports_the_short_serial_of_the_optic(item, txr, serial_context)
+                        and (port_ifindex is None or _coerce_idx(item.get("ifIndex")) in {None, port_ifindex})
+                    ),
+                    None,
+                )
 
             model = _clean_librenms_value(txr.get("model"))
             serial = _clean_librenms_value(txr.get("serial"))
@@ -2482,13 +2493,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
                 if inv_serials.contains(serial):
-                    continue
-                # A serial without an identity names the same optic only on an entity optic with that text.
-                if any(
-                    _reports_the_short_serial_of_the_optic(item, txr, serial_context)
-                    and (port_ifindex is None or _coerce_idx(item.get("ifIndex")) in {None, port_ifindex})
-                    for item in inventory_data
-                ):
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
                 if ifname:
