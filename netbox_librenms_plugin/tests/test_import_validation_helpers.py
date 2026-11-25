@@ -175,7 +175,7 @@ class TestValidationStateUpdates:
         assert validation["issues"] == ["Site not found for location 'DC1'"]
 
     def test_remove_validation_issue_keeps_an_issue_that_only_contains_the_word(self):
-        """An issue can quote LibreNMS text, such as a serial "ROLE-123"; only the start of an issue matches."""
+        """An issue can quote LibreNMS text that holds a complete blocker text; only the start of an issue matches."""
         from netbox_librenms_plugin.import_validation_helpers import (
             DEVICE_TYPE_ISSUES,
             ROLE_ISSUE,
@@ -184,12 +184,20 @@ class TestValidationStateUpdates:
             remove_validation_issue,
         )
 
-        quoted = "Stack member 2: Cannot check VC member serial 'ROLE-SITE-VM placement-device type'"
-        validation = {"issues": [ROLE_ISSUE, quoted]}
+        every_prefix = " ".join((ROLE_ISSUE, *VM_PLACEMENT_ISSUES, SITE_ISSUE_PREFIX, *DEVICE_TYPE_ISSUES))
+        quoted = f"Stack member 2: Cannot check VC member serial '{every_prefix}'"
+        site_quoting_role = f"{SITE_ISSUE_PREFIX} '{ROLE_ISSUE}'"
+        validation = {"issues": [ROLE_ISSUE, quoted, site_quoting_role]}
 
-        for prefixes in ((ROLE_ISSUE,), VM_PLACEMENT_ISSUES, (SITE_ISSUE_PREFIX,), DEVICE_TYPE_ISSUES):
+        # The role selection removes the role issue only.
+        remove_validation_issue(validation, ROLE_ISSUE)
+        assert validation["issues"] == [quoted, site_quoting_role]
+
+        for prefixes in (VM_PLACEMENT_ISSUES, DEVICE_TYPE_ISSUES):
             remove_validation_issue(validation, *prefixes)
+        assert validation["issues"] == [quoted, site_quoting_role]
 
+        remove_validation_issue(validation, SITE_ISSUE_PREFIX)
         assert validation["issues"] == [quoted]
 
     def test_remove_validation_issue_no_match(self):
