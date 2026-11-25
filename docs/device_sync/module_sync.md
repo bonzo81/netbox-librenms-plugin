@@ -71,7 +71,7 @@ Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without
 
 For Virtual Chassis devices, the Modules tab automatically distributes inventory rows across the correct VC member based on the component's position in the ENTITY-MIB tree. Each row shows the member hostname to make it clear which physical switch a component belongs to.
 
-Only a member row of a stack that import detection recognizes (for example a stack chassis or a Junos FPC) names a member by its position. The position is the number LibreNMS reports, under the [VC member numbering rule](../configuration/rules_and_patterns.md#vc-member-numbering-rules) of the master's device type, as import numbers it. Rows below a member row belong to that member, unless a serial names another member. The stack root and rows directly under it belong to the device whose page is open.
+Only a member row of a stack that import detection recognizes (for example a stack chassis or a Junos FPC) names a member by its position. The position is the number LibreNMS reports, under the [VC member numbering rule](../configuration/rules_and_patterns.md#vc-member-numbering-rules) of the master's device type, as import numbers it. Rows below a member row belong to that member, unless a serial names another member. The stack root and rows directly under it belong to the device whose page is open. When LibreNMS reports no usable member positions, the plugin numbers the member rows by row order, and this number names a member only for a member row that reports no serial. A member row whose serial no member owns is then unattributed, and so are the rows below it. A row that would belong to the open page device is unattributed instead when it or a parent row reports a serial without an identity. An unattributed row shows "Select a member" and offers no write until you select a member.
 
 The tab shows no rows and runs no module action when:
 
@@ -81,7 +81,7 @@ The tab shows no rows and runs no module action when:
 
 A device that is not in a virtual chassis keeps every row on its own page.
 
-On a Junos Virtual Chassis, all members hang under one root. A row such as "FPC 1 Power Supply 0" belongs to the same member as the FPC that reports slot 1, and a row below an FPC belongs to that FPC's member. The plugin reads this link only from the description of the row, with the surrounding spaces removed. An FPC's member comes only from its serial. If the FPC serial is blank, the FPC gives no link, and its rows resolve as before through their parent rows. A row that names an FPC is unattributed if the FPC serial has no identity, or if no FPC or more than one FPC reports the slot. An unattributed row shows "Select a member" and offers no write until you select a member. Routing Engine numbers are not member numbers.
+On a Junos Virtual Chassis, all members hang under one root. A row such as "FPC 1 Power Supply 0" belongs to the same member as the FPC that reports slot 1, and a row below an FPC belongs to that FPC's member. The plugin reads this link only from the description of the row, with the surrounding spaces removed. A row that names an FPC slot is unattributed if no FPC or more than one FPC reports the slot, or if that FPC gives no member. The stack holds only when each FPC reports its own serial, so an FPC with a blank serial or a serial without an identity gives no stack, and the tab shows no rows. Routing Engine numbers are not member numbers.
 
 ## Screenshot
 
