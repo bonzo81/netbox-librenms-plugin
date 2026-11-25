@@ -80,18 +80,20 @@ def test_owner_locks_complete_destinations_in_pk_order_before_downstream_rows():
     second = make_device_with_module_bays("owner-order-second", ["Slot 1"])
     module = install_module(first, "Slot 1", "OWNER-ORDER", serial="")
     observed = observe_module_write(device_ids=[second.pk, first.pk], module_ids=[module.pk])
-    locks = []
+    operations = []
+    # Every row lock strength and every write counts as a downstream operation.
+    downstream = re.compile(r"\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b|^\s*(?:INSERT|UPDATE|DELETE)\b")
 
     def record(execute, sql, params, many, context):
-        if "FOR NO KEY UPDATE" in sql:
-            locks.append((sql, params))
+        if downstream.search(sql):
+            operations.append(sql)
         return execute(sql, params, many, context)
 
     with transaction.atomic(), connection.execute_wrapper(record):
         scope = lock_module_write(observed)
         assert sorted(scope.devices) == sorted([first.pk, second.pk])
-        assert len(locks) == 1
-        assert "ORDER BY 1 ASC" in locks[0][0]
+        assert re.search(r'FROM "dcim_device" .*ORDER BY 1 ASC FOR NO KEY UPDATE', operations[0])
+        assert sum('FROM "dcim_device"' in sql for sql in operations) == 1
         with pytest.raises(ValidationError):
             scope.require_devices([max(scope.devices) + 1000])
 
