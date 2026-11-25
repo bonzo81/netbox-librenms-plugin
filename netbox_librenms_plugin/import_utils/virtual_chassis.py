@@ -209,10 +209,10 @@ def _is_junos_vc_root(row: dict) -> bool:
 
 def _is_junos_fpc(row: dict) -> bool:
     """Return whether *row* is a Junos FPC container row; an "FPC <n> ..." row names FPC n instead."""
-    descr = row.get("entPhysicalDescr")
+    # The anonymizer reads the trimmed description, so live inventory and replay agree.
+    descr = librenms_text(row.get("entPhysicalDescr"))
     return (
         row.get("entPhysicalClass") == "container"
-        and isinstance(descr, str)
         and descr.startswith(JUNOS_FPC_DESCR_PREFIX)
         and not JUNOS_FPC_MEMBER_DESCR_RE.match(descr)
     )
@@ -368,9 +368,8 @@ def extract_vc_stack(rows: list, contexts) -> VcStack:
 
 def _junos_fpc_named_slot(row: dict) -> int | None:
     """Return the FPC slot that a Junos row's description names as "FPC <n> ...", or None."""
-    # The anonymizer keeps this prefix only in descriptions, so a name never links.
-    descr = row.get("entPhysicalDescr")
-    named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
+    # The anonymizer keeps this prefix only in trimmed descriptions, so a name never links.
+    named = JUNOS_FPC_MEMBER_DESCR_RE.match(librenms_text(row.get("entPhysicalDescr")))
     return int(named.group("member")) if named else None
 
 

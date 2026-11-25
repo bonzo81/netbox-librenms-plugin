@@ -513,6 +513,21 @@ class TestRecognizedStack:
             # The PSU's fan crosses the PSU's link on its way to the root's serial.
             assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize("descr", ["FPC 1 Power Supply 0", " FPC 1 Power Supply 0 "], ids=["plain", "padded"])
+    def test_a_padded_fpc_link_names_the_slot_as_the_anonymizer_reads_it(self, descr):
+        """The anonymizer trims the description, so a padded "FPC 1 ..." names FPC 1, whose "12" gives no member."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-padded-link-{len(descr)}")
+        changes = {121: {"entPhysicalSerialNum": "12"}, 4: {"entPhysicalDescr": descr}}
+        inventory = [{**row, **changes.get(row["entPhysicalIndex"], {})} for row in junos_vc_inventory()]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[4] == (None, UNATTRIBUTED_SOURCE)
+
     @pytest.mark.parametrize(("other_serial", "unattributed"), [("", False), ("SN-BBB", True)], ids=["blank", "mixed"])
     def test_a_link_to_a_slot_of_blank_fpcs_only_gives_no_link(self, other_serial, unattributed):
         """Both FPCs report slot 1; when all of them are blank the PSU resolves as develop does, by parent context."""
