@@ -593,6 +593,9 @@ def test_replace_signs_the_removal_trees_that_its_preview_summarized(ui, c8300, 
     form = rendered_module_form(preview.content.decode(), "replace-module", REAL_NIM)
     assert form[1]["conflict_module_id"] == str(holder.pk)
     [child] = added
+    # The dialog summarized the same first reads that the grant signed: two roots, without the added child.
+    assert re.findall(r'data-replace-removes="(\d+)"', preview.content.decode()) == ["2"]
+    assert child.module_type.model not in preview.content.decode()
     before = written_state(device)
 
     response = post(ui, *form)
