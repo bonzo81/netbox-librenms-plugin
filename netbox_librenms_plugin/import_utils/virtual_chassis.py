@@ -619,14 +619,11 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, s
         return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None) or type(e).__name__)
 
 
-_POSITION_NAME_PATTERN = "-M{position}"
-
-
 def _load_vc_member_name_pattern() -> str:
     """Load the VC member name pattern from settings, with fallback to default."""
     from ..models import LibreNMSSettings
 
-    default = _POSITION_NAME_PATTERN
+    default = "-M{position}"
     try:
         settings = LibreNMSSettings.objects.order_by("pk").first()
         if not settings:
@@ -681,11 +678,26 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
 
 def _member_name(master_name: str, position: int, serial, pattern: str, context) -> str:
     """Return the name of the stack member; the import preview and member creation both name members here."""
-    token = naming_token(serial, context)
-    if not token and _vc_name_uses_serial(pattern):
-        # A serial without an identity gives no name text, so the position keeps the member names apart.
-        pattern = _POSITION_NAME_PATTERN
-    return _generate_vc_member_name(master_name, position, serial=token, pattern=pattern)
+    return _generate_vc_member_name(master_name, position, serial=naming_token(serial, context), pattern=pattern)
+
+
+def unnamed_members(members_info, pattern, context) -> list[tuple]:
+    """Return ``(member, position)`` for each stack member that *pattern* gives no name; the import refuses the stack."""
+    if not _vc_name_uses_serial(pattern):
+        return []
+    positions = _member_positions([member.get("position") for member in members_info])
+    return [
+        (member, position)
+        for member, position in zip(members_info, positions, strict=True)
+        if not naming_token(member.get("serial"), context)
+    ]
+
+
+def unnamed_member_refusal(position, serial, pattern) -> str:
+    """Return the issue of a stack member at *position* that *pattern* gives no name."""
+    reported = display(serial)
+    reason = f"its serial '{reported}' has no identity" if reported else "it reports no serial"
+    return f"Stack member {position}: {reason}, so the member name pattern '{pattern}' gives it no name."
 
 
 def _vc_name_fields(pattern):
@@ -861,10 +873,15 @@ def create_virtual_chassis_with_members(
                 raise ValueError(
                     "The stack master does not match under the current device type; no chassis was created."
                 )
-            master_device.device_type = member_type
-            master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
+            if unnamed := unnamed_members(members_info, vc_pattern, context):
+                refusals = [
+                    unnamed_member_refusal(position, member.get("serial"), vc_pattern) for member, position in unnamed
+                ]
+                raise ValueError(" ".join([*refusals, "No chassis was created."]))
+            master_device.device_type = member_type
+            master_device.snapshot()
             # Rename the master device with its own position, from its member entry like every other member
             master_device_new_name = _member_name(
                 original_master_name, master_pos, master_member.get("serial"), vc_pattern, context

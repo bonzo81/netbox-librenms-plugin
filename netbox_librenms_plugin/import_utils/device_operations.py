@@ -66,11 +66,14 @@ from .cache import get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
     _existing_member_name,
+    _load_vc_member_name_pattern,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
     member_serial_unavailable_message,
     members_to_create,
+    unnamed_member_refusal,
+    unnamed_members,
     update_vc_member_suggested_names,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -680,6 +683,14 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     # A stack without an identified master imports as one device and creates no member.
     if master is None:
         return []
+    # The member writer names every member, the master too, and refuses the stack when one gets no name.
+    pattern = _load_vc_member_name_pattern()
+    unnamed_ids = {id(member) for member, _position in unnamed_members(vc["members"], pattern, context)}
+    unnamed = [
+        unnamed_member_refusal(member.get("position"), member.get("serial"), pattern)
+        for member in vc["members"]
+        if id(member) in unnamed_ids
+    ]
     members = [(member, member.get("position"), display(member.get("serial"))) for member in vc["members"]]
     members = [entry for entry in members if entry[0] is not master]
     taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
@@ -690,7 +701,7 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
         if taken[serial].kind is ResolutionKind.UNAVAILABLE
     ]
     if unavailable:
-        return unavailable
+        return unnamed + unavailable
     created = {
         id(member)
         for member, *_rest in members_to_create(
@@ -698,7 +709,7 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
         )
     }
     # The text comes from the LibreNMS members only: the lookup is unrestricted, so it selects and names nothing.
-    return [
+    return unnamed + [
         f"Stack member {position}: {refusal}"
         for member, position, serial in members
         if id(member) in created and (refusal := stored_form_refusal(serial, Device))

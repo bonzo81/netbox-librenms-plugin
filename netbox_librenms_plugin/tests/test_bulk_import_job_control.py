@@ -644,33 +644,64 @@ class TestStackImportCreatesTheVirtualChassis:
         assert len(result["warnings"]) == 2
         assert not VirtualChassis.objects.filter(domain__startswith="librenms-default-43").exists()
 
-    def test_short_member_serials_under_a_serial_pattern_get_distinct_position_names(self, live_librenms):
-        """A serial without an identity names no member, so preview and import give it the position name."""
+    @pytest.mark.parametrize(
+        ("member_serials", "refused_positions"),
+        [(("12", "34"), [2, 3]), (("", "SN-SHORT-C"), [2]), (("SN-SHORT-B", "SN-SHORT-C"), [])],
+        ids=["short-serials", "blank-serial", "identity-serials"],
+    )
+    def test_a_member_serial_that_gives_no_name_under_a_serial_pattern_refuses_the_stack(
+        self, live_librenms, member_serials, refused_positions
+    ):
+        """A serial without an identity gives no ``{serial}`` name, so the preview and the import refuse the stack."""
         from dcim.models import Device, VirtualChassis
 
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
         settings_row.vc_member_name_pattern = "-{serial}"
         settings_row.save()
+        prerequisites = _prerequisites("stack-short")
         members = [
             _chassis(100, "MASTER123", position=1),
-            _chassis(200, "12", position=2),
-            _chassis(300, "34", position=3),
+            _chassis(200, member_serials[0], position=2),
+            _chassis(300, member_serials[1], position=3),
         ]
-        row = _libre_device(461, "stack-short-461", serial="MASTER123")
+        row = _libre_device(
+            461,
+            "stack-short-461",
+            hardware=prerequisites["hardware"],
+            serial="MASTER123",
+            location=prerequisites["location"],
+        )
         _register_stack(live_librenms, 461, row, members)
         preview = validate_device_for_import(row, api=live_librenms.api, server_key="default", force_vc_refresh=True)
 
-        result = self._import(live_librenms, {461: members}, tag="stack-short")
+        result = bulk_import_devices_shared(
+            [461],
+            server_key="default",
+            manual_mappings_per_device={461: prerequisites},
+            libre_devices_cache={461: row},
+            user=make_superuser("stack-short-user"),
+        )
 
+        # The preview needs a role picked before import in every case; the member issues are the stack's own.
+        assert [issue.partition(":")[0] for issue in preview["issues"] if issue.startswith("Stack member ")] == [
+            f"Stack member {position}" for position in refused_positions
+        ]
+        if refused_positions:
+            assert [entry["device_id"] for entry in result["failed"]] == [461]
+            assert all(f"Stack member {position}" in result["failed"][0]["error"] for position in refused_positions)
+            assert not Device.objects.filter(name__startswith="stack-short-461").exists()
+            assert not VirtualChassis.objects.filter(domain="librenms-default-461").exists()
+            return
         assert result["failed"] == []
         assert result["virtual_chassis_created"] == 1
         chassis = VirtualChassis.objects.get(domain="librenms-default-461")
         created = dict(Device.objects.filter(virtual_chassis=chassis).values_list("vc_position", "name"))
-        assert created == {1: "stack-short-461-MASTER123", 2: "stack-short-461-M2", 3: "stack-short-461-M3"}
         previewed = {member["position"]: member["suggested_name"] for member in preview["virtual_chassis"]["members"]}
+        assert sorted(created) == [1, 2, 3]
         assert previewed == created
 
     def test_the_job_logger_reports_the_created_chassis(self, live_librenms, rq_job, caplog):
