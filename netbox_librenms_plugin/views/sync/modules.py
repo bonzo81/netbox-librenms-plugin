@@ -103,12 +103,14 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
+    UNLINKED_OPTIC_REFUSAL,
     BaseModuleTableView,
     DeviceIdentity,
     _get_item_port_identity,
     _inventory_item_key,
     _is_holder,
     _normalize_librenms_text,
+    _unlinked_optic_refusal,
     built_in_candidate,
     reusable_built_in_rule,
     all_trees_in_scope,
@@ -1567,6 +1569,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Reject at this shared chokepoint so both the branch and selected install paths are covered.
         if refusal := _never_installable_reason(item):
             return {"status": "skipped", "name": name, "reason": refusal}
+        # A NetBox change after the render can give the row a type or a free bay, so the writer refuses it too.
+        if _unlinked_optic_refusal(item, incoming, locked_type_context(device, rules=serial_rules)):
+            return {"status": "skipped", "name": name, "reason": UNLINKED_OPTIC_REFUSAL}
 
         matched_type = _resolve_install_module_type(device, item, module_types, allowed_module_type_ids)
         if matched_type is None:

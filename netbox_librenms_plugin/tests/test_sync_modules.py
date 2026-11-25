@@ -810,6 +810,28 @@ class TestSharedInstaller:
         assert module.module_type == module_type
         assert module.serial == "INSTALL-SERIAL"
 
+    @pytest.mark.parametrize(
+        ("serial", "installed"), [("AB-12", False), ("OPTIC12345", True)], ids=["short-serial", "identity-serial"]
+    )
+    def test_an_unlinked_optic_with_a_short_serial_skips_without_creating_a_module(self, serial, installed):
+        """The installer refuses the row itself, so a selection that the table no longer offers installs nothing."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.base.modules_view import UNLINKED_OPTIC_REFUSAL
+
+        device = make_device(f"installer-optic-{serial}")
+        make_module_bay(device, "Transceiver 99")
+        module_type = make_module_type("SFP-10G-SR")
+        item = _inventory_item(
+            99, module_type.model, "Transceiver 99", serial=serial, phys_class="port", _from_transceiver_api=True
+        )
+
+        result = _run_install_single(device, item, {99: item}, {module_type.model: module_type})
+
+        assert result["status"] == ("installed" if installed else "skipped")
+        assert (result.get("reason") == UNLINKED_OPTIC_REFUSAL) is (not installed)
+        assert Module.objects.filter(device=device).exists() is installed
+
     def test_missing_type_skips_without_creating_a_module(self):
         from dcim.models import Module
 

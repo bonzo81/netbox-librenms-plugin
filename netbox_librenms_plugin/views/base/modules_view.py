@@ -232,7 +232,7 @@ def _unlinked_optic_refusal(item, serial, context) -> str:
 def _install_refused(row) -> bool:
     """Return whether an install of the row refuses: its serial does not fit or names no part, or a Module holds it."""
     fit_refused = bool(row.get("serial_fit_refusal")) and not row.get("installed_module_id")
-    return fit_refused or bool(row.get("install_withheld"))
+    return fit_refused or bool(row.get("install_withheld")) or bool(row.get("unlinked_optic"))
 
 
 def _has_skipped_ancestor(item, index_map, action_of) -> bool:
@@ -3933,7 +3933,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # Bay exists, type matched, no module installed → can install
                 row["can_install"] = True
 
-        unlinked_optic_refusal = _unlinked_optic_refusal(item, serial, serial_context) if matched_type else ""
+        unlinked_optic_refusal = _unlinked_optic_refusal(item, serial, serial_context)
+        # A type or a free bay can come after the render, so such a row is never selectable.
+        row["unlinked_optic"] = bool(unlinked_optic_refusal)
         if matched_type and not row.get("installed_module_id"):
             from dcim.models import Module
 

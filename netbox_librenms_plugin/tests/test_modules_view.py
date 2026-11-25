@@ -1338,7 +1338,9 @@ class TestMergeTransceiverDataPortIdentity:
         ) == [(10, 1, False), (20, 2, True)]
 
     @staticmethod
-    def _render_unlinked_optic_tab(client, settings, recording_server, name, optic_serial, *, occupant_model=None):
+    def _render_unlinked_optic_tab(
+        client, settings, recording_server, name, optic_serial, *, occupant_model=None, optic_type=True
+    ):
         """Render the Modules tab of a device whose optic no entity links to; return the content and the optic index."""
         from django.urls import reverse
 
@@ -1353,7 +1355,8 @@ class TestMergeTransceiverDataPortIdentity:
 
         librenms_id, server_key, optic = 4300, "optic-tab", 99
         device = make_device_with_module_bays(name, [f"Transceiver {optic}"])
-        make_module_type_with_bays("SFP-10G-SR")
+        if optic_type:
+            make_module_type_with_bays("SFP-10G-SR")
         if occupant_model:
             install_module(device, f"Transceiver {optic}", occupant_model, serial="OCCUPANT9876")
         entity = {
@@ -1444,6 +1447,46 @@ class TestMergeTransceiverDataPortIdentity:
         assert "Type Mismatch" in row
         assert len(replaces) == int(replace_offered)
         assert ("data-serial-fit-refusal" in row) is (not replace_offered)
+
+    @pytest.mark.parametrize("netbox_change", ["type-added", "occupant-removed"])
+    @pytest.mark.parametrize(
+        ("optic_serial", "refused"), [("AB-12", True), ("OPTIC12345", False)], ids=["short-serial", "identity-serial"]
+    )
+    def test_install_selected_installs_no_unlinked_optic_with_a_short_serial_after_a_netbox_change(
+        self, client, settings, recording_server, netbox_change, optic_serial, refused
+    ):
+        """A ModuleType added or an occupant removed after the render must not let the optic install."""
+        from dcim.models import Device, Module
+        from django.contrib.messages import get_messages
+
+        from netbox_librenms_plugin.tests.conftest import make_module_type_with_bays
+        from netbox_librenms_plugin.tests.view_test_helpers import rendered_module_form
+
+        name = f"optic-stale-{netbox_change}-{optic_serial}"
+        content, optic = self._render_unlinked_optic_tab(
+            client,
+            settings,
+            recording_server,
+            name,
+            optic_serial,
+            occupant_model="QSFP-OTHER" if netbox_change == "occupant-removed" else None,
+            optic_type=netbox_change != "type-added",
+        )
+        device = Device.objects.get(name=name)
+        if netbox_change == "type-added":
+            make_module_type_with_bays("SFP-10G-SR")
+        else:
+            Module.objects.get(device=device, module_type__model="QSFP-OTHER").delete()
+        action, fields = rendered_module_form(content, "install-selected")
+        (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{optic}"[^>]*>', content)
+
+        response = client.post(action, {**fields, "select": [str(optic)]})
+
+        installed = Module.objects.filter(device=device, module_type__model="SFP-10G-SR")
+        assert installed.exists() is (not refused)
+        assert (" disabled" in checkbox) is refused
+        texts = [str(message.message) for message in get_messages(response.wsgi_request)]
+        assert any(text.startswith("Nothing was installed") for text in texts) is refused, texts
 
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
