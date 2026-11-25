@@ -2025,21 +2025,31 @@ class TestDeviceValidationDetailsView:
             ("hostname", "CHASSIS-SERIAL"),
             ("hostname", "C" * 51),
             ("serial", None),
+            ("serial", f"S/N {'N' * 47}"),
             ("primary_ip", "CHASSIS-SERIAL"),
             ("primary_ip", "C" * 51),
         ],
-        ids=["hostname", "hostname-too-long", "serial", "primary_ip", "primary_ip-too-long"],
+        ids=["hostname", "hostname-too-long", "serial", "serial-too-long", "primary_ip", "primary_ip-too-long"],
     )
     def test_linking_a_chassis_member_preserves_its_name_and_serial(self, match_type, reported):
         """A link writes no serial, so a LibreNMS serial that does not fit the field hides no link."""
+        from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-chassis-link")
         member.name = "SW01"
-        member.serial = "MEMBER-OLD"
+        if match_type == "serial" and reported:
+            # The seeded rule keys the 51-character "S/N " serial to the 47-character stored serial.
+            NormalizationRule.objects.get_or_create(
+                scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+            )
+            member.serial = "N" * 47
+        else:
+            member.serial = "MEMBER-OLD"
+        stored = member.serial
         hostname = "sw01" if match_type == "hostname" else "test-switch"
-        serial = member.serial if match_type == "serial" else reported
+        serial = (reported or member.serial) if match_type == "serial" else reported
         ip = "198.18.0.8"
         if match_type == "primary_ip":
             member.primary_ip4 = make_ip(f"{ip}/24", assigned_object=make_interface(member, "eth0"))
@@ -2059,7 +2069,7 @@ class TestDeviceValidationDetailsView:
         assert response.status_code == 200
         member.refresh_from_db()
         assert stored_mapping_for_test(member) == {"default": 1}
-        assert member.serial == "MEMBER-OLD"
+        assert member.serial == stored
         assert member.name == "SW01"
 
     @pytest.mark.parametrize("match_type", ["serial", "hostname"])
