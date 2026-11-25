@@ -3,9 +3,6 @@
 import re
 
 import pytest
-from django.core.exceptions import ValidationError
-from django.db import connection, transaction
-
 from netbox_librenms_plugin.tests.conftest import (
     install_module,
     make_device_with_module_bays,
@@ -18,6 +15,8 @@ from netbox_librenms_plugin.tests.conftest import (
 @pytest.mark.parametrize("change", ["child-created", "child-removed", "bay", "parent", "device", "serial"])
 def test_owner_refuses_changed_membership_or_topology(change):
     from dcim.models import Module, ModuleBay
+    from django.core.exceptions import ValidationError
+    from django.db import transaction
 
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
@@ -53,6 +52,7 @@ def test_owner_refuses_changed_membership_or_topology(change):
 def test_a_child_committed_before_the_topology_read_refuses_the_observation(monkeypatch):
     """A child that the subtree read missed but the topology holds would move without its serial claim."""
     from dcim.models import Module
+    from django.core.exceptions import ValidationError
 
     from netbox_librenms_plugin import module_writes
 
@@ -74,6 +74,9 @@ def test_a_child_committed_before_the_topology_read_refuses_the_observation(monk
 
 @transactional_db_with_all_apps()
 def test_owner_locks_complete_destinations_in_pk_order_before_downstream_rows():
+    from django.core.exceptions import ValidationError
+    from django.db import connection, transaction
+
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 
     first = make_device_with_module_bays("owner-order-first", ["Slot 1"])
@@ -101,6 +104,7 @@ def test_owner_locks_complete_destinations_in_pk_order_before_downstream_rows():
 @transactional_db_with_all_apps()
 def test_owner_locks_allow_a_writer_on_an_unrelated_device_to_finish():
     from dcim.models import Device
+    from django.db import transaction
 
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
     from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
@@ -133,7 +137,7 @@ def test_component_and_serialless_writers_wait_for_the_owner_before_downstream_l
 
     from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay
     from django.core.cache import cache
-    from django.db import close_old_connections
+    from django.db import close_old_connections, connection
     from django.test import Client
     from django.urls import reverse
 
@@ -246,7 +250,8 @@ def test_opposite_bulk_destinations_commit_one_complete_batch_without_a_lock_cyc
     from threading import Barrier
 
     from dcim.models import Module
-    from django.db import close_old_connections
+    from django.core.exceptions import ValidationError
+    from django.db import close_old_connections, connection, transaction
 
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
     from netbox_librenms_plugin.tests.conftest import run_in_threads
@@ -293,6 +298,8 @@ def test_opposite_bulk_destinations_commit_one_complete_batch_without_a_lock_cyc
 @pytest.mark.parametrize("selection", ["module_ids", "subtree_roots"])
 def test_observation_refuses_a_requested_module_deleted_before_the_observation(selection):
     """A view can retain an instance that a concurrent native delete has removed."""
+    from django.core.exceptions import ValidationError
+
     from netbox_librenms_plugin.module_writes import observe_module_write
 
     device = make_device_with_module_bays("owner-already-removed", ["Slot 1"])
@@ -313,7 +320,7 @@ def test_existing_module_actions_recheck_their_grant_after_the_owner_wait(writer
     from dcim.models import Device, Interface
     from django.contrib.messages import get_messages
     from django.core.cache import cache
-    from django.db import close_old_connections
+    from django.db import close_old_connections, connection
     from django.test import Client
     from psycopg.types.json import Jsonb
 
@@ -428,7 +435,7 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
 
     from dcim.models import Device, Module, ModuleBay, ModuleBayTemplate
     from django.contrib.messages import get_messages
-    from django.db import DatabaseError, close_old_connections
+    from django.db import DatabaseError, close_old_connections, connection
     from django.test import Client
     from django.urls import reverse
 
@@ -572,7 +579,7 @@ def test_template_rechecks_instances_after_its_save_before_materialization(
 
     from dcim.models import Device, Module, ModuleBay, ModuleBayTemplate
     from django.contrib.messages import get_messages
-    from django.db import close_old_connections
+    from django.db import close_old_connections, connection
     from django.test import Client
     from django.urls import reverse
 
@@ -651,6 +658,9 @@ def test_template_rechecks_instances_after_its_save_before_materialization(
 
 @transactional_db_with_all_apps()
 def test_a_creation_scope_refuses_unplanned_or_incremental_type_claims():
+    from django.core.exceptions import ValidationError
+    from django.db import transaction
+
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 
     device = make_device_with_module_bays("type-scope-complete", ["Slot 1"])
@@ -830,6 +840,7 @@ def test_move_claims_serials_only_when_ownership_changes_or_a_serial_is_removed(
 def test_a_batch_claims_each_json_number_serial_by_its_text():
     """JSON 123 and 123.0 are one Python key but two stored serials, so a writer of either one waits for the batch."""
     from dcim.models import Module
+    from django.db import transaction
 
     from netbox_librenms_plugin.serial_identity import _LOCK_PREFIX, SerialRules, assignment_lock
     from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
