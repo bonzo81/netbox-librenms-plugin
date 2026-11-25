@@ -1459,9 +1459,11 @@ class VCModuleTable(LibreNMSModuleTable):
             else ""
         )
 
-        options = render_vc_member_options(self._vc_members, selected_device_id)
+        # A row that no member reported names no member, so a pick of any member, the page device too, runs the verify.
+        shown_member_id = None if record.get("member_unattributed") else selected_device_id
+        options = render_vc_member_options(self._vc_members, shown_member_id)
         # A row on a member the user may not view names no member.
-        if not any(str(member.pk) == str(selected_device_id) for member in self._vc_members):
+        if not any(str(member.pk) == str(shown_member_id) for member in self._vc_members):
             options = format_html('<option value="" selected>Select a member</option>{}', options)
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" '

@@ -2008,18 +2008,26 @@ def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix(ui, vc_gr
     assert ("Fix Device Type" in row) is (not withheld)
 
 
-def test_a_member_pick_offers_the_install_of_a_stack_row_that_no_member_reported(ui, vc_grants):
-    """The user names the member, so the table pinned to it offers the install there."""
-    page, member = vc_grants(card={"entPhysicalContainedIn": 0, "entPhysicalSerialNum": "12"})
-    content = render(ui, page)
+@pytest.mark.parametrize("pick_page", [False, True], ids=["other-member", "page-device"])
+def test_a_member_pick_offers_the_install_of_a_stack_row_that_no_member_reported(ui, vc_grants, pick_page):
+    """The user names the member, so the table pinned to it offers the install there.
 
-    response = verify(ui, content, page, member, CARD)
+    The select shows no member, so a pick of the page device is a change that runs the verify too.
+    """
+    page, member = vc_grants(card={"entPhysicalContainedIn": 0, "entPhysicalSerialNum": "12"})
+    picked, other = (page, member) if pick_page else (member, page)
+    content = render(ui, page)
+    (select,) = re.findall(rf'<select[^>]*data-module="{CARD}".*?</select>', content, flags=re.S)
+
+    assert '<option value="" selected>' in select
+    assert f'<option value="{page.pk}">' in select
+    response = verify(ui, content, page, picked, CARD)
 
     assert response.status_code == 200, response.content
     action, fields = rendered_module_form(response.json()["formatted_row"]["actions"], "install-module", CARD)
     post(ui, action, fields)
-    assert _installed(member) == {("Card Slot", "GR-CARD")}
-    assert _installed(page) == set()
+    assert _installed(picked) == {("Card Slot", "GR-CARD")}
+    assert _installed(other) == set()
 
 
 def test_the_member_select_names_only_the_members_the_user_may_view(client, vc_grants):
