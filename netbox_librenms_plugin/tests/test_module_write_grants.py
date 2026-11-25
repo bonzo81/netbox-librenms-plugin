@@ -2337,3 +2337,158 @@ def test_the_tab_parser_reads_a_form_the_way_a_browser_submits_it():
         "picked": "y",
         "text": "Bay 1",
     }
+
+
+# --- One rule withholds the write controls of a flagged row ----------------------------------------
+
+# The controls that write the row's modules or interfaces, or an inventory rule for the row.
+WRITE_ACTIONS = frozenset(
+    {
+        "install",
+        "install-branch",
+        "install-carrier",
+        "update-serial",
+        "update-interface",
+        "review-interface-types",
+        "replace",
+        "move",
+        "mark-built-in",
+    }
+)
+# The controls that write a bay template or a bay mapping from the page device's bays or types.
+PAGE_DEVICE_ACTIONS = frozenset({"add-bay-mapping", "map-existing-bay", "fix-model", "fix-device-type"})
+# The controls that keep a flagged row's actions: rules and types keyed by LibreNMS text, and the VC report.
+UNGATED_ACTIONS = frozenset({"add-carrier-rule", "add-type-mapping", "add-module-type", "report-vc-issue"})
+FLAG_WITHHOLDS = {"member_unattributed": WRITE_ACTIONS | PAGE_DEVICE_ACTIONS, "unlinked_optic": WRITE_ACTIONS}
+
+
+def _flag_guard_records():
+    """Return rows that together offer every write control of the table."""
+    from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
+    source = make_device_with_module_bays("flag-guard-move-source", ["Slot 1"])
+    conflict = install_module(source, "Slot 1", "FLAG-GUARD-TYPE", serial="FLAG-GUARD-SERIAL")
+    return [
+        {
+            "can_install": True,
+            "module_bay_id": 5,
+            "module_type_id": 10,
+            "has_installable_children": True,
+            "ent_physical_index": 42,
+            "branch_rows": [[42, 1]],
+        },
+        {
+            "status": "Installed",
+            "can_update_serial": True,
+            "can_update_interface_binding": True,
+            "interface_type_mismatch_count": 2,
+            "can_replace": True,
+            "installed_module_id": 42,
+            "module_bay_id": 7,
+            "ent_physical_index": 77,
+            "model_incomplete": True,
+            "model_incomplete_target_pk": 3,
+        },
+        {
+            "can_move_from": True,
+            "serial_conflict_module": conflict,
+            "serial_conflict_visible": True,
+            "module_bay_id": 7,
+        },
+        {
+            "status": "No Bay",
+            "carrier_install_options": [
+                {"bay_id": 12, "module_type_id": 34, "module_type_name": "CARRIER-A", "bay_name": "Slot 0"}
+            ],
+            "model_suggestion": {"librenms_name": "RE0", "netbox_bay_name": "RE0"},
+        },
+        {
+            "status": "No Bay",
+            "holder_hint_present": True,
+            "device_empty_bay_names": ["RE0"],
+            "mapping_source_name": "Routing Engine 0",
+            "device_type_incomplete": True,
+            "device_type_incomplete_target_pk": 4,
+        },
+        {
+            "status": "No Type",
+            "type_suggestion": {"librenms_model": "MODEL-A"},
+            "module_type_create": {"model": "MODEL-A"},
+        },
+        {
+            "ent_physical_index": 50,
+            "built_in": {"records_part_number": False, "part_number": "", "rule_id": None, "device_type_id": 1},
+        },
+    ]
+
+
+def _rendered_actions(records, **flags):
+    """Return each data-action that the actions and status cells of *records* render with *flags* set."""
+    from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    table = LibreNMSModuleTable(
+        [],
+        device=make_device(f"flag-guard-page-{'-'.join(flags) or 'none'}"),
+        server_key=SERVER_KEY,
+        **{
+            name: True
+            for name in (
+                "has_write_permission",
+                "can_add_module",
+                "can_change_module",
+                "can_change_interface",
+                "can_review_interface_types",
+                "can_delete_module",
+                "can_add_module_bay_template",
+                "can_add_module_type",
+                "can_add_carrier_rule",
+                "can_add_module_bay_mapping",
+                "can_map_existing_bay",
+                "can_add_module_type_mapping",
+                "can_change_device_type",
+                "can_add_inventory_rule",
+                "can_change_inventory_rule",
+            )
+        },
+    )
+    table.csrf_token = "flag-guard-csrf"
+    table.inventory_snapshot_digest = "flag-guard-digest"
+    table.policy_fingerprint = "flag-guard-fingerprint"
+    rendered = ""
+    for record in records:
+        flagged = {**record, **flags}
+        rendered += str(table.render_actions(None, flagged)) + str(table.render_status(flagged.get("status"), flagged))
+    return set(re.findall(r'data-action="([^"]+)"', rendered))
+
+
+def test_every_control_of_the_module_table_has_a_write_class():
+    """A new control fails here until it names its class; a data-action built at run time is out of reach."""
+    import inspect
+
+    from netbox_librenms_plugin.tables import modules
+
+    source = inspect.getsource(modules)
+    names = set(re.findall(r'module_action_control\(\s*"\w+",\s*"([a-z-]+)"', source))
+    names |= set(re.findall(r'\baction="([a-z-]+)"', source))
+
+    assert names == WRITE_ACTIONS | PAGE_DEVICE_ACTIONS | UNGATED_ACTIONS
+    assert not (WRITE_ACTIONS & PAGE_DEVICE_ACTIONS or (WRITE_ACTIONS | PAGE_DEVICE_ACTIONS) & UNGATED_ACTIONS)
+
+
+@pytest.mark.parametrize("flag", sorted(FLAG_WITHHOLDS))
+def test_a_flagged_row_renders_none_of_the_write_controls_its_flag_withholds(flag):
+    """The rows offer every write control without a flag; the flag withholds its class and keeps the others."""
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    records = _flag_guard_records()
+    offered = _rendered_actions(records)
+    flagged = _rendered_actions(records, **{flag: True})
+
+    expected = WRITE_ACTIONS | PAGE_DEVICE_ACTIONS
+    if not netbox_relocates_module_subtree():
+        # Move is offered only where NetBox relocates the module subtree.
+        expected -= {"move"}
+    assert expected <= offered
+    assert not flagged & FLAG_WITHHOLDS[flag]
+    assert flagged == offered - FLAG_WITHHOLDS[flag]

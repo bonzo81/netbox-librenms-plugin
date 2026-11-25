@@ -2173,13 +2173,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # _build_row already ran the same pure _suggest_bay_mapping(item, all_bays,
         # scope_preserved=False) and only omits model_suggestion when it returned nothing, so
         # there is no second suggestion to recover here.
-        # An unattributed row can belong to another member, whose device type the fix would not change.
-        if (
-            row.get("status") == "No Bay"
-            and "model_suggestion" not in row
-            and not row["member_withheld"]
-            and not row["member_unattributed"]
-        ):
+        # The table withholds the fix on an unattributed row (see withheld_actions).
+        if row.get("status") == "No Bay" and "model_suggestion" not in row and not row["member_withheld"]:
             device_type = getattr(selected_device, "device_type", None)
             if device_type:
                 row["device_type_incomplete"] = True
@@ -2343,8 +2338,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # If the installed module's type has no bay templates but has LibreNMS
         # sub-items, flag the parent row so the table can render a "Fix Model"
         # badge linking directly to the module type for quick editing.
-        # The fix changes the occupant's type, so a row that no member reported, or such a child, offers none.
-        if parent_installed_module and not child_bays and not row["member_unattributed"]:
+        # A child that no member reported gives no suggestion; the table withholds the fix on such a parent.
+        if parent_installed_module and not child_bays:
             first_no_bay_child_idx = None
             for i in range(parent_row_idx + 1, len(table_data)):
                 if (
