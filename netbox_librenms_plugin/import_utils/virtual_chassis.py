@@ -207,6 +207,12 @@ def _is_junos_vc_root(row: dict) -> bool:
     )
 
 
+def junos_fpc_slot_match(text: str):
+    """Return the match of "FPC <n>" at the start of trimmed *text*, then a space or the end, or None."""
+    # The appended space lets the shared pattern match "FPC <n>" at the end of the text.
+    return JUNOS_FPC_MEMBER_DESCR_RE.match(f"{text} ")
+
+
 def _is_junos_fpc(row: dict) -> bool:
     """Return whether *row* is a Junos FPC container row; an "FPC <n> ..." row names FPC n instead."""
     # The anonymizer reads the trimmed description, so live inventory and replay agree.
@@ -214,7 +220,8 @@ def _is_junos_fpc(row: dict) -> bool:
     return (
         row.get("entPhysicalClass") == "container"
         and descr.startswith(JUNOS_FPC_DESCR_PREFIX)
-        and not JUNOS_FPC_MEMBER_DESCR_RE.match(descr)
+        # "FPC <n>" alone is the FPC itself; more text after the slot names FPC n.
+        and not ((named := junos_fpc_slot_match(descr)) and descr[named.end() :].strip())
     )
 
 
@@ -369,7 +376,7 @@ def extract_vc_stack(rows: list, contexts) -> VcStack:
 def _junos_fpc_named_slot(row: dict) -> int | None:
     """Return the FPC slot that a Junos row's description names as "FPC <n> ...", or None."""
     # The anonymizer keeps this prefix only in trimmed descriptions, so a name never links.
-    named = JUNOS_FPC_MEMBER_DESCR_RE.match(librenms_text(row.get("entPhysicalDescr")))
+    named = junos_fpc_slot_match(librenms_text(row.get("entPhysicalDescr")))
     return int(named.group("member")) if named else None
 
 

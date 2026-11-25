@@ -939,6 +939,8 @@ def test_entity_descr_keeps_a_terminal_locator_after_the_junos_markers():
         "inventory": [
             {"entPhysicalIndex": 4, "entPhysicalDescr": "FPC 1 Port 1/2/3"},
             {"entPhysicalIndex": 5, "entPhysicalDescr": "FPC slot 2/1"},
+            {"entPhysicalIndex": 6, "entPhysicalDescr": "FPC 2 "},
+            {"entPhysicalIndex": 7, "entPhysicalDescr": "FPC 3"},
         ],
     }
 
@@ -947,6 +949,8 @@ def test_entity_descr_keeps_a_terminal_locator_after_the_junos_markers():
     token = "entity-[0-9a-f]{6}"
     assert re.fullmatch(f"FPC 1 {token} 1/2/3", rows[0]["entPhysicalDescr"])
     assert re.fullmatch(f"FPC {token} 2/1", rows[1]["entPhysicalDescr"])
+    # A description that is only the FPC slot keeps it, as module sync reads it.
+    assert [row["entPhysicalDescr"] for row in rows[2:]] == ["FPC 2", "FPC 3"]
     assert _response(anonymize_recording(first), key)["inventory"] == rows
     assert find_pii(first) == []
 

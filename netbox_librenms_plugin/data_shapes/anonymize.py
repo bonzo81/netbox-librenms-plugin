@@ -23,7 +23,6 @@ from netbox_librenms_plugin.constants import (
     GENERIC_CONTAINER_MODELS,
     JUNOS_FPC_DESCR_PREFIX,
     JUNOS_FPC_LOCATOR_RE,
-    JUNOS_FPC_MEMBER_DESCR_RE,
     JUNOS_PIC_LOCATOR_RE,
     JUNOS_PORT_LOCATOR_RE,
     JUNOS_VC_ROOT_DESCR_MARKER,
@@ -39,6 +38,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
     name_matches_lag_pattern,
 )
 from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
+from netbox_librenms_plugin.import_utils.virtual_chassis import junos_fpc_slot_match
 from netbox_librenms_plugin.serial_identity import SerialContext, anonymize_input, plain_context
 
 # Preserve structural fields. Model SKUs use shared tokens.
@@ -548,7 +548,7 @@ def _entity_token(text, rules):
 
 def _anon_junos_vc_descr(normalized, rules):
     """Keep the Junos Virtual Chassis markers of a description, or return None when it has none."""
-    member = JUNOS_FPC_MEMBER_DESCR_RE.match(normalized)
+    member = junos_fpc_slot_match(normalized)
     if member:
         return f"{member.group(0)}{_entity_token(normalized[member.end() :], rules)}".strip()
     if normalized.startswith(JUNOS_FPC_DESCR_PREFIX):
