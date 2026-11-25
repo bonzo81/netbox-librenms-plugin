@@ -644,6 +644,35 @@ class TestStackImportCreatesTheVirtualChassis:
         assert len(result["warnings"]) == 2
         assert not VirtualChassis.objects.filter(domain__startswith="librenms-default-43").exists()
 
+    def test_short_member_serials_under_a_serial_pattern_get_distinct_position_names(self, live_librenms):
+        """A serial without an identity names no member, so preview and import give it the position name."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+        settings_row.vc_member_name_pattern = "-{serial}"
+        settings_row.save()
+        members = [
+            _chassis(100, "MASTER123", position=1),
+            _chassis(200, "12", position=2),
+            _chassis(300, "34", position=3),
+        ]
+        row = _libre_device(461, "stack-short-461", serial="MASTER123")
+        _register_stack(live_librenms, 461, row, members)
+        preview = validate_device_for_import(row, api=live_librenms.api, server_key="default", force_vc_refresh=True)
+
+        result = self._import(live_librenms, {461: members}, tag="stack-short")
+
+        assert result["failed"] == []
+        assert result["virtual_chassis_created"] == 1
+        chassis = VirtualChassis.objects.get(domain="librenms-default-461")
+        created = dict(Device.objects.filter(virtual_chassis=chassis).values_list("vc_position", "name"))
+        assert created == {1: "stack-short-461-MASTER123", 2: "stack-short-461-M2", 3: "stack-short-461-M3"}
+        previewed = {member["position"]: member["suggested_name"] for member in preview["virtual_chassis"]["members"]}
+        assert previewed == created
+
     def test_the_job_logger_reports_the_created_chassis(self, live_librenms, rq_job, caplog):
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("stack-create-job"))
         members = [_chassis(100, "SN-JOB-A", position=1), _chassis(200, "SN-JOB-B", position=2)]

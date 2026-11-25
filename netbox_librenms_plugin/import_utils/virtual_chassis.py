@@ -619,11 +619,14 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, s
         return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None) or type(e).__name__)
 
 
+_POSITION_NAME_PATTERN = "-M{position}"
+
+
 def _load_vc_member_name_pattern() -> str:
     """Load the VC member name pattern from settings, with fallback to default."""
     from ..models import LibreNMSSettings
 
-    default = "-M{position}"
+    default = _POSITION_NAME_PATTERN
     try:
         settings = LibreNMSSettings.objects.order_by("pk").first()
         if not settings:
@@ -678,7 +681,11 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
 
 def _member_name(master_name: str, position: int, serial, pattern: str, context) -> str:
     """Return the name of the stack member; the import preview and member creation both name members here."""
-    return _generate_vc_member_name(master_name, position, serial=naming_token(serial, context), pattern=pattern)
+    token = naming_token(serial, context)
+    if not token and _vc_name_uses_serial(pattern):
+        # A serial without an identity gives no name text, so the position keeps the member names apart.
+        pattern = _POSITION_NAME_PATTERN
+    return _generate_vc_member_name(master_name, position, serial=token, pattern=pattern)
 
 
 def _vc_name_fields(pattern):
