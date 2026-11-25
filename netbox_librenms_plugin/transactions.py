@@ -349,6 +349,7 @@ def _keep_events(block_events):
     For an object that the enclosing queue already holds, the newer event replaces the older one. It keeps the
     prechange snapshot of the older event, and the older event type unless it is a delete. When both events list
     their ObjectChange ids (NetBox 4.7.5 and later), it keeps the older ids, then the newer ids in save order.
+    When NetBox serializes the payload from a separate source (EventContext), it keeps the older public object.
     """
     if not block_events:
         return
@@ -361,6 +362,9 @@ def _keep_events(block_events):
             if "object_change_ids" in older and "object_change_ids" in event:
                 kept = list(older["object_change_ids"])
                 event["object_change_ids"] = kept + [i for i in event["object_change_ids"] if i not in kept]
+            if hasattr(older, "refresh_serialization_source"):
+                # The newer event keeps its own payload source; NetBox keeps the older public object.
+                event["object"] = older["object"]
         queue[key] = event
 
 

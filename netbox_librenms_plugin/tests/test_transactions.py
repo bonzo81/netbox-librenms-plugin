@@ -467,7 +467,7 @@ def test_two_row_savepoints_of_one_object_keep_the_change_ids_of_each_kept_block
         assert ("object_change_ids" in event) is (expected is not None)
 
 
-def _run_site_steps(name, steps, *, in_blocks):
+def _run_site_steps(name, steps, *, in_blocks, separate=False):
     """Run *steps* on one Site in one request, each in its own block or all in NetBox's queue; return its one event."""
     from dcim.models import Site
 
@@ -477,14 +477,20 @@ def _run_site_steps(name, steps, *, in_blocks):
     if steps[0] != "create":
         state["site"] = _site(name)
 
+    written = []
+
     def run(step, number):
         if step == "create":
             state["site"] = Site.objects.create(pk=state.get("pk"), name=name, slug=name, description=f"step {number}")
-        elif step == "update":
-            _write_site(state["site"], f"step {number}")
         else:
-            state["pk"] = state["site"].pk
-            state["site"].delete()
+            if separate:
+                state["site"] = Site.objects.get(pk=state["site"].pk)
+            if step == "update":
+                _write_site(state["site"], f"step {number}")
+            else:
+                state["pk"] = state["site"].pk
+                state["site"].delete()
+        written.append(state["site"])
 
     with _netbox_request_context():
         for number, step in enumerate(steps):
@@ -494,13 +500,16 @@ def _run_site_steps(name, steps, *, in_blocks):
             else:
                 run(step, number)
         events = list(_queued_events().values())
-    assert len(events) == 1
-    event = events[0]
+        assert len(events) == 1
+        event = events[0]
+        payload = event["data"]
     prechange, postchange = event["snapshots"]["prechange"], event["snapshots"]["postchange"]
     return (
         event["event_type"],
         prechange and prechange["description"],
         postchange and postchange["description"],
+        payload["description"],
+        [index for index, site in enumerate(written) if site is event["object"]],
     )
 
 
@@ -509,10 +518,12 @@ def _run_site_steps(name, steps, *, in_blocks):
     "steps",
     [("create", "update"), ("create", "delete"), ("update", "update"), ("update", "delete"), ("delete", "create")],
 )
-def test_two_blocks_that_write_one_object_coalesce_its_events_as_netbox_does_in_one_queue(steps):
-    netbox = _run_site_steps(f"netbox-{'-'.join(steps)}", steps, in_blocks=False)
+@pytest.mark.parametrize("separate", [False, True], ids=["one-instance", "separate-instances"])
+def test_two_blocks_that_write_one_object_coalesce_its_events_as_netbox_does_in_one_queue(steps, separate):
+    name = f"{'-'.join(steps)}-{int(separate)}"
+    netbox = _run_site_steps(f"netbox-{name}", steps, in_blocks=False, separate=separate)
 
-    assert _run_site_steps(f"blocks-{'-'.join(steps)}", steps, in_blocks=True) == netbox
+    assert _run_site_steps(f"blocks-{name}", steps, in_blocks=True, separate=separate) == netbox
 
 
 @pytest.mark.django_db
