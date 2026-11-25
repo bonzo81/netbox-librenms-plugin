@@ -513,6 +513,26 @@ class TestRecognizedStack:
             # The PSU's fan crosses the PSU's link on its way to the root's serial.
             assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize("bay", [True, False], ids=["named-bay", "no-bay"])
+    def test_a_container_that_names_an_fpc_is_no_fpc(self, bay):
+        """ "FPC 1 Power Supply Bay" names FPC 1; it is no FPC row, so its PSU follows FPC 1 and not the root's serial."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-fpc-bay-{bay}")
+        inventory = junos_vc_inventory()
+        if bay:
+            inventory += [
+                _row(140, "container", 1, position=5, entPhysicalDescr="FPC 1 Power Supply Bay"),
+                _row(141, "powerSupply", 140, entPhysicalDescr="Power Supply 1", entPhysicalSerialNum="PSU141X"),
+            ]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert (owner[120], owner[121], owner[4]) == ((master, "serial"), (member, "serial"), (member, "junos-member"))
+        if bay:
+            assert (owner[140], owner[141]) == ((member, "junos-member"), (member, "parent-context"))
+
     @pytest.mark.parametrize("fpc_reported", [False, True], ids=["no-fpc-rows", "fpc-1-reported"])
     def test_a_junos_row_that_names_an_fpc_no_row_reports_is_unattributed(self, fpc_reported):
         """The root reports the master's serial, but "FPC 1 Power Supply 0" names FPC 1, which no row reports."""

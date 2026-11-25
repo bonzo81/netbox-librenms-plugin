@@ -208,12 +208,13 @@ def _is_junos_vc_root(row: dict) -> bool:
 
 
 def _is_junos_fpc(row: dict) -> bool:
-    """Return whether *row* is a Junos FPC container row."""
+    """Return whether *row* is a Junos FPC container row; an "FPC <n> ..." row names FPC n instead."""
     descr = row.get("entPhysicalDescr")
     return (
         row.get("entPhysicalClass") == "container"
         and isinstance(descr, str)
         and descr.startswith(JUNOS_FPC_DESCR_PREFIX)
+        and not JUNOS_FPC_MEMBER_DESCR_RE.match(descr)
     )
 
 
