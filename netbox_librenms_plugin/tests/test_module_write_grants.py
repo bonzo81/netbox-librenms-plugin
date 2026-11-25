@@ -2275,6 +2275,31 @@ def test_a_stack_row_that_no_member_reported_offers_no_module_type_fix(ui, vc_gr
     assert (f'<option value="{page.pk}" selected>' in child_row) is (not withheld)
 
 
+@pytest.mark.parametrize(("daughter_serial", "fix"), [("12", False), ("SN-DAUGHTER", True)], ids=["short", "identity"])
+def test_an_attributed_card_takes_no_bay_suggestion_from_a_daughter_no_member_reported(
+    ui, vc_grants, daughter_serial, fix
+):
+    """The card belongs to the page device, but its only daughter reports "12", so Fix Model has no bay to suggest."""
+    child = {
+        "entPhysicalIndex": CARD + 1,
+        "entPhysicalContainedIn": CARD,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Daughter Card",
+        "entPhysicalDescr": "Daughter Card",
+        "entPhysicalModelName": "GR-DAUGHTER",
+        "entPhysicalSerialNum": daughter_serial,
+    }
+    page, _member = vc_grants(extra_rows=[child])
+    install_module(page, "Card Slot", "GR-CARD", "SN-CARD")
+    content = render(ui, page)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    (child_row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 1}".*?</tr>', content, flags=re.S)
+
+    assert "data-member-unattributed" not in row
+    assert ("data-member-unattributed" in child_row) is (not fix)
+    assert ("Fix Model" in row) is fix
+
+
 @pytest.mark.parametrize(
     ("card", "withheld"),
     [({"entPhysicalContainedIn": 0}, True), ({"entPhysicalSerialNum": ""}, False)],
