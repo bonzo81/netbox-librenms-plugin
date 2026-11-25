@@ -216,8 +216,21 @@ def _withdraw_serial_writes(row) -> None:
             row[action] = False
 
 
+UNLINKED_OPTIC_REFUSAL = (
+    "This serial has no hardware identity, so the plugin cannot tell if another row already shows this optic."
+)
+
+
+def _unlinked_optic_refusal(item, serial, context) -> str:
+    """Return why the table offers no install of a transceiver row that no entity links to, or ""."""
+    # The merge links an optic only by index or ifIndex, and a serial without an identity can be another row's text.
+    if item.get("_from_transceiver_api") and serial and not is_identity(serial, context):
+        return UNLINKED_OPTIC_REFUSAL
+    return ""
+
+
 def _install_refused(row) -> bool:
-    """Return whether an install of the row refuses: its serial does not fit, or another Module holds it."""
+    """Return whether an install of the row refuses: its serial does not fit or names no part, or a Module holds it."""
     fit_refused = bool(row.get("serial_fit_refusal")) and not row.get("installed_module_id")
     return fit_refused or bool(row.get("install_withheld"))
 
@@ -3915,7 +3928,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             from dcim.models import Module
 
             # An install creates the module with the LibreNMS serial, and the writer refuses one that does not fit.
-            row["serial_fit_refusal"] = stored_form_refusal(serial, Module)
+            row["serial_fit_refusal"] = stored_form_refusal(serial, Module) or _unlinked_optic_refusal(
+                item, serial, serial_context
+            )
             if row["serial_fit_refusal"]:
                 row["can_install"] = False
 

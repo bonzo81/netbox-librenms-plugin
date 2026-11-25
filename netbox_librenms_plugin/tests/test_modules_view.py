@@ -1337,6 +1337,74 @@ class TestMergeTransceiverDataPortIdentity:
             for item in inventory
         ) == [(10, 1, False), (20, 2, True)]
 
+    @pytest.mark.parametrize(
+        ("optic_serial", "install_offered"),
+        [("AB-12", False), ("OPTIC12345", True), ("", True)],
+        ids=["short-serial", "identity-serial", "blank-serial"],
+    )
+    def test_the_modules_tab_offers_no_install_of_an_unlinked_optic_with_a_short_serial(
+        self, client, settings, recording_server, optic_serial, install_offered
+    ):
+        """The entity reports the optic's short serial text, but nothing links the two, so Install is withheld."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_librenms_servers,
+            make_device_with_module_bays,
+            make_module_type_with_bays,
+            make_superuser,
+            map_device_to_librenms,
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        librenms_id, server_key, optic = 4300, "optic-tab", 99
+        device = make_device_with_module_bays(f"optic-tab-{optic_serial or 'blank'}", [f"Transceiver {optic}"])
+        make_module_type_with_bays("SFP-10G-SR")
+        entity = {
+            "entPhysicalIndex": 10,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "port",
+            "entPhysicalName": "Port 1",
+            "entPhysicalModelName": "SFP-10G-SR",
+            "entPhysicalSerialNum": "AB-12",
+        }
+        recording = {
+            "device_id": librenms_id,
+            "responses": {
+                f"GET /api/v0/inventory/{librenms_id}/all": {"status": "ok", "inventory": [entity]},
+                f"GET /api/v0/devices/{librenms_id}/ports": {"status": "ok", "ports": []},
+                f"GET /api/v0/devices/{librenms_id}/transceivers": {
+                    "status": "ok",
+                    "transceivers": [{"entity_physical_index": optic, "model": "SFP-10G-SR", "serial": optic_serial}],
+                },
+            },
+        }
+        server, _api = recording_server(recording, server_key=server_key)
+        configure_librenms_servers(
+            settings, {server_key: {"librenms_url": server.url, "api_token": "optic-token", "verify_ssl": False}}
+        )
+        map_device_to_librenms(device, librenms_id, server_key=server_key)
+        client.force_login(make_superuser("optic-tab-ui"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[device.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        installs = [
+            form
+            for form in module_tab_forms(content).forms
+            if "install-module" in form["action"] and form["fields"].get("ent_index") == str(optic)
+        ]
+        (row,) = re.findall(rf'<tr[^>]*data-ent-index="{optic}".*?</tr>', content, flags=re.S)
+        (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{optic}"[^>]*>', row)
+        assert len(installs) == int(install_offered)
+        assert ("data-serial-fit-refusal" in row) is (not install_offered)
+        assert (" disabled" in checkbox) is (not install_offered)
+
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
     ):
