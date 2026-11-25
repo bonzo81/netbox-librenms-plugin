@@ -1053,7 +1053,9 @@ class TestAssignVCSerialView:
         stored_refusal = (
             f"Serial conflict: 'LATE-NEW' is already assigned to device '{outsider.name}' (ID: {outsider.pk})"
         )
-        assert f"{second.name}: {stored_refusal}" in errors, errors
+        # The inclusive read of the first member finds the late holder and the second member: a stored conflict.
+        first_refusal = "Serial conflict: 'LATE-NEW' is already assigned to more than one device."
+        assert errors == [f"{first.name}: {first_refusal}", f"{second.name}: {stored_refusal}"], errors
         assert not any("member 'vc-serial-late-outsider'" in text for text in errors), errors
 
     def test_a_late_holder_on_a_chassis_with_an_outside_master_gives_the_unavailable_reason(
