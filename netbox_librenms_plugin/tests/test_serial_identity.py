@@ -209,7 +209,15 @@ class TestKeyAdmission:
     )
     def test_a_value_that_is_not_text_or_a_number_has_no_identity(self, value):
         """A JSON boolean, list or object has text that a stored serial can equal, but it names no hardware."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import (
+            Comparison,
+            ResolutionKind,
+            SerialRules,
+            compare,
+            is_identity,
+            resolve_device,
+        )
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only()
         stored = str(value)
@@ -437,7 +445,14 @@ class TestLookup:
 
     @pytest.mark.parametrize("value", [True, ["ABC123"], {"serial": "ABC123"}], ids=["boolean", "list", "object"])
     def test_batches_do_not_match_the_string_representation_of_malformed_serials(self, value):
-        from netbox_librenms_plugin.serial_identity import SerialRules, resolve_devices_write, resolve_modules
+        from netbox_librenms_plugin.serial_identity import (
+            ResolutionKind,
+            SerialRules,
+            resolve_devices,
+            resolve_devices_write,
+            resolve_modules,
+        )
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
 
         _rules_only()
         text = str(value)
