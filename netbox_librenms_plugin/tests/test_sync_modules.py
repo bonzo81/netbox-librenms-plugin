@@ -4035,14 +4035,18 @@ def _responses_under_module_owner_locks(source):
         if not atomic:
             continue
         calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
-        locks = [(call.lineno, call.col_offset) for call in calls if ast.unparse(call.func) == "lock_module_write"]
+        # A call runs after its arguments, so its end position orders it after a lock in an argument.
+        locks = [
+            (call.end_lineno, call.end_col_offset) for call in calls if ast.unparse(call.func) == "lock_module_write"
+        ]
         if not locks:
             continue
-        # Source order only: a response before the first lock is safe; a loop that locks first is not seen.
+        # A response that ends before the first lock is safe; a loop that locks first is not seen.
         violations.update(
             call.lineno
             for call in calls
-            if ast.unparse(call.func) == "_modules_action_response" and (call.lineno, call.col_offset) > min(locks)
+            if ast.unparse(call.func) == "_modules_action_response"
+            and (call.end_lineno, call.end_col_offset) > min(locks)
         )
     return violations
 
@@ -4091,6 +4095,19 @@ def test_the_owner_lock_scan_allows_an_early_refusal_before_the_lock():
     )
 
     assert _responses_under_module_owner_locks(source) == {7}
+
+
+def test_the_owner_lock_scan_finds_a_lock_in_a_response_argument():
+    """Python runs the arguments before the call, so the response renders under the lock it takes."""
+    source = (
+        "def _install(self, request, page_device):\n"
+        "    with transaction.atomic():\n"
+        "        if not page_device:\n"
+        "            return _modules_action_response(request, page_device)\n"
+        "        return _modules_action_response(request, lock_module_write(observed).devices[page_device.pk])\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == {5}
 
 
 @pytest.mark.parametrize("decorator", ["atomic_with_events()", "transaction.atomic"])
