@@ -346,7 +346,12 @@ class LibreNMSModuleTable(tables.Table):
                 value or "-",
             )
         if refusal := record.get("serial_fit_refusal"):
-            html = format_html('{} <span class="text-muted small" data-serial-fit-refusal>{}</span>', html, refusal)
+            # The minimum width keeps a narrow column from wrapping the reason one word per line.
+            html = format_html(
+                '{} <span class="d-inline-block text-muted small" style="min-width: 10rem" data-serial-fit-refusal>{}</span>',
+                html,
+                refusal,
+            )
         return html
 
     def render_description(self, value, record):
@@ -734,7 +739,8 @@ class LibreNMSModuleTable(tables.Table):
         if record.get("member_unattributed"):
             buttons.append(
                 format_html(
-                    '<span class="text-muted small" data-member-unattributed>{}</span>', UNATTRIBUTED_ROW_REASON
+                    '<span class="d-inline-block text-muted small" style="min-width: 12rem" data-member-unattributed>{}</span>',
+                    UNATTRIBUTED_ROW_REASON,
                 )
             )
             record = {**record, **UNATTRIBUTED_ROW_WITHHELD_WRITES}
