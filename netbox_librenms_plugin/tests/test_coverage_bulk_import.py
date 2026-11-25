@@ -1432,3 +1432,46 @@ def test_a_selected_role_keeps_a_stack_member_issue_whose_serial_names_a_role(cl
     issue = f"Stack member 2: Cannot check VC member serial 'ROLE-123': {UNAVAILABLE_MASTER_LINK}"
     assert entry["validation"]["issues"] == [issue]
     assert entry["validation"]["can_import"] is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("numbered", [True, False], ids=["numbered", "unnumbered"])
+def test_the_bulk_confirmation_quotes_an_unnamed_member_serial_with_an_unpaired_surrogate(
+    client, live_librenms, numbered
+):
+    """A serial without an identity gives no ``{serial}`` name; the refusal quotes it with a replacement character."""
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+    settings_row.vc_member_name_pattern = "-{serial}"
+    settings_row.save()
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 394 if numbered else 395
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-unnamed-{numbered}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"] if numbered else "Unmatched stack hardware",
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], "A\ud800"))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-unnamed-user-{numbered}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    reason = "its serial 'A�' has no identity, so the member name pattern '-{serial}' gives it no name."
+    label = "Stack member 2" if numbered else "Stack member with serial 'A�'"
+    assert f"{label}: {reason}" in entry["validation"]["issues"]
+    assert escape(f"{label}: {reason}") in response.content.decode()

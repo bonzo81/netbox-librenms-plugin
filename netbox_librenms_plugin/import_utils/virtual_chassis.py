@@ -890,8 +890,7 @@ def unnamed_members(members_info, pattern, context) -> list[tuple]:
 
 def unnamed_member_reason(serial, pattern) -> str:
     """Return why *pattern* gives a stack member with *serial* no name."""
-    reported = display(serial)
-    reason = f"its serial '{reported}' has no identity" if reported else "it reports no serial"
+    reason = f"its serial '{page_text(serial)}' has no identity" if display(serial) else "it reports no serial"
     return f"{reason}, so the member name pattern '{pattern}' gives it no name."
 
 
