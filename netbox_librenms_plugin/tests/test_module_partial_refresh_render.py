@@ -201,7 +201,12 @@ class TestSerialRuleEditStalesTheSnapshot:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.sync_cache import cached_module_inventory, sync_snapshot_key
+        from netbox_librenms_plugin.sync_cache import (
+            SyncCacheConsistency,
+            SyncTab,
+            cached_module_inventory,
+            sync_snapshot_key,
+        )
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -241,6 +246,7 @@ class TestSerialRuleEditStalesTheSnapshot:
             assert context["table"] is None
         finally:
             cache.delete(snapshot_key)
+            cache.delete(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
 
     def test_masterless_chassis_members_read_the_snapshot_that_one_refresh_stamped(self, librenms_server):
         """Without a master each member has its own context, so the shared snapshot uses its owner's context."""
