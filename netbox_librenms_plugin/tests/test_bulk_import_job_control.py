@@ -690,6 +690,9 @@ class TestStackImportCreatesTheVirtualChassis:
         assert [issue.partition(":")[0] for issue in preview["issues"] if issue.startswith("Stack member ")] == [
             f"Stack member {position}" for position in refused_positions
         ]
+        previewed = {member["position"]: member["suggested_name"] for member in preview["virtual_chassis"]["members"]}
+        # The preview suggests no name for a member that the pattern gives none.
+        assert [position for position, name in previewed.items() if not name] == refused_positions
         if refused_positions:
             assert [entry["device_id"] for entry in result["failed"]] == [461]
             assert all(f"Stack member {position}" in result["failed"][0]["error"] for position in refused_positions)
@@ -700,7 +703,6 @@ class TestStackImportCreatesTheVirtualChassis:
         assert result["virtual_chassis_created"] == 1
         chassis = VirtualChassis.objects.get(domain="librenms-default-461")
         created = dict(Device.objects.filter(virtual_chassis=chassis).values_list("vc_position", "name"))
-        previewed = {member["position"]: member["suggested_name"] for member in preview["virtual_chassis"]["members"]}
         assert sorted(created) == [1, 2, 3]
         assert previewed == created
 

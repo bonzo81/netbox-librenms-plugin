@@ -798,9 +798,15 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str, *, serial_
     vc_pattern = _load_vc_member_name_pattern()
     context = serial_rules.for_device_type(device_type) if _vc_name_uses_serial(vc_pattern) else plain_context()
     members = vc_data.get("members", [])
+    # A member that the pattern gives no name gets no suggestion; validation reports why.
+    unnamed = {id(member) for member, _position in unnamed_members(members, vc_pattern, context)}
     for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
         member["position"] = position
-        member["suggested_name"] = _member_name(master_name, position, member.get("serial"), vc_pattern, context)
+        member["suggested_name"] = (
+            ""
+            if id(member) in unnamed
+            else _member_name(master_name, position, member.get("serial"), vc_pattern, context)
+        )
 
     return vc_data
 
