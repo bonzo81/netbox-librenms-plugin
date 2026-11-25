@@ -126,6 +126,8 @@
                           <i class="mdi mdi-sync"></i>
                         </button>
                       </form>
+                    {% elif validation.member_name_refusal %}
+                      <span class="text-muted small d-block" data-member-name-refusal>{{ validation.member_name_refusal }}</span>
                     {% endif %}
                   {% else %}
                     <span class="text-muted">New device</span>

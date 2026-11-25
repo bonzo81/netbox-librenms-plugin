@@ -1222,6 +1222,39 @@ def test_vc_name_sync_uses_the_serial_rule_only_for_serial_suffixes(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(("serial", "expected"), [("12", None), ("ABC123", "stack-ABC123")], ids=["short", "identity"])
+def test_import_details_show_why_a_linked_member_gets_no_name(logged_in_client, librenms_server, serial, expected):
+    """The import details of a linked member with serial 12 show the refusal that the Sync page shows."""
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    chassis, (master, member) = make_virtual_chassis_members(f"import-no-token-{serial}")
+    chassis.master = master
+    chassis.save(update_fields=["master"])
+    member.name = "member-<old>-name"
+    member.serial = serial
+    member.save(update_fields=["name", "serial"])
+    seed_mapping(member, SERVER_KEY, own=6653)
+    settings_row = LibreNMSSettings.objects.first() or LibreNMSSettings()
+    settings_row.vc_member_name_pattern = "-{serial}"
+    settings_row.save()
+    _register_device(librenms_server, 6653, "stack")
+    librenms_server.register("/api/v0/resources/locations", {"status": "ok", "locations": []})
+
+    response = logged_in_client.get(
+        reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 6653}),
+        {"server_key": SERVER_KEY},
+    )
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    refusals = re.findall(r"<span[^>]*data-member-name-refusal[^>]*>(.*?)</span>", content, flags=re.S)
+    assert len(refusals) == int(expected is None)
+    assert ('value="sync_name"' in content) is (expected is not None)
+    for refusal in refusals:
+        assert f"&#x27;{serial}&#x27;" in refusal
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("serial", "expected"), [("12", None), ("ABC123", "stack-ABC123")], ids=["short", "identity"])
 def test_vc_name_sync_offers_no_name_for_a_member_serial_without_an_identity(
     logged_in_client, librenms_server, serial, expected
 ):

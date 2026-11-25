@@ -684,6 +684,7 @@ class TestValidateDeviceForImport:
             "name_matches",
             "name_sync_available",
             "suggested_name",
+            "member_name_refusal",
             "device_type_mismatch",
             "naming_criteria",
             "virtual_chassis",

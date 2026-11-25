@@ -68,6 +68,7 @@ from .virtual_chassis import (
     _existing_member_name,
     _load_vc_member_name_pattern,
     empty_virtual_chassis_data,
+    existing_member_name_refusal,
     get_virtual_chassis_data,
     identify_vc_master,
     member_serial_unavailable_message,
@@ -788,6 +789,7 @@ def validate_device_for_import(  # noqa: C901
                 'name_matches': bool,  # Existing object's name matches the resolved name
                 'name_sync_available': bool,  # Existing object's name differs (sync offered)
                 'suggested_name': str or None,  # Name to suggest when name_sync_available
+                'member_name_refusal': str,  # Why a linked stack member gets no name, or ""
                 'device_type_mismatch': bool,  # Existing device's type differs from LibreNMS (devices only)
                 'naming_criteria': dict or None,  # How resolved_name was derived (use_sysname/strip_domain)
                 'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
@@ -881,6 +883,7 @@ def validate_device_for_import(  # noqa: C901
         "name_matches": False,  # True when existing device name matches LibreNMS sysName
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True
+        "member_name_refusal": "",  # Why the member name pattern gives a linked stack member no name
         "device_type_mismatch": False,  # True when existing device's type differs from LibreNMS
         "issues": [],
         "warnings": [],
@@ -1075,6 +1078,8 @@ def validate_device_for_import(  # noqa: C901
                     elif vc_expected_name:
                         result["name_sync_available"] = True
                         result["suggested_name"] = vc_expected_name
+                    else:
+                        result["member_name_refusal"] = existing_member_name_refusal(existing_device, serial_rules)
                 elif hostname and existing_device.name == hostname:
                     result["name_matches"] = True
                 elif hostname and existing_device.name != hostname:
