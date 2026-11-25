@@ -384,11 +384,14 @@ class _StackRows(NamedTuple):
     fpc_slots: dict
 
     def fpc_named_by(self, row: dict):
-        """Return the index of the FPC row that a Junos "FPC <n> ..." row directly under the root names."""
+        """Return ``(names_a_slot, FPC index)`` of a Junos "FPC <n> ..." row directly under the root.
+
+        The index is None unless exactly one FPC reports slot n.
+        """
         if row.get("entPhysicalContainedIn") != self.root_index or row.get("entPhysicalIndex") in self.positions:
-            return None
+            return False, None
         slot = _junos_fpc_named_slot(row)
-        return self.fpc_slots.get(slot) if slot is not None else None
+        return slot is not None, self.fpc_slots.get(slot)
 
 
 def _stack_rows(rows, contexts) -> _StackRows:
@@ -547,10 +550,11 @@ class _Attribution:
                 if member is None:
                     return None, UNATTRIBUTED_SOURCE
                 return member, "position" if current is row else "parent-context"
-            # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows it.
-            fpc = self.by_index.get(self.stack.fpc_named_by(current))
-            if fpc is not None:
-                member = self._member_row_owner(fpc)
+            # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows only that FPC.
+            names_a_slot, fpc_index = self.stack.fpc_named_by(current)
+            if names_a_slot and _is_junos_vc_root(self.by_index.get(self.stack.root_index, {})):
+                fpc = self.by_index.get(fpc_index)
+                member = self._member_row_owner(fpc) if fpc is not None else None
                 if member is None:
                     return None, UNATTRIBUTED_SOURCE
                 return member, "junos-member" if current is row else "parent-context"

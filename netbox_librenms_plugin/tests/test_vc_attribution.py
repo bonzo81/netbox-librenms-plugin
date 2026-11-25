@@ -628,14 +628,14 @@ class TestRecognizedStack:
             _row(120, "container", 1, position=1, entPhysicalSerialNum="SN-AAA", **fpc),
             _row(121, "container", 1, position=1, entPhysicalSerialNum="SN-BBB", **fpc),
             _row(1210, "module", 121, position=2, entPhysicalModelName="PIC"),
-            # "FPC 1" names a slot that two FPCs share, so it names no member.
+            # "FPC 1" names a slot that two FPCs share, so no FPC gives it a member.
             _row(4, "powerSupply", 1, position=2, entPhysicalDescr="FPC 1 Power Supply 0", entPhysicalModelName="PSU"),
         ]
 
         owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(second))
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
-        assert owner[4] == (None, "default")
+        assert owner[4] == (None, UNATTRIBUTED_SOURCE)
         if stored[0]:
             assert (owner[120], owner[121], owner[1210]) == (
                 (first, "serial"),
