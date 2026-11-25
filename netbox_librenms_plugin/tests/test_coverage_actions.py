@@ -3254,29 +3254,23 @@ def _seed_decorated_serial_rule():
     )
 
 
-@contextmanager
-def _action_branch_queries(view_class):
-    """Yield a list that receives the SQL run after the first validation returns and before any later validation."""
+def _serial_rule_reads(view_class, send):
+    """Return the response of *send()*, its serial-rule reads in the whole request, and its validation count."""
     from unittest.mock import patch
 
     validate = view_class.get_validated_device_with_selections
-    marks = []
+    validations = []
 
-    def validate_and_mark(self, *args, **kwargs):
-        marks.append(len(connection.queries_log))
-        result = validate(self, *args, **kwargs)
-        marks.append(len(connection.queries_log))
-        return result
+    def counted(self, *args, **kwargs):
+        validations.append(1)
+        return validate(self, *args, **kwargs)
 
-    branch = []
     with (
-        patch.object(view_class, "get_validated_device_with_selections", validate_and_mark),
+        patch.object(view_class, "get_validated_device_with_selections", counted),
         CaptureQueriesContext(connection) as queries,
     ):
-        yield branch
-    assert marks, "the request ran no validation"
-    end = marks[2] if len(marks) > 2 else queries.final_queries
-    branch += [query["sql"] for query in connection.queries[marks[1] : end]]
+        response = send()
+    return response, len(_serial_rule_queries(query["sql"] for query in queries.captured_queries)), len(validations)
 
 
 def _serial_rule_queries(statements):
@@ -4455,17 +4449,25 @@ class TestDeviceConflictActionBranches:
         assert details.context["validation"]["existing_device"] == target
         assert b'name="action" value="link"' in details.content
 
-        with _action_branch_queries(DeviceConflictActionView) as branch:
-            response = client.post(
+        def link(existing):
+            return client.post(
                 reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
-                {**server, "action": "link", "existing_device_id": target.pk},
+                {**server, "action": "link", "existing_device_id": existing.pk},
                 HTTP_HX_REQUEST="true",
             )
+
+        # The control stops right after one validation, so its reads are the reads of validation alone.
+        control, validation_reads, once = _serial_rule_reads(
+            DeviceConflictActionView, lambda: link(make_device(f"{target.name}-decoy"))
+        )
+        self._assert_htmx_error(control, "Device ID mismatch")
+        response, reads, validations = _serial_rule_reads(DeviceConflictActionView, lambda: link(target))
 
         assert response.headers.get("HX-Trigger") == "closeModal"
         target.refresh_from_db()
         assert (target.serial, stored_mapping_for_test(target)) == ("STORED-SN-1", {self.server_key: 42})
-        assert branch and _serial_rule_queries(branch) == []
+        # Each validation reads what the control read, and the action branch adds no read.
+        assert (once, reads) == (1, validations * validation_reads)
 
     @pytest.mark.parametrize("action", ["update_serial", "sync_serial"])
     def test_a_serial_action_without_an_incoming_serial_refuses_before_it_reads_a_serial_rule(self, action):
@@ -4482,14 +4484,23 @@ class TestDeviceConflictActionBranches:
         NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
         self._register_device(42, target.name, serial="")
 
+        decoy = make_device(f"{target.name}-decoy")
+        # The control stops right after one validation, so its reads are the reads of validation alone.
+        control_request = self._request(action, decoy, f"{target.name}-control")
+        control, validation_reads, once = _serial_rule_reads(
+            DeviceConflictActionView, lambda: post_view(self._make_view(), control_request, device_id=42)
+        )
+        self._assert_htmx_error(control, "Device ID mismatch")
         request = self._request(action, target, f"{target.name}-user")
-        with _action_branch_queries(DeviceConflictActionView) as branch:
-            response = post_view(self._make_view(), request, device_id=42)
+        response, reads, validations = _serial_rule_reads(
+            DeviceConflictActionView, lambda: post_view(self._make_view(), request, device_id=42)
+        )
 
         self._assert_htmx_error(response, "No valid serial from LibreNMS")
         reloaded = Device.objects.get(pk=target.pk)
         assert (reloaded.serial, stored_mapping_for_test(reloaded)) == ("STORED-SN-2", None)
-        assert branch and _serial_rule_queries(branch) == []
+        # Each validation reads what the control read, and the action branch adds no read.
+        assert (once, reads) == (1, validations * validation_reads)
 
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
