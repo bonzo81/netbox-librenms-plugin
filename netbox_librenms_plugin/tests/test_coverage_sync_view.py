@@ -986,6 +986,9 @@ class TestVirtualChassisInventory:
             for name, value in fields.items()
             if name.startswith("librenms_serial_") and value == serial
         )
+        # A user can select only an enabled option of an enabled selector.
+        assert form["selects"][f"member_id_{row}"]["enabled"] is True
+        assert form["selects"][f"member_id_{row}"]["options"].get(str(member.pk)) is True
         fields[f"member_id_{row}"] = str(member.pk)
         assert form["action"] == reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": page.pk})
         client.post(form["action"], fields)

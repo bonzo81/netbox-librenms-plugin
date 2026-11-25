@@ -180,7 +180,7 @@ class _ModuleTabParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if tag == "form":
-            self._open_forms.append({"action": attrs.get("action", ""), "fields": {}})
+            self._open_forms.append({"action": attrs.get("action", ""), "fields": {}, "selects": {}})
             self.forms.append(self._open_forms[-1])
         elif tag == "table" and attrs.get("id") == "librenms-module-table":
             self.table_attrs = attrs
@@ -220,10 +220,16 @@ class _ModuleTabParser(HTMLParser):
             self.selects.append(attrs)
         if self._open_forms and attrs.get("name"):
             self._select = {"fields": self._open_forms[-1]["fields"], "name": attrs["name"], "state": None}
+            # Each named select records whether it is enabled and which option values it enables.
+            self._select["shown"] = self._open_forms[-1]["selects"][attrs["name"]] = {
+                "enabled": "disabled" not in attrs,
+                "options": {},
+            }
 
     def _option(self, attrs):
         # A browser submits the first selected option, or the first option when none is selected.
         select = self._select
+        select["shown"]["options"][attrs.get("value", "")] = "disabled" not in attrs
         state = "selected" if "selected" in attrs else "first"
         if select["state"] is None or (state == "selected" and select["state"] == "first"):
             select["fields"][select["name"]] = attrs.get("value", "")
