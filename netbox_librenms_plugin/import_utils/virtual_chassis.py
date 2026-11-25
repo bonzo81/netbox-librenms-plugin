@@ -31,6 +31,7 @@ from ..serial_identity import (
     group,
     lookup_refusal,
     naming_token,
+    page_text,
     plain_context,
     resolve_devices_write,
     stored_form,
@@ -1255,7 +1256,7 @@ def members_to_create(members, taken, context, name_of):
 def member_serial_unavailable_message(serial) -> str:
     """Return why the member writer refuses a member serial whose lookup is Unavailable; validation reports it too."""
     # The constant, not the lookup's reason: a Device lookup is Unavailable only for a broken master link.
-    return f"Cannot check VC member serial '{display(serial)}': {UNAVAILABLE_MASTER_LINK}"
+    return f"Cannot check VC member serial '{page_text(serial)}': {UNAVAILABLE_MASTER_LINK}"
 
 
 def _member_serial_taken(serial, resolution, created_members) -> bool:

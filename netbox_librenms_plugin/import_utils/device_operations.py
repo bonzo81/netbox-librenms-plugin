@@ -475,7 +475,7 @@ def check_legacy_id_serial(result, device, incoming_serial, serial_rules) -> Non
 def serial_unavailable_issue(incoming_serial) -> str:
     """Return the blocker of a row whose serial lookup is Unavailable; validation and the refresh both add it."""
     # The constant, not the lookup's reason: the issue text must carry nothing that an unscoped lookup returned.
-    return f"{SERIAL_UNAVAILABLE_ISSUE_START}{display(incoming_serial)}{SERIAL_UNAVAILABLE_ISSUE_END}"
+    return f"{SERIAL_UNAVAILABLE_ISSUE_START}{page_text(incoming_serial)}{SERIAL_UNAVAILABLE_ISSUE_END}"
 
 
 def is_serial_unavailable_issue(issue) -> bool:
@@ -492,7 +492,7 @@ def _serial_taken_message(device_id, incoming_serial, taken) -> str:
     if taken.kind is ResolutionKind.UNAVAILABLE:
         return f"Cannot import device {device_id}: its serial cannot be matched. {taken.reason}"
     return (
-        f"Cannot import device {device_id}: a NetBox device already has serial '{display(incoming_serial)}'. "
+        f"Cannot import device {device_id}: a NetBox device already has serial '{page_text(incoming_serial)}'. "
         "Refresh the import list."
     )
 
@@ -683,7 +683,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
             serial_action_value = "link"
         else:
             block_warnings.append(
-                f"A device with serial {serial} already exists in NetBox but its hostname differs "
+                f"A device with serial {page_text(serial)} already exists in NetBox but its hostname differs "
                 f"(LibreNMS: '{hostname}'). Device may have been reinstalled."
             )
             serial_action_value = "hostname_differs"
@@ -1151,7 +1151,7 @@ def validate_device_for_import(  # noqa: C901
                         result["serial_action"] = "update_serial"
                         result["warnings"].append(
                             f"Serial number differs from the NetBox record "
-                            f"(LibreNMS: '{display(incoming_serial)}'). Hardware may have been replaced."
+                            f"(LibreNMS: '{page_text(incoming_serial)}'). Hardware may have been replaced."
                         )
 
         # Only check hostname/serial/IP if not already matched by librenms_id.
@@ -1247,7 +1247,7 @@ def validate_device_for_import(  # noqa: C901
                         result["serial_action"] = "update_serial"
                         result["warnings"].append(
                             f"Hostname matches but the serial differs from the NetBox record "
-                            f"(LibreNMS: '{display(incoming_serial)}'). Hardware may have been replaced."
+                            f"(LibreNMS: '{page_text(incoming_serial)}'). Hardware may have been replaced."
                         )
                 elif not same_serial_held:
                     link_note = _describe_link_note(result["existing_librenms_link"])
@@ -1286,7 +1286,7 @@ def validate_device_for_import(  # noqa: C901
                         # against, so the sync-serial UI (which needs one existing_device) can't apply.
                         result["serial_duplicate"] = True
                         result["issues"].append(
-                            f"Multiple NetBox devices share serial '{serial}'; resolve the duplicate "
+                            f"Multiple NetBox devices share serial '{page_text(serial)}'; resolve the duplicate "
                             "serial before importing."
                         )
                         existing_by_serial = None
@@ -1309,7 +1309,7 @@ def validate_device_for_import(  # noqa: C901
                         ):
                             result["serial_duplicate"] = True
                             result["issues"].append(
-                                f"Another NetBox device holds serial '{serial}' under the serial rules of the "
+                                f"Another NetBox device holds serial '{page_text(serial)}' under the serial rules of the "
                                 "matched device; resolve the duplicate serial before importing."
                             )
                             existing_by_serial = None

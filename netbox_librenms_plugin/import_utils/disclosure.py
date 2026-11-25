@@ -147,8 +147,10 @@ def serial_conflict_text(conflict, serial: str, user) -> str:
         str: The refusal text.
 
     """
-    from netbox_librenms_plugin.serial_identity import ResolutionKind
+    from netbox_librenms_plugin.serial_identity import ResolutionKind, page_text
 
+    # The serial is LibreNMS text, and a UTF-8 page cannot encode an unpaired surrogate.
+    serial = page_text(serial)
     if conflict.kind is ResolutionKind.UNAVAILABLE:
         return f"Serial '{serial}' cannot be matched. {conflict.reason}"
     if conflict.kind is ResolutionKind.AMBIGUOUS:
@@ -283,7 +285,10 @@ def _render_serial_conflict(validation: dict, scope: ViewerScope) -> None:
     conflict = validation.get("serial_conflict")
     if not isinstance(conflict, dict):
         return
-    serial = conflict.get("serial") or ""
+    from netbox_librenms_plugin.serial_identity import page_text
+
+    # The serial is LibreNMS text, and a UTF-8 page cannot encode an unpaired surrogate.
+    serial = page_text(conflict.get("serial"))
     pk = conflict.get("pk")
     if conflict.get("unavailable"):
         message = _SERIAL_CONFLICT_UNAVAILABLE.format(serial=serial, reason=conflict["unavailable"])

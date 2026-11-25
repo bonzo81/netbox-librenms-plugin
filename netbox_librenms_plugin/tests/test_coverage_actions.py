@@ -2128,6 +2128,34 @@ class TestDeviceValidationDetailsView:
         serial_row = content[start : content.index("</tr>", start)]
         assert re.search(rf'<td class="text-break">\s*{re.escape(shown)}\s*</td>', serial_row)
 
+    def test_an_unavailable_serial_comparison_quotes_a_serial_with_an_unpaired_surrogate(self):
+        """The member's chassis names a master outside it, so the hostname match and its link cannot compare serials."""
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        member = _stray_chassis_member("details-unavailable-surrogate", "STRAY-MEMBER-SERIAL")
+        self.primary_server.device_info_response(device_id=1, hostname=member.name, serial="ABC\ud800DEF")
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        assert escape("Serial conflict: incoming serial 'ABC\ufffdDEF' cannot be matched.") in response.content.decode()
+
+        request = make_view_request(
+            "post",
+            {"server_key": "default", "action": "link", "existing_device_id": str(member.pk)},
+            user=make_superuser(),
+            HTTP_HX_REQUEST="true",
+        )
+        response = post_view(DeviceConflictActionView(), request, device_id=1)
+
+        assert response.status_code == 200
+        assert escape("Serial 'ABC\ufffdDEF' cannot be matched.") in response.content.decode()
+        assert stored_mapping_for_test(member) is None
+
     @staticmethod
     def _link_forms(response):
         """Return the submitted values of each Link, Update or Update Serial form in the dialog."""
