@@ -1772,6 +1772,15 @@ def verify(client, content, page, member, index):
     )
 
 
+def _row_forms(parsed, index):
+    """Return the rendered forms that act on inventory row *index*, read from their own row index field."""
+    return [
+        form
+        for form in parsed.forms
+        if str(index) in (form["fields"].get("ent_index"), form["fields"].get("parent_index"))
+    ]
+
+
 def _installed(device):
     from dcim.models import Module
 
@@ -1991,7 +2000,7 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_short_serial(
     for index in (CARD, CARD + 1):
         (row,) = re.findall(rf'<tr[^>]*data-ent-index="{index}".*?</tr>', content, flags=re.S)
         assert ("data-member-unattributed" in row) is withheld
-        assert bool([form for form in parsed.forms if str(index) in form["fields"].values()]) is (not withheld)
+        assert bool(_row_forms(parsed, index)) is (not withheld)
     if not withheld:
         on_page = CARD if positions[0] == 1 else CARD + 1
         _action, fields = rendered_module_form(content, "install-module", on_page)
@@ -2018,7 +2027,7 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_serial_no_member
     assert "data-member-unattributed" not in owned
     assert f'<option value="{member.pk}" selected>' in owned
     assert ("data-member-unattributed" in row) is withheld
-    assert bool([form for form in parsed.forms if str(CARD + 1) in form["fields"].values()]) is (not withheld)
+    assert bool(_row_forms(parsed, CARD + 1)) is (not withheld)
 
 
 @pytest.mark.parametrize("occupant", [None, "GR-OTHER", "GR-CARD"], ids=["empty-bay", "other-type", "same-type"])
@@ -2058,9 +2067,7 @@ def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card
     (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{CARD}"[^>]*>', row)
     action, fields = rendered_module_form(content, "install-selected")
 
-    assert bool([form for form in parsed.forms if str(CARD) in form["fields"].values()]) is (
-        not withheld and not occupant
-    )
+    assert bool(_row_forms(parsed, CARD)) is (not withheld and not occupant)
     assert ("data-member-unattributed" in row) is withheld
     assert (" disabled" in checkbox) is withheld
     if occupant:
@@ -2247,7 +2254,7 @@ def test_a_row_on_a_hidden_member_shows_no_bay_module_or_action_of_that_member(c
     assert member.name not in content
     assert member_bay.get_absolute_url() not in content
     assert member_module.get_absolute_url() not in content
-    assert not [form for form in parsed.forms if str(OPTIC_1) in form["fields"].values()]
+    assert not _row_forms(parsed, OPTIC_1)
     assert not [form for form in parsed.forms if form["fields"].get("conflict_module_id") == str(member_module.pk)]
     assert not any(f"ent_index={OPTIC_1}" in link.get("hx-get", "") for link in parsed.links)
     (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{OPTIC_1}"[^>]*>', content)
