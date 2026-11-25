@@ -449,6 +449,7 @@ def test_a_masterless_member_serial_names_its_owner_only_under_its_own_rules():
     )
 
     assert contexts[("index", 5)]["selected_device"].pk == page.pk
+    assert contexts[("index", 5)]["resolution_source"] == "position"
 
 
 def test_a_masterless_junos_stack_is_detected_under_the_rules_of_any_member():
