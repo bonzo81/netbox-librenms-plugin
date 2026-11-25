@@ -2076,6 +2076,12 @@ def test_a_stack_row_that_no_member_reported_offers_no_module_type_fix(ui, vc_gr
     assert "Installed" in row
     assert ("data-member-unattributed" in row) is withheld
     assert ("Fix Model" in row) is (not withheld)
+    # The daughter reports its own serial, but its parent's "12" names no member, so it is unattributed too.
+    (child_row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 1}".*?</tr>', content, flags=re.S)
+    (child_checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{CARD + 1}"[^>]*>', child_row)
+    assert ("data-member-unattributed" in child_row) is withheld
+    assert (" disabled" in child_checkbox) is withheld
+    assert (f'<option value="{page.pk}" selected>' in child_row) is (not withheld)
 
 
 @pytest.mark.parametrize(
