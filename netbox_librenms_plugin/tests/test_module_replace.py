@@ -175,6 +175,21 @@ class TestModuleMismatchPreviewView:
         reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
         assert (escape(reason) in html) is (not fits)
 
+    def test_the_preview_of_a_type_mismatch_shows_a_serial_with_an_unpaired_surrogate(self):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
+        reported_type = make_module_type("SURROGATE-REPORTED-TYPE")
+        device, _installed, request, view, inventory = self._setup(
+            "surrogate", librenms_model=reported_type.model, serial="ABC\ud800DEF"
+        )
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        assert "ABC\ufffdDEF" in response.content.decode()
+
     def test_the_recognised_type_icon_is_named(self):
         device, installed, request, view, inventory = self._setup("named-icon")
         cache_key = _cache_preview(view, device, inventory, request)
