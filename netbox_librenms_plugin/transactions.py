@@ -347,7 +347,8 @@ def _keep_events(block_events):
     Add the events of a block that committed to the enclosing queue, one event per object as NetBox queues them.
 
     For an object that the enclosing queue already holds, the newer event replaces the older one. It keeps the
-    prechange snapshot of the older event, and the older event type unless it is a delete.
+    prechange snapshot of the older event, and the older event type unless it is a delete. When both events list
+    their ObjectChange ids (NetBox 4.7.5 and later), it keeps the older ids, then the newer ids in save order.
     """
     if not block_events:
         return
@@ -357,6 +358,9 @@ def _keep_events(block_events):
             event["snapshots"]["prechange"] = older["snapshots"]["prechange"]
             if event["event_type"] != OBJECT_DELETED:
                 event["event_type"] = older["event_type"]
+            if "object_change_ids" in older and "object_change_ids" in event:
+                kept = list(older["object_change_ids"])
+                event["object_change_ids"] = kept + [i for i in event["object_change_ids"] if i not in kept]
         queue[key] = event
 
 

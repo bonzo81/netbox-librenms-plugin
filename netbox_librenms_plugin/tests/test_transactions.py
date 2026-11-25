@@ -420,6 +420,50 @@ def test_an_object_that_one_block_changes_and_the_next_deletes_sends_one_deleted
     assert event["snapshots"]["postchange"] is None
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("change_ids", "second_fails", "expected"),
+    [
+        (([101], [102]), False, [101, 102]),
+        (([101, 102], [102, 103]), False, [101, 102, 103]),
+        (([101], [102]), True, [101]),
+        ((None, None), False, None),
+    ],
+    ids=["merged", "no-duplicates", "rolled-back", "no-key"],
+)
+def test_two_row_savepoints_of_one_object_keep_the_change_ids_of_each_kept_block(change_ids, second_fails, expected):
+    """NetBox 4.7.5 lists each ObjectChange of a coalesced event in object_change_ids; NetBox 4.7.0 has no such key."""
+    from contextlib import nullcontext
+
+    from netbox.context import events_queue
+
+    from netbox_librenms_plugin.transactions import atomic_with_events, row_savepoint
+
+    class _Refused(Exception):
+        pass
+
+    site = _site(f"change-ids-{len(change_ids[0] or [])}-{int(second_fails)}-{int(expected is None)}")
+
+    def write(description, ids):
+        _write_site(site, description)
+        if ids is not None:
+            (event,) = events_queue.get().values()
+            event["object_change_ids"] = list(ids)
+
+    with _netbox_request_context():
+        with atomic_with_events():
+            with row_savepoint():
+                write("first", change_ids[0])
+            with pytest.raises(_Refused) if second_fails else nullcontext(), row_savepoint():
+                write("second", change_ids[1])
+                if second_fails:
+                    raise _Refused()
+
+        event = _the_one_event(site)
+        assert event.get("object_change_ids") == expected
+        assert ("object_change_ids" in event) is (expected is not None)
+
+
 def _run_site_steps(name, steps, *, in_blocks):
     """Run *steps* on one Site in one request, each in its own block or all in NetBox's queue; return its one event."""
     from dcim.models import Site
