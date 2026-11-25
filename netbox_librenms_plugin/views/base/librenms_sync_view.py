@@ -12,7 +12,11 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _existing_member_name, extract_vc_members
+from netbox_librenms_plugin.import_utils.virtual_chassis import (
+    _existing_member_name,
+    existing_member_name_refusal,
+    extract_vc_members,
+)
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     assess_platform,
@@ -605,6 +609,7 @@ class BaseLibreNMSSyncView(
 
                 # Compute resolved name using naming preferences
                 resolved_name = librenms_sysname
+                member_name_refusal = ""
                 if request:
                     use_sysname, strip_domain = resolve_naming_preferences(request)
                     resolved_name = (
@@ -617,6 +622,8 @@ class BaseLibreNMSSyncView(
                         or librenms_sysname
                     )
                     resolved_name = _existing_member_name(resolved_name, obj, self.serial_rules)
+                    if resolved_name is None:
+                        member_name_refusal = existing_member_name_refusal(obj, self.serial_rules)
 
                 # Update device details regardless of match
                 librenms_device_details.update(
@@ -648,6 +655,7 @@ class BaseLibreNMSSyncView(
                         "librenms_device_ip": librenms_ip,
                         "sysName": librenms_sysname,
                         "resolved_name": resolved_name,
+                        "member_name_refusal": member_name_refusal,
                         "librenms_device_hostname": device_info.get("hostname") or "-",
                         "librenms_device_hardware_match": hardware_match,
                     }

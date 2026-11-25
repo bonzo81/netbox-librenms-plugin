@@ -14,7 +14,7 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
-from netbox_librenms_plugin.import_utils.virtual_chassis import _existing_member_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import _existing_member_name, existing_member_name_refusal
 from netbox_librenms_plugin.platform_versions import (
     FactsSource,
     NewOSPlatform,
@@ -336,9 +336,13 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             strip_domain=strip_domain,
         )
 
-        resolved_name = _existing_member_name(resolved_name, device, SerialRules.load())
+        serial_rules = SerialRules.load()
+        resolved_name = _existing_member_name(resolved_name, device, serial_rules)
         if resolved_name is None:
-            messages.warning(request, _MEMBER_NAME_RULES_UNAVAILABLE)
+            refusal = existing_member_name_refusal(device, serial_rules)
+            messages.warning(
+                request, f"{refusal} The name was not changed." if refusal else _MEMBER_NAME_RULES_UNAVAILABLE
+            )
             return _device_sync_redirect(request, pk, server_key)
 
         old_name, failed = _write_device_field(

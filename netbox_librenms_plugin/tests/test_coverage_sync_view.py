@@ -1221,6 +1221,46 @@ def test_vc_name_sync_uses_the_serial_rule_only_for_serial_suffixes(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(("serial", "expected"), [("12", None), ("ABC123", "stack-ABC123")], ids=["short", "identity"])
+def test_vc_name_sync_offers_no_name_for_a_member_serial_without_an_identity(
+    logged_in_client, librenms_server, serial, expected
+):
+    """A ``{serial}`` pattern gives a member with serial 12 no name, so the page shows why and the POST renames nothing."""
+    from django.contrib.messages import get_messages
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.views.sync.device_fields import _MEMBER_NAME_RULES_UNAVAILABLE
+
+    chassis, (master, member) = make_virtual_chassis_members(f"rename-no-token-{serial}")
+    chassis.master = master
+    chassis.save(update_fields=["master"])
+    member.name = "member-old-name"
+    member.serial = serial
+    member.save(update_fields=["name", "serial"])
+    seed_mapping(member, SERVER_KEY, own=6652)
+    settings_row = LibreNMSSettings.objects.first() or LibreNMSSettings()
+    settings_row.vc_member_name_pattern = "-{serial}"
+    settings_row.save()
+    _register_device(librenms_server, 6652, "stack")
+    action_url = reverse("plugins:netbox_librenms_plugin:update_device_name", args=[member.pk])
+
+    response = logged_in_client.get(_sync_url(member), {"server_key": SERVER_KEY})
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert (f'action="{action_url}"' in content) is (expected is not None)
+    assert ("data-member-name-refusal" in content) is (expected is None)
+    assert response.context["resolved_name"] == expected
+
+    response = logged_in_client.post(action_url, {"server_key": SERVER_KEY})
+    assert response.status_code == 302
+    member.refresh_from_db()
+    assert member.name == (expected or "member-old-name")
+    warnings = [str(message) for message in get_messages(response.wsgi_request) if message.level_tag == "warning"]
+    assert bool(warnings) is (expected is None)
+    assert _MEMBER_NAME_RULES_UNAVAILABLE not in warnings
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     ("pattern", "member_name", "expected"),
     [("-{serial}", "stack-ABC123", None), ("-{serial}", None, None), ("-M{position}", "stack-ABC123", "stack-M2")],

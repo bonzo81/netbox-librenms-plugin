@@ -547,6 +547,8 @@
                                         <span class="text-success" title="Synced with LibreNMS">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
+                                        {% elif member_name_refusal %}
+                                        <span class="text-muted small" data-member-name-refusal>{{ member_name_refusal }}</span>
                                         {% endif %}
                                     </div>
                                 </div>

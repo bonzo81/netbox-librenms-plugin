@@ -740,7 +740,7 @@ def _vc_name_uses_serial(pattern):
 
 
 def _existing_member_name(master_name, device, rules) -> str | None:
-    """Return the name to use for an existing member, or None when the suffix needs unavailable serial rules."""
+    """Return the name to use for an existing member, or None when its suffix needs unavailable rules or gets no serial."""
     if not master_name or not getattr(device, "virtual_chassis_id", None) or not is_vc_position(device.vc_position):
         return master_name
 
@@ -748,13 +748,30 @@ def _existing_member_name(master_name, device, rules) -> str | None:
     if not _vc_name_uses_serial(pattern):
         return _member_name(master_name, device.vc_position, None, pattern, plain_context())
 
+    context = _existing_member_context(device, rules)
+    if context is None or not naming_token(device.serial, context):
+        return None
+    return _member_name(master_name, device.vc_position, device.serial, pattern, context)
+
+
+def existing_member_name_refusal(device, rules) -> str:
+    """Return why an existing member gets no name: its serial gives the ``{serial}`` pattern no text; else ""."""
+    if not getattr(device, "virtual_chassis_id", None) or not is_vc_position(device.vc_position):
+        return ""
+    pattern = _load_vc_member_name_pattern()
+    context = _existing_member_context(device, rules) if _vc_name_uses_serial(pattern) else None
+    if context is None or naming_token(device.serial, context):
+        return ""
+    return unnamed_member_refusal(device.vc_position, device.serial, pattern)
+
+
+def _existing_member_context(device, rules):
+    """Return the serial context of an existing member, or None when its serial rules are unavailable."""
     try:
         context = rules.for_device(device)
     except RuleConfigurationError:
         return None
-    if context.unavailable:
-        return None
-    return _member_name(master_name, device.vc_position, device.serial, pattern, context)
+    return None if context.unavailable else context
 
 
 def update_vc_member_suggested_names(vc_data: dict, master_name: str, *, serial_rules, device_type=None) -> dict:
