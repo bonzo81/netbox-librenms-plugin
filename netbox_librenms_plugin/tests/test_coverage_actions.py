@@ -2062,7 +2062,8 @@ class TestDeviceValidationDetailsView:
         assert member.serial == "MEMBER-OLD"
         assert member.name == "SW01"
 
-    def test_a_write_peer_of_another_maker_hides_no_link_of_a_chassis_member(self):
+    @pytest.mark.parametrize("match_type", ["serial", "hostname"])
+    def test_a_write_peer_of_another_maker_hides_no_link_of_a_chassis_member(self, match_type):
         """The member's maker strips "X-" and "Y-"; a plain Device stores "Y-ABC123", and a link writes no serial."""
         from dcim.models import Device, DeviceType, Manufacturer
 
@@ -2071,7 +2072,8 @@ class TestDeviceValidationDetailsView:
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-chassis-peer")
-        member.serial = "ABC123"
+        # By serial the member holds the identity of "X-ABC123"; by hostname its own serial differs.
+        member.serial = "ABC123" if match_type == "serial" else "MEMBER-OLD"
         member.save()
         NormalizationRule.objects.create(
             scope="serial",
@@ -2084,7 +2086,8 @@ class TestDeviceValidationDetailsView:
         Device.objects.filter(pk=peer.pk).update(
             device_type=DeviceType.objects.create(manufacturer=plain_maker, model="Peer plain", slug="peer-plain")
         )
-        self.primary_server.device_info_response(device_id=1, hostname="chassis-peer-reported", serial="X-ABC123")
+        hostname = member.name if match_type == "hostname" else "chassis-peer-reported"
+        self.primary_server.device_info_response(device_id=1, hostname=hostname, serial="X-ABC123")
         self.primary_server.vc_inventory_callable(1, [], {})
 
         _view, response = self._get("default")
@@ -2099,7 +2102,7 @@ class TestDeviceValidationDetailsView:
         assert response.status_code == 200
         member.refresh_from_db()
         assert stored_mapping_for_test(member) == {"default": 1}
-        assert member.serial == "ABC123"
+        assert member.serial == ("ABC123" if match_type == "serial" else "MEMBER-OLD")
 
     def test_a_serial_with_an_unpaired_surrogate_renders_the_blocked_dialog(self):
         """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""

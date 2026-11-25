@@ -414,6 +414,9 @@ def _determine_device_name(
 
 def _write_conflict(existing_device, incoming_serial, serial_rules) -> Resolution | None:
     """Return the refusing Resolution of the Devices that a serial write of *incoming_serial* on *existing_device* would duplicate."""
+    # A chassis member gets a link only, and a link writes no serial.
+    if existing_device.virtual_chassis_id is not None:
+        return None
     other = resolve_device_write(
         incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules, exclude_pks=[existing_device.pk]
     )
@@ -1303,10 +1306,8 @@ def validate_device_for_import(  # noqa: C901
                             existing_by_serial, existing_link, hostname, serial, libre_device, server_key
                         )
                         # Update & Link writes the serial, so a row that the write would duplicate blocks the match.
-                        # A chassis member gets a link only, and a link writes no serial.
                         if (
                             role["serial_action"] == "hostname_differs"
-                            and existing_by_serial.virtual_chassis_id is None
                             and not keeps_stored_serial(existing_by_serial.serial, incoming_serial, Device)
                             and _write_conflict(existing_by_serial, incoming_serial, serial_rules)
                         ):
