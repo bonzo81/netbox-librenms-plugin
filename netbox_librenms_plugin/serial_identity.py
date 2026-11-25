@@ -47,6 +47,7 @@ TRIM_CHARACTERS = " \t\n\r\v\f"
 _TRIM_LITERAL = "'" + TRIM_CHARACTERS.replace("'", "''") + "'"
 # A key without three consecutive ASCII letters or digits gives a LIKE pattern without a trigram.
 _IDENTITY_RUN = re.compile(r"[A-Za-z0-9]{3}")
+_SURROGATE = re.compile("[\ud800-\udfff]")
 _LOCK_PREFIX = "netbox-librenms-plugin:serial-identity"
 # Stop reading candidate rows when every incoming value has this many confirmed matches.
 _AMBIGUOUS_AT = 2
@@ -391,6 +392,11 @@ def display(value) -> str:
     """Return the source text of a serial for a page: trimmed, and "" for a placeholder."""
     text = _text(value)
     return "" if is_librenms_placeholder(text) else text
+
+
+def page_text(value):
+    """Return *value* with each unpaired surrogate in its text replaced by U+FFFD: a UTF-8 page cannot encode one."""
+    return _SURROGATE.sub("\ufffd", value) if isinstance(value, str) else value
 
 
 def stored_form(value, model) -> str:

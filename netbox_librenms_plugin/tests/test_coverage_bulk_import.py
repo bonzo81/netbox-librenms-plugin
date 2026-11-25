@@ -1240,6 +1240,46 @@ def test_the_bulk_confirmation_names_an_unnamed_member_of_a_stack_without_number
     assert not any(issue.startswith("Stack member None") for issue in entry["validation"]["issues"])
 
 
+@pytest.mark.parametrize("numbered", [True, False], ids=["numbered", "unnumbered"])
+def test_the_bulk_confirmation_renders_a_member_serial_with_an_unpaired_surrogate(client, live_librenms, numbered):
+    """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
+    from dcim.models import Device
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.serial_identity import stored_form_refusal
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 396 if numbered else 397
+    member_serial = "ABC\ud800DEF"
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-surrogate-{numbered}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"] if numbered else "Unmatched stack hardware",
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-surrogate-user-{numbered}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    label = "Stack member 2" if numbered else "Stack member with serial 'ABC�DEF'"
+    assert f"{label}: {stored_form_refusal(member_serial, Device)}" in entry["validation"]["issues"]
+    content = response.content.decode()
+    assert "SN ABC�DEF" in content
+    assert escape(label) in content
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("held", [True, False])
 def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_creates(client, live_librenms, held):

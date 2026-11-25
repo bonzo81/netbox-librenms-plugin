@@ -2101,6 +2101,25 @@ class TestDeviceValidationDetailsView:
         assert stored_mapping_for_test(member) == {"default": 1}
         assert member.serial == "ABC123"
 
+    def test_a_serial_with_an_unpaired_surrogate_renders_the_blocked_dialog(self):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
+        infrastructure = make_device("details-surrogate-infrastructure")
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname="details-surrogate",
+            hardware=infrastructure.device_type.model,
+            serial="ABC\ud800DEF",
+            ip="198.18.0.11",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "Cannot Import" in content
+        assert "ABC\ufffdDEF" in content
+
     @staticmethod
     def _link_forms(response):
         """Return the submitted values of each Link, Update or Update Serial form in the dialog."""
@@ -2777,6 +2796,26 @@ class TestDeviceVCDetailsView:
         assert b"2-member" in result.content
         assert b"stack-master-M1" in result.content
         assert b"stack-master-M2" in result.content
+
+    def test_a_member_serial_with_an_unpaired_surrogate_renders(self, settings, librenms_server):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
+        server_key = "vc-details-surrogate"
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(
+            device_id=43, hostname="stack-surrogate", serial="MEMBER-1", hardware=_shared_infra()[2].model
+        )
+        rows = [
+            {"entPhysicalClass": "chassis", "entPhysicalIndex": 200 + position, "entPhysicalParentRelPos": position}
+            for position in (1, 2)
+        ]
+        rows[0]["entPhysicalSerialNum"] = "MEMBER-1"
+        rows[1]["entPhysicalSerialNum"] = "ABC\ud800DEF"
+        librenms_server.vc_inventory_callable(43, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}], {100: rows})
+
+        result = get_view(view, make_view_request("get", {"server_key": server_key}), device_id=43)
+
+        assert result.status_code == 200
+        assert "ABC�DEF" in result.content.decode()
 
     def test_rule_read_failure_renders_detection_failure(self, client, live_librenms):
         from django.urls import reverse

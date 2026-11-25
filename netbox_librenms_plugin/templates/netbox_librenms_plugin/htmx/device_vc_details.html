@@ -1,5 +1,6 @@
 {# HTMX template for virtual chassis details modal #}
 {# Shows virtual chassis/stack information for a LibreNMS device #}
+{% load librenms_serial %}
 
 <div class="modal-header">
   <h5 class="modal-title">
@@ -102,7 +103,7 @@
                     <span><strong>Model:</strong> {{ member.model }}</span>
                   {% endif %}
                   {% if member.serial %}
-                    <span><strong>Serial:</strong> <code>{{ member.serial }}</code></span>
+                    <span><strong>Serial:</strong> <code>{{ member.serial|page_text }}</code></span>
                   {% endif %}
                   {% if not member.model and not member.serial %}
                     <span>No additional metadata</span>

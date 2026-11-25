@@ -1,5 +1,6 @@
 {# HTMX template for device validation details modal #}
 {# Redesigned to match the sync page's clean table layout #}
+{% load librenms_serial %}
 
 <div class="modal-header">
   <h5 class="modal-title">
@@ -354,7 +355,7 @@
                   {% endif %}
                 </td>
                 <td class="text-break">
-                  {{ libre_device.serial|default:"—" }}
+                  {{ libre_device.serial|page_text|default:"—" }}
                   {% if validation.serial_duplicate %}
                     <span class="badge bg-danger text-white ms-1">Conflict</span>
                   {% endif %}
