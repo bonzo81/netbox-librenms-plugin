@@ -1115,6 +1115,11 @@ class TestCompletedSearchJobResults:
         (row,) = LibreNMSImportView()._load_job_results(job.pk, user)
 
         assert row["_validation"]["existing_device"] is None
+        if change == "equivalent-duplicate":
+            blocked = ("ambiguous_hostname_or_serial", False, False)
+            assert (
+                tuple(row["_validation"][key] for key in ("existing_match_type", "can_import", "is_ready")) == blocked
+            )
 
 
 def _serial_bypasses(source):
