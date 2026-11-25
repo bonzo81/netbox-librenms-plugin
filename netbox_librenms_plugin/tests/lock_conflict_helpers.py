@@ -27,7 +27,11 @@ def second_connection():
 
 
 def locks_row(sql, model, pk):
-    """Return whether the SQL statement *sql* locks the *model* row *pk*, at any lock strength."""
+    """Return whether the SQL statement *sql* locks the *model* row *pk*, at any lock strength.
+
+    Limits: it reads a key of the row either only outside NOT, or only inside NOT groups of OR-joined id keys;
+    any other WHERE shape raises AssertionError.
+    """
     table = re.escape(model._meta.db_table)
     keyword = r"(?:WHERE|ON|USING|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ORDER|LIMIT|FOR)\b"
     # The target table can come after FROM or after any JOIN.
@@ -48,7 +52,10 @@ def locks_row(sql, model, pk):
         key = rf"{column} (?:= {pk}\b|IN \([^)]*\b{pk}\b)"
         any_key = rf"{column} (?:= \d+\b|IN \([^)]*\))"
         # Only a positive predicate selects the row: a NOT before the key or before any enclosing group excludes it.
-        if any(not _negated(sql, where, found.start(), any_key) for found in re.finditer(key, where)):
+        negated = {_negated(sql, where, found.start(), any_key) for found in re.finditer(key, where)}
+        if negated == {True, False}:
+            raise AssertionError(f"locks_row reads no key of the row both inside and outside NOT: {sql}")
+        if negated == {False}:
             return True
     return False
 

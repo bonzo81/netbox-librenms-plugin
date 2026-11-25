@@ -1846,8 +1846,9 @@ class TestConvertLegacyLibreNMSIdView:
             'NOT ("dcim_device"."name" IN (\'a\') AND ("dcim_device"."id" = 7))',
             'NOT ("dcim_device"."id" = 3 AND "dcim_device"."id" = 7)',
             'NOT ("dcim_device"."id" = 7 OR "dcim_device"."name" = \'a\')',
+            '("dcim_device"."id" IN (3, 7) AND NOT ("dcim_device"."id" = 7))',
         ],
-        ids=["other-predicate-and", "key-and", "other-predicate-or"],
+        ids=["other-predicate-and", "key-and", "other-predicate-or", "key-inside-and-outside"],
     )
     def test_the_row_lock_check_refuses_a_negated_group_it_can_not_read(self, where):
         """``NOT (name IN ('a') AND id = 7)`` selects Device 7 named "b"; a NOT group of other than OR-joined keys fails."""
