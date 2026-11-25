@@ -834,12 +834,13 @@ def test_move_refuses_an_occupant_that_left_the_bay_after_its_preview(ui, c8300,
     else:
         free = ModuleBay.objects.get(device=device, name=_bay_name(entities, SERVICE_MODULE))
         Module.objects.filter(pk=installed.pk).update(module_bay=free)
-    places = _module_places(holder)
+    # The helper leaves out a deleted row, so the deleted case still compares the holder alone.
+    places = _module_places(holder, installed)
 
     response = post(ui, *form)
 
     assert MOVE_STALE in messages_of(response)
-    assert _module_places(holder) == places
+    assert _module_places(holder, installed) == places
 
 
 def test_move_refuses_an_occupant_that_contains_the_holder(ui, c8300):
