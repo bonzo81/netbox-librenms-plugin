@@ -1190,6 +1190,8 @@ class LibreNMSModuleTable(tables.Table):
             and record.get("item_class") != "port"
             and record.get("mapping_source_name")
             and getattr(self, "can_map_existing_bay", False)
+            # The dialog lists the page device's bays, and an unattributed row can belong to another member.
+            and not record.get("member_unattributed")
         ):
             mapping_url = reverse(
                 "plugins:netbox_librenms_plugin:add_bay_template",

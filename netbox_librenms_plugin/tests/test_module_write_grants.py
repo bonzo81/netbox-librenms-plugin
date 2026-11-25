@@ -2083,8 +2083,8 @@ def test_a_stack_row_that_no_member_reported_offers_no_module_type_fix(ui, vc_gr
     [({"entPhysicalContainedIn": 0}, True), ({}, False)],
     ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
 )
-def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix(ui, vc_grants, card, withheld):
-    """The Fix Device Type modal adds a bay template to the page device type, which can be the wrong member's type."""
+def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix_or_bay_mapping(ui, vc_grants, card, withheld):
+    """The Fix Device Type and Map Existing Bay dialogs read the page device, which can be the wrong member."""
     page, _member = vc_grants(
         card={"entPhysicalName": "Fan Tray 9", "entPhysicalDescr": "Fan Tray 9", "entPhysicalSerialNum": "12", **card}
     )
@@ -2094,6 +2094,8 @@ def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix(ui, vc_gr
     assert "No Bay" in row
     assert ("data-member-unattributed" in row) is withheld
     assert ("Fix Device Type" in row) is (not withheld)
+    # The Map Existing Bay dialog lists the page device's bays, which the reporting member can lack.
+    assert ('data-action="map-existing-bay"' in row) is (not withheld)
 
 
 @pytest.mark.parametrize("pick_page", [False, True], ids=["other-member", "page-device"])
