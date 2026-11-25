@@ -7,31 +7,6 @@ from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
-from netbox_librenms_plugin.serial_identity import (
-    REFUSING,
-    TRIM_CHARACTERS,
-    Comparison,
-    ResolutionKind,
-    compare,
-    contains_pattern,
-    display,
-    freshness_token,
-    group,
-    is_identity,
-    naming_token,
-    resolve_device,
-    resolve_devices,
-    resolve_module,
-    stored_form,
-    stored_form_differs,
-)
-from netbox_librenms_plugin.tests.conftest import (
-    install_module,
-    make_device,
-    make_device_with_module_bays,
-    make_virtual_chassis,
-)
-
 SEEDED = r"^S/N\s+(.+)$"
 
 
@@ -56,6 +31,8 @@ def _manufacturer(tag):
 
 def _device_of(manufacturer, name, serial):
     from dcim.models import DeviceType
+
+    from netbox_librenms_plugin.tests.conftest import make_device
 
     device = make_device(name, serial=serial)
     device.device_type = DeviceType.objects.create(
@@ -104,7 +81,7 @@ class TestSerialRuleLanguage:
     )
     def test_clean_accepts_one_group_reference(self, pattern, replacement):
         from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
         NormalizationRule(scope="serial", match_pattern=pattern, replacement=replacement).full_clean()
         _rules_only((pattern, replacement, None))
@@ -122,7 +99,7 @@ class TestSerialRuleLanguage:
     def test_a_group_reference_reads_the_group_and_never_expands_a_template(self):
         r"""With 100 groups, the template \100 is an octal escape; \g<100> reads group 100."""
         from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
         pattern = "(.)" * 99 + "([A-Z0-9]+)"
         value = "A" * 99 + "ZZZ123"
@@ -139,7 +116,7 @@ class TestSerialRuleLanguage:
         ids=["optional", "alternation", "empty"],
     )
     def test_a_group_that_takes_no_part_or_is_empty_ends_the_chain_without_an_identity(self, pattern, value):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import Comparison, SerialRules, compare, is_identity
 
         _rules_only((pattern, r"\1", None), (r"^(.+)$", r"\1", None))
         context = SerialRules.load().context(None)
@@ -148,7 +125,7 @@ class TestSerialRuleLanguage:
         assert compare(value, value, context) is Comparison.ABSENT
 
     def test_a_rule_that_does_not_fullmatch_leaves_the_value(self):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
         _rules_only((r"S/N\s+(.+)", r"\1", None))
         context = SerialRules.load().context(None)
@@ -158,7 +135,7 @@ class TestSerialRuleLanguage:
         assert naming_token("S/N ABC", context) == "ABC"
 
     def test_manufacturer_rules_run_before_the_global_rules(self):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
         maker = _manufacturer("order")
         _rules_only((r"^G-(.+)$", r"\1", None), (r"^M-(.+)$", r"\1", maker))
@@ -169,7 +146,8 @@ class TestSerialRuleLanguage:
 
     def test_a_stored_rule_that_does_not_conform_fails_every_decision_of_its_chain(self):
         from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         (rule,) = _rules_only((SEEDED, r"\1", None))
         # A QuerySet.update() skips clean(), so the stored rule can still be non-conforming.
@@ -220,7 +198,7 @@ class TestKeyAdmission:
         ],
     )
     def test_the_admission_rule(self, value, identity):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, is_identity
 
         _rules_only((SEEDED, r"\1", None))
 
@@ -228,7 +206,8 @@ class TestKeyAdmission:
 
     @pytest.mark.parametrize("stored", ["unknown", "AB", "S/N N/A", "1"])
     def test_a_value_without_an_identity_binds_no_device_and_costs_no_lookup(self, stored):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, SerialRules, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         make_device(f"no-identity-{len(stored)}-{stored.replace('/', '')}", serial=stored)
@@ -240,12 +219,18 @@ class TestKeyAdmission:
         assert len(queries) == 0
 
     def test_a_module_placeholder_binds_no_module(self):
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_module
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
         device = make_device_with_module_bays("module-placeholder", ["Slot 1"])
         install_module(device, "Slot 1", "PLACEHOLDER-CARD", serial="BUILTIN")
 
         assert resolve_module("BUILTIN").kind is ResolutionKind.ABSENT
 
     def test_a_rule_whose_output_is_a_placeholder_leaves_no_identity(self):
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((r"^VENDOR-(N/A)$", r"\1", None))
         make_device("rule-output-placeholder", serial="VENDOR-N/A")
 
@@ -253,6 +238,8 @@ class TestKeyAdmission:
 
     def test_every_admitted_contains_pattern_holds_a_three_character_run(self):
         """The admission rule guarantees a trigram: assert the run in the escaped pattern, not with show_trgm()."""
+        from netbox_librenms_plugin.serial_identity import contains_pattern
+
         for key in ["ABC", "ABC++", "S/N-ABC", "a%b_c\\ABC", "1-2-345"]:
             pattern = contains_pattern(key)
             assert re.search(r"[A-Za-z0-9]{3}", pattern), pattern
@@ -264,6 +251,9 @@ class TestLookup:
 
     @pytest.mark.parametrize(("stored", "incoming"), [("S/N ABC-LOOK", "ABC-LOOK"), ("ABC-LOOK", "S/N ABC-LOOK")])
     def test_a_decorated_serial_and_its_bare_form_find_each_other(self, stored, incoming):
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((SEEDED, r"\1", None))
         device = make_device("lookup-both-ways", serial=stored)
 
@@ -273,6 +263,8 @@ class TestLookup:
         assert found.object == device
 
     def test_a_manufacturer_rule_confirms_only_rows_of_that_manufacturer(self):
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+
         scoped = _manufacturer("scoped")
         other = _manufacturer("other")
         _rules_only((r"^X(.+)$", r"\1", scoped))
@@ -288,6 +280,9 @@ class TestLookup:
         ids=["decorated-storage", "legacy-storage"],
     )
     def test_a_chassis_member_uses_the_rules_of_its_masters_manufacturer(self, stored, incoming):
+        from netbox_librenms_plugin.serial_identity import resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
         master_maker = _manufacturer("master")
         member_maker = _manufacturer("member")
         _rules_only((r"^X(.+)$", r"\1", master_maker))
@@ -301,6 +296,9 @@ class TestLookup:
 
     def test_a_master_outside_its_chassis_makes_a_probed_match_unavailable(self):
         from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
         master = make_device("lookup-stray-master", serial="STRAY-SN1")
         member = make_device("lookup-stray-member", serial="STRAY-SN2")
@@ -318,7 +316,13 @@ class TestLookup:
     def test_like_wildcards_in_a_key_stay_literal(self, stored, incoming):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.serial_identity import _SerialCandidates
+        from netbox_librenms_plugin.serial_identity import (
+            ResolutionKind,
+            _SerialCandidates,
+            contains_pattern,
+            resolve_device,
+        )
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         tag = incoming.replace("%", "p")
         make_device(f"lookup-wildcard-{tag}", serial=stored)
@@ -331,6 +335,9 @@ class TestLookup:
 
     def test_a_backslash_in_a_serial_matches_literally(self):
         # A decorated stored value is found only by the LIKE candidate read, not by the exact match.
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((SEEDED, r"\1", None))
         device = make_device("lookup-backslash", serial="S/N ABC\\DEF")
 
@@ -338,12 +345,18 @@ class TestLookup:
         assert resolve_device("ABCXDEF").kind is ResolutionKind.NO_MATCH
 
     def test_unicode_padding_that_the_index_keeps_is_still_found(self):
+        from netbox_librenms_plugin.serial_identity import resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         device = make_device("lookup-nbsp", serial=" NBSP-SERIAL ")
 
         assert resolve_device("NBSP-SERIAL").object == device
 
     def test_an_external_queryset_update_is_seen_by_the_next_lookup(self):
         from dcim.models import Device
+
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         device = make_device("lookup-external-edit", serial="OLD-EXTERNAL")
@@ -353,7 +366,8 @@ class TestLookup:
         assert resolve_device("OLD-EXTERNAL").kind is ResolutionKind.NO_MATCH
 
     def test_one_query_reads_the_candidates_of_a_whole_batch(self):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, SerialRules, resolve_devices
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         serials = [f"BATCH-SN{number:03}" for number in range(20)]
@@ -374,10 +388,14 @@ class TestLookup:
     def test_batches_resolve_integer_and_float_serials_as_distinct_text(self, serials):
         from netbox_librenms_plugin.serial_identity import (
             SerialRules,
+            resolve_device,
             resolve_device_write,
+            resolve_devices,
             resolve_devices_write,
+            resolve_module,
             resolve_modules,
         )
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_device_with_module_bays
 
         _rules_only()
         device = make_device_with_module_bays("lookup-numeric-bays", ["Slot 1", "Slot 2"])
@@ -406,6 +424,8 @@ class TestLookup:
         from dcim.models import Device
 
         from netbox_librenms_plugin import serial_identity
+        from netbox_librenms_plugin.serial_identity import resolve_devices
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         serials = [f"SCALE-SN{number:03}" for number in range(300)]
@@ -438,6 +458,9 @@ class TestLookup:
         assert len(compared) <= 2 * len(serials), len(compared)
 
     def test_a_module_lookup_counts_only_the_devices_it_names(self):
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_module
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
         first = make_device_with_module_bays("module-scope-a", ["Slot 1"])
         second = make_device_with_module_bays("module-scope-b", ["Slot 1"])
         on_first = install_module(first, "Slot 1", "SCOPE-CARD", serial="SCOPE-SN1")
@@ -449,6 +472,8 @@ class TestLookup:
 
     def test_the_query_and_every_trigram_index_use_one_trimmed_expression(self):
         """The ORM sends the expression that the indexes store; the catalog is read, never a query plan."""
+        from netbox_librenms_plugin.serial_identity import TRIM_CHARACTERS, resolve_device
+
         expected = f"btrim((serial)::text, '{TRIM_CHARACTERS}'::text)"
         sent = []
 
@@ -494,6 +519,8 @@ class TestLookup:
     def test_the_migration_trims_the_characters_that_the_owner_trims(self):
         import importlib
 
+        from netbox_librenms_plugin.serial_identity import TRIM_CHARACTERS
+
         module = importlib.import_module("netbox_librenms_plugin.migrations.0030_serial_trigram_indexes")
 
         assert module._SERIAL_TRIM_CHARACTERS == TRIM_CHARACTERS
@@ -504,6 +531,9 @@ class TestAmbiguity:
     """Two or more equivalent rows are Ambiguous, also when the user cannot see one of them."""
 
     def test_two_forms_of_one_serial_are_ambiguous_from_either_side(self):
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((SEEDED, r"\1", None))
         decorated = make_device("ambiguous-decorated", serial="S/N TWIN-SN1")
         bare = make_device("ambiguous-bare", serial="TWIN-SN1")
@@ -515,13 +545,16 @@ class TestAmbiguity:
             assert {device.pk for device in found.matches} == {decorated.pk, bare.pk}
 
     def test_excluding_one_of_two_rows_leaves_a_unique_match(self):
+        from netbox_librenms_plugin.serial_identity import resolve_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         first = make_device("ambiguous-exclude-a", serial="EXCL-SN1")
         second = make_device("ambiguous-exclude-b", serial=" EXCL-SN1 ")
 
         assert resolve_device("EXCL-SN1", exclude_pks=[first.pk]).object == second
 
     def test_a_read_that_stops_at_two_refuses_an_exclusion_it_cannot_count(self):
-        from netbox_librenms_plugin.serial_identity import resolve_modules
+        from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_modules
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
 
         holders = [
@@ -541,6 +574,7 @@ class TestAmbiguity:
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
+        from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
         _rules_only((SEEDED, r"\1", None))
@@ -562,7 +596,7 @@ class TestAmbiguity:
 @pytest.mark.django_db
 class TestGroupingAndPresentation:
     def test_a_group_of_two_equivalent_observations_is_kept_whole(self):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, group
 
         _rules_only((SEEDED, r"\1", None))
         groups = group(["S/N GRP-SN1", "GRP-SN1", "GRP-SN2", "n/a"], SerialRules.load().context(None))
@@ -575,6 +609,8 @@ class TestGroupingAndPresentation:
     def test_the_stored_form_is_the_trimmed_text_and_refuses_an_overlong_serial(self):
         from dcim.models import Device, Module
 
+        from netbox_librenms_plugin.serial_identity import stored_form
+
         assert stored_form("  S/N RAW-SN1 ", Device) == "S/N RAW-SN1"
         assert stored_form(" n/a ", Module) == ""
         assert stored_form(0, Device) == "0"
@@ -583,7 +619,7 @@ class TestGroupingAndPresentation:
         assert "serial" in refused.value.message_dict
 
     def test_a_legacy_stored_form_is_same_hardware_in_another_form(self):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, display, stored_form_differs
 
         _rules_only((SEEDED, r"\1", None))
         context = SerialRules.load().context(None)
@@ -596,7 +632,13 @@ class TestGroupingAndPresentation:
     def test_padding_around_a_matching_stored_serial_is_another_form_that_the_writers_heal(self):
         from dcim.models import Device, Module
 
-        from netbox_librenms_plugin.serial_identity import SerialRules, device_assignment, module_assignment
+        from netbox_librenms_plugin.serial_identity import (
+            SerialRules,
+            device_assignment,
+            module_assignment,
+            stored_form_differs,
+        )
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
 
         _rules_only()
         rules = SerialRules.load()
@@ -616,7 +658,7 @@ class TestGroupingAndPresentation:
         assert device_assignment(device, " PAD12345 ", rules=rules).value is None
 
     def test_a_rule_edit_changes_the_freshness_token(self):
-        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.serial_identity import SerialRules, freshness_token
 
         (rule,) = _rules_only((SEEDED, r"\1", None))
         before = freshness_token("S/N FRESH-SN1", SerialRules.load().context(None))
@@ -634,12 +676,15 @@ class TestWriters:
     """Every refusing outcome blocks a write; an absent incoming serial never clears a stored one."""
 
     def test_the_refusing_outcomes(self):
+        from netbox_librenms_plugin.serial_identity import REFUSING, ResolutionKind
+
         assert REFUSING == {ResolutionKind.UNIQUE, ResolutionKind.AMBIGUOUS, ResolutionKind.UNAVAILABLE}
 
     @pytest.mark.parametrize("first", ["global", "scoped"])
     def test_both_write_orders_of_two_rule_equivalent_serials_refuse_the_second(self, first):
         """A global device reports "PREFIX-ABC123"; a device of a maker whose rule strips "PREFIX-" reports "ABC123"."""
         from netbox_librenms_plugin.serial_identity import SerialRules, device_assignment
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         maker = _manufacturer("write-order")
         _rules_only((r"^PREFIX-(.+)$", r"\1", maker))
@@ -659,6 +704,7 @@ class TestWriters:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         existing = make_device("member-dedupe-existing", serial="S/N MEMBER-DEDUPE")
@@ -677,7 +723,7 @@ class TestWriters:
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.serial_identity import SerialRules, retype_conflict, retype_scope
-        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
         old_maker, new_maker = _manufacturer("retype-old"), _manufacturer("retype-new")
         _rules_only((SEEDED, r"\1", None), (r"^X(AB)C$", r"\1", old_maker))
@@ -702,6 +748,7 @@ class TestWriters:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         master_maker = _manufacturer("key-member")
         _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", master_maker))
@@ -746,7 +793,7 @@ class TestWriters:
     def test_an_import_refuses_a_serial_that_a_device_committed_after_the_validation(self, settings):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device
 
         configure_default_librenms_server(settings)
         _rules_only((SEEDED, r"\1", None))
@@ -804,6 +851,8 @@ class TestEquivalentFormsAcrossDecisions:
     """S1: a stored "S/N X" and an incoming "X" name one device in every decision that looks a serial up."""
 
     def test_the_drift_check_of_a_linked_device_names_the_equivalent_holder(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((SEEDED, r"\1", None))
         make_device("drift-linked", serial="OLD-DRIFT-SN", librenms_cf={"default": {"id": 7801}})
         holder = make_device("drift-holder", serial="S/N DRIFT-SN1")
@@ -814,6 +863,8 @@ class TestEquivalentFormsAcrossDecisions:
         assert result["serial_conflict"]["pk"] == holder.pk
 
     def test_the_merge_peer_is_found_in_its_other_form(self):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((SEEDED, r"\1", None))
         host = make_device("merge-forms-host", serial="MERGE-SN1", librenms_cf={"default": {"id": 42}})
         oob = make_device("merge-forms-oob", serial="S/N MERGE-SN1", librenms_cf={"default": {"id": 99}})
@@ -825,6 +876,7 @@ class TestEquivalentFormsAcrossDecisions:
 
     def test_the_cached_refresh_binds_the_device_that_stores_the_decorated_form(self):
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         device = make_device("refresh-forms", serial="S/N REFRESH-SN1")
@@ -842,8 +894,8 @@ class TestEquivalentFormsAcrossDecisions:
         from django.urls import reverse
 
         from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
-        from netbox_librenms_plugin.serial_identity import Resolution
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.serial_identity import Resolution, ResolutionKind
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
@@ -872,8 +924,8 @@ class TestEquivalentFormsAcrossDecisions:
         from django.urls import reverse
 
         from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
-        from netbox_librenms_plugin.serial_identity import Resolution
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.serial_identity import Resolution, ResolutionKind
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
@@ -896,10 +948,9 @@ class TestEquivalentFormsAcrossDecisions:
         assert message_texts(request, "error") == [serial_conflict_text(conflict, incoming, request.user)]
 
     def test_an_import_refuses_a_serial_whose_key_under_the_new_type_rules_another_device_holds(self, settings):
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
-        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
-
         from netbox_librenms_plugin.import_utils import validate_device_for_import
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device
 
         configure_default_librenms_server(settings)
         target_maker = _manufacturer("key-import")
@@ -933,7 +984,7 @@ class TestEquivalentFormsAcrossDecisions:
         from dcim.models import Device
         from django.urls import reverse
 
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         _rules_only((SEEDED, r"\1", None))
@@ -1030,6 +1081,8 @@ class TestCachedSearchResults:
         assert keys(1, rules) == before
 
     def test_a_rule_deletion_drops_a_cached_serial_match(self, caching_librenms):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((SEEDED, r"\1", None))
         holder = make_device("cache-rule-holder", serial="S/N CACHE-SN1")
         assert _cached_search(caching_librenms, "CACHE-SN1")["existing_device"] == holder
@@ -1039,6 +1092,8 @@ class TestCachedSearchResults:
         assert _cached_search(caching_librenms, "CACHE-SN1")["existing_device"] is None
 
     def test_a_rule_deletion_recomputes_the_serial_drift_of_a_cached_hostname_match(self, caching_librenms):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
         _rules_only((SEEDED, r"\1", None))
         make_device("cache-incoming", serial="S/N CACHE-SN3")
         assert _cached_search(caching_librenms, "CACHE-SN3")["serial_action"] is None
@@ -1053,6 +1108,7 @@ class TestCachedSearchResults:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         _rules_only((SEEDED, r"\1", None))
         holder = make_device(f"cache-row-holder-{change}", serial="S/N CACHE-SN2")
@@ -1087,7 +1143,7 @@ class TestCompletedSearchJobResults:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils.cache import serial_rules_version
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         _rules_only((SEEDED, r"\1", None))
