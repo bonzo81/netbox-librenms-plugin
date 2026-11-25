@@ -291,37 +291,40 @@ def test_a_chassis_change_between_the_two_device_reads_refuses_the_load(chassis,
     assert changed
 
 
-def test_the_chassis_serial_context_reads_the_master_that_the_fingerprint_signs(chassis):
-    """A master change after the load does not change the context: the policy signed the loaded master."""
-    from dcim.models import VirtualChassis
+@pytest.mark.django_db
+class TestChassisSerialContext:
+    """The serial context of a chassis policy reads the master that the fingerprint signs."""
 
-    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-    from netbox_librenms_plugin.models import NormalizationRule
+    def test_the_chassis_serial_context_reads_the_master_that_the_fingerprint_signs(self, chassis):
+        """A master change after the load does not change the context: the policy signed the loaded master."""
+        from dcim.models import VirtualChassis
 
-    page, member, virtual_chassis = chassis
-    _update(VirtualChassis, virtual_chassis.pk, master=page)
-    manufacturer_id = page.device_type.manufacturer_id
-    NormalizationRule.objects.create(
-        scope="serial", manufacturer_id=manufacturer_id, match_pattern="^PREFIX-(.+)$", replacement=r"\1"
-    )
-    policy = load_inventory_policy(page.pk)
-    _update(VirtualChassis, virtual_chassis.pk, master=member)
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.models import NormalizationRule
 
-    context = policy.chassis_serial_context()
+        page, member, virtual_chassis = chassis
+        _update(VirtualChassis, virtual_chassis.pk, master=page)
+        manufacturer_id = page.device_type.manufacturer_id
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer_id=manufacturer_id, match_pattern="^PREFIX-(.+)$", replacement=r"\1"
+        )
+        policy = load_inventory_policy(page.pk)
+        _update(VirtualChassis, virtual_chassis.pk, master=member)
 
-    assert (context.manufacturer_id, context.unavailable) == (manufacturer_id, "")
+        context = policy.chassis_serial_context()
 
+        assert (context.manufacturer_id, context.unavailable) == (manufacturer_id, "")
 
-def test_a_master_outside_the_loaded_members_gives_an_unavailable_context(chassis):
-    """A chassis master that is not one of the loaded members cannot decide the member serials."""
-    from dcim.models import VirtualChassis
+    def test_a_master_outside_the_loaded_members_gives_an_unavailable_context(self, chassis):
+        """A chassis master that is not one of the loaded members cannot decide the member serials."""
+        from dcim.models import VirtualChassis
 
-    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
-    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
 
-    page, _member, virtual_chassis = chassis
-    outsider = make_device_with_module_bays("policy-outsider", ["Slot 1"])
-    _update(VirtualChassis, virtual_chassis.pk, master=outsider)
+        page, _member, virtual_chassis = chassis
+        outsider = make_device_with_module_bays("policy-outsider", ["Slot 1"])
+        _update(VirtualChassis, virtual_chassis.pk, master=outsider)
 
-    assert load_inventory_policy(page.pk).chassis_serial_context().unavailable == UNAVAILABLE_MASTER_LINK
+        assert load_inventory_policy(page.pk).chassis_serial_context().unavailable == UNAVAILABLE_MASTER_LINK
