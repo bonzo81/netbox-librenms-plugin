@@ -446,8 +446,11 @@ def test_two_row_savepoints_of_one_object_keep_the_change_ids_of_each_kept_block
 
     def write(description, ids):
         _write_site(site, description)
-        if ids is not None:
-            (event,) = events_queue.get().values()
+        (event,) = events_queue.get().values()
+        # NetBox 4.7.5 queues the key itself, so the no-key case removes it.
+        if ids is None:
+            event.pop("object_change_ids", None)
+        else:
             event["object_change_ids"] = list(ids)
 
     with _netbox_request_context():
