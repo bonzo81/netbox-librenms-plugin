@@ -45,10 +45,22 @@ def locks_row(sql, model, pk):
         qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
         # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
         key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
-        # Only a positive predicate selects the row: NOT ((... id = 7)) excludes it at any parenthesis depth.
-        if any(not re.search(r"\bNOT\s*(?:\(\s*)*$", where[: found.start()]) for found in re.finditer(key, where)):
+        # Only a positive predicate selects the row: a NOT before the key or before any enclosing group excludes it.
+        if any(not _negated(where, found.start()) for found in re.finditer(key, where)):
             return True
     return False
+
+
+def _negated(where, position):
+    """Return whether NOT comes directly before *position* or before a group of *where* that encloses it."""
+    # It reads no string literals and no double negation; the captured lock statements have neither.
+    opened = []
+    for index, char in enumerate(where[:position]):
+        if char == "(":
+            opened.append(index)
+        elif char == ")" and opened:
+            opened.pop()
+    return any(re.search(r"\bNOT\s*$", where[:start]) for start in [position, *opened])
 
 
 def first_row_lock(statements, model, pk):
