@@ -921,6 +921,8 @@ def test_an_occupied_bay_offers_no_serial_update_beside_a_confirmed_holder(live_
 @pytest.mark.parametrize("fits", [True, False])
 def test_a_bayless_parent_with_a_long_serial_keeps_the_branch_of_its_children(live_librenms, fits):
     """The parent matches no bay, so its children install into the device's own bays without it."""
+    from dcim.models import Module
+
     device = make_device_with_module_bays(f"branch-bayless-{fits}", ["Slot 1"])
     seed_mapping(device, "default", own=81)
     parent_type = make_module_type(f"BRANCH-BAYLESS-PARENT-{fits}")
@@ -939,6 +941,13 @@ def test_a_bayless_parent_with_a_long_serial_keeps_the_branch_of_its_children(li
         if "install-branch" in form["action"] and form["fields"].get("parent_index") == "10"
     ]
     assert len(branch_forms) == 1
+
+    request = _post_branch(device, rows, 10, 81, live_librenms)
+
+    assert message_texts(request, "error") == []
+    installed = Module.objects.filter(device=device)
+    assert [(module.module_bay.name, module.serial) for module in installed] == [("Slot 1", "CHILD-SN1")]
+    assert not Module.objects.filter(module_type=parent_type).exists()
 
 
 @pytest.mark.parametrize("held_here", [True, False])
