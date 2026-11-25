@@ -1341,6 +1341,44 @@ class TestMergeTransceiverDataPortIdentity:
             (20, 2),
         ]
 
+    def test_a_transceiver_serial_with_an_identity_scans_no_entity_for_a_short_serial(
+        self, settings, librenms_server, monkeypatch
+    ):
+        """The short serial fallback runs only for a transceiver serial without an identity."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.views.base import modules_view
+
+        calls = []
+        fallback = modules_view._reports_the_short_serial_of_the_optic
+
+        def counted(*args, **kwargs):
+            calls.append(args)
+            return fallback(*args, **kwargs)
+
+        monkeypatch.setattr(modules_view, "_reports_the_short_serial_of_the_optic", counted)
+        view = _real_api_view(settings, librenms_server, librenms_id=115)
+        librenms_server.register(
+            "/api/v0/devices/115/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 99, "model": "SFP-10G-SR", "serial": "OPTIC12345"}],
+            },
+            method="GET",
+        )
+        librenms_server.register("/api/v0/devices/115/ports", {"status": "ok", "ports": []}, method="GET")
+        inventory_seed = [
+            {"entPhysicalIndex": index, "entPhysicalClass": "port", "entPhysicalSerialNum": f"AB-{index}"}
+            for index in (10, 11)
+        ]
+
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
+
+        assert error is None
+        assert [item["entPhysicalIndex"] for item in inventory] == [10, 11, 99]
+        assert calls == []
+
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
     ):

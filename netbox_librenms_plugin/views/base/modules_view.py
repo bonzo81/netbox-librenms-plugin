@@ -175,9 +175,8 @@ def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialC
 
 
 def _reports_the_short_serial_of_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
-    """Return whether an entity optic candidate reports the serial text of an optic whose serial has no identity."""
-    serial = transceiver.get("serial")
-    if not display(serial) or is_identity(serial, context) or _never_an_optic(item):
+    """Return whether an entity optic candidate reports the serial text of *transceiver*; its serial has no identity."""
+    if _never_an_optic(item):
         return False
     # A synthetic row or an entity that took another transceiver is not this optic.
     if item.get("_from_transceiver_api") or item.get(_TRANSCEIVER_API_MATCH):
@@ -2457,7 +2456,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if existing is None and index_taken:
                 # A synthetic row would duplicate the unrelated entity's index.
                 continue
-            if existing is None:
+            optic_serial = txr.get("serial")
+            if existing is None and display(optic_serial) and not is_identity(optic_serial, serial_context):
                 # A serial without an identity names the same optic only on an entity optic with that text.
                 existing = next(
                     (
