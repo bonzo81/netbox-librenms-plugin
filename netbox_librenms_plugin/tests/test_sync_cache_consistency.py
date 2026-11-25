@@ -391,6 +391,7 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
         module_inventory_cache_payload([], 6409, None, serial_context=SerialRules.load().for_device(device)),
         timeout=300,
     )
+    _seed_snapshot("ports", device, "primary")
     rule = NormalizationRule.objects.create(
         scope="serial",
         manufacturer=device.device_type.manufacturer,
@@ -410,6 +411,7 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
     tabs = response.json()["tabs"]
     assert set(tabs) == {tab.value for tab in SyncCacheConsistency(device).applicable_tabs()}
     assert tabs["modules"]["snapshot_available"] is False
+    assert (tabs["interfaces"]["state"], tabs["interfaces"]["snapshot_available"]) == ("ready", True)
 
 
 @pytest.mark.django_db
