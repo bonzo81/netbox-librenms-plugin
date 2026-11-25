@@ -1080,6 +1080,8 @@ class TestVirtualChassisInventory:
         """The field holds 50 characters; a selected member for a longer serial rolls back the other rows."""
         from django.utils.html import escape
 
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
         _vc, (page, other) = make_virtual_chassis_members(f"inventory-fit-{fits}", count=2)
         device_id = 6663 if fits else 6664
         seed_mapping(page, SERVER_KEY, own=device_id)
@@ -1090,7 +1092,12 @@ class TestVirtualChassisInventory:
 
         html = response.content.decode()
         assert f"<code>{serial}</code>" in html
-        assert ('<select name="member_id_1"' in html) is fits
+        (form,) = [form for form in module_tab_forms(html).forms if "assign-vc-serial" in form["action"]]
+        if fits:
+            assert form["selects"]["member_id_1"]["enabled"] is True
+            assert form["selects"]["member_id_1"]["options"][str(page.pk)] is True
+        else:
+            assert "member_id_1" not in form["selects"]
         reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
         assert (escape(reason) in html) is (not fits)
         rendered = self._post_vc_serial_form(logged_in_client, html, page, "FIT-B", other)
