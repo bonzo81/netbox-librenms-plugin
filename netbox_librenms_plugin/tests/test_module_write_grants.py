@@ -1945,6 +1945,7 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
     assert _installed(member) == set()
 
 
+@pytest.mark.parametrize("installed", [False, True], ids=["empty-bay", "installed-other-type"])
 @pytest.mark.parametrize(
     ("card", "withheld"),
     [
@@ -1954,20 +1955,38 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
     ],
     ids=["unattributed-short-serial", "unattributed-blank-serial", "attributed-by-the-page-serial"],
 )
-def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card, withheld):
-    """The card sits at the root and reports "12", so no rule names its member, and the page device must not take it."""
+def test_a_stack_row_that_no_member_reported_offers_no_write(ui, vc_grants, card, withheld, installed):
+    """The card sits at the root and reports "12", so no rule names its member, and the page device must not take it.
+
+    With another type in the bay, the row keeps the read-only Report VC issue control and loses Replace.
+    """
+    from dcim.models import InterfaceTemplate
+
+    from netbox_librenms_plugin.tests.conftest import make_module_type_with_bays
+
     page, member = vc_grants(card=card)
+    if installed:
+        other = make_module_type_with_bays("GR-OTHER")
+        # A template name without a member position is what the VC naming report is for.
+        InterfaceTemplate.objects.create(module_type=other, name="mgmt", type="1000base-t")
+        install_module(page, "Card Slot", "GR-OTHER", "OLD")
+    before = _installed(page)
     content = render(ui, page)
     parsed = module_tab_forms(content)
     (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
     (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{CARD}"[^>]*>', row)
     action, fields = rendered_module_form(content, "install-selected")
 
-    assert bool([form for form in parsed.forms if str(CARD) in form["fields"].values()]) is (not withheld)
+    assert bool([form for form in parsed.forms if str(CARD) in form["fields"].values()]) is (
+        not withheld and not installed
+    )
     assert ("data-member-unattributed" in row) is withheld
     assert (" disabled" in checkbox) is withheld
+    if installed:
+        assert 'data-action="report-vc-issue"' in row
+        assert ('data-action="replace"' in row) is (not withheld)
     post(ui, action, {**fields, "select": [str(CARD)]})
-    assert _installed(page) == (set() if withheld else {("Card Slot", "GR-CARD")})
+    assert _installed(page) == (before if withheld or installed else {("Card Slot", "GR-CARD")})
     assert _installed(member) == set()
 
 

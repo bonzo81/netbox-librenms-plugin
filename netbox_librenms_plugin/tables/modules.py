@@ -37,9 +37,20 @@ TREE_PREFIX = "└─\u00a0"
 LABELLED_MODULE_ACTIONS = frozenset({"install", "install-carrier"})
 
 UNATTRIBUTED_ROW_REASON = (
-    "The plugin cannot tell which stack member reported this part, so it offers no action. "
+    "The plugin cannot tell which stack member reported this part, so it offers no write action. "
     "Select the member to show its actions."
 )
+# The row flags of every action that writes a module or the device type: installs, Replace, Move, serial and
+# interface updates, and Mark Built-in.
+UNATTRIBUTED_ROW_WITHHELD_WRITES = {
+    "can_install": False,
+    "has_installable_children": False,
+    "can_update_serial": False,
+    "can_update_interface_binding": False,
+    "can_replace": False,
+    "can_move_from": False,
+    "built_in": None,
+}
 
 
 def module_action_control(tag, action, css, attrs, title, icon, label):
@@ -718,13 +729,15 @@ class LibreNMSModuleTable(tables.Table):
         # A row on a member the user may not view names none of its objects, so it offers no action.
         if record.get("member_withheld"):
             return ""
-        # The row can belong to any member, so no action may write it onto the page device.
-        if record.get("member_unattributed"):
-            return format_html(
-                '<span class="text-muted small" data-member-unattributed>{}</span>', UNATTRIBUTED_ROW_REASON
-            )
-
         buttons = []
+        # The row can belong to any member, so no action may write it onto the page device; read-only ones stay.
+        if record.get("member_unattributed"):
+            buttons.append(
+                format_html(
+                    '<span class="text-muted small" data-member-unattributed>{}</span>', UNATTRIBUTED_ROW_REASON
+                )
+            )
+            record = {**record, **UNATTRIBUTED_ROW_WITHHELD_WRITES}
 
         # Single install button (requires add permission). The view resolves the row by index, so a
         # row without one can only submit a form the view refuses; the carrier action below has no
@@ -1041,7 +1054,7 @@ class LibreNMSModuleTable(tables.Table):
         # "Install Carrier" buttons for No Bay rows where one or more
         # CarrierAutoInstallRule rows match. One button per (rule, empty bay)
         # candidate. Suggest-only — the user clicks to install.
-        if self.can_add_module and record.get("carrier_install_options"):
+        if self.can_add_module and record.get("carrier_install_options") and not record.get("member_unattributed"):
             install_url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             for opt in record["carrier_install_options"]:
                 buttons.append(
