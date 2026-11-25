@@ -54,10 +54,12 @@ MODULE_WRITE_ACTIONS = frozenset(
         "mark-built-in",
     }
 )
-# The controls that write a bay template or a bay mapping from the page device's bays or types.
-PAGE_DEVICE_WRITE_ACTIONS = frozenset({"add-bay-mapping", "map-existing-bay", "fix-model", "fix-device-type"})
+# The controls that write a bay template, a bay mapping or a carrier rule from the page device's bays or types.
+PAGE_DEVICE_WRITE_ACTIONS = frozenset(
+    {"add-bay-mapping", "map-existing-bay", "add-carrier-rule", "fix-model", "fix-device-type"}
+)
 # The controls that no row flag withholds: rules and types keyed by LibreNMS text, and the read-only VC report.
-UNGATED_ACTIONS = frozenset({"add-carrier-rule", "add-type-mapping", "add-module-type", "report-vc-issue"})
+UNGATED_ACTIONS = frozenset({"add-type-mapping", "add-module-type", "report-vc-issue"})
 # The one rule of the controls that a row flag withholds.
 ROW_FLAG_WITHHELD_ACTIONS = {
     # The row can belong to any member, so no control may write it onto the page device.
@@ -1143,6 +1145,7 @@ class LibreNMSModuleTable(tables.Table):
             and record.get("holder_hint_present")
             and not record.get("carrier_install_options")
             and getattr(self, "can_add_carrier_rule", False)
+            and offered("add-carrier-rule")
         ):
             base_url = reverse("plugins:netbox_librenms_plugin:carrierautoinstallrule_add")
             return_url = getattr(self, "return_url", "") or ""

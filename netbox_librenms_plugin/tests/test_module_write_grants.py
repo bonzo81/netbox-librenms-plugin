@@ -2356,9 +2356,11 @@ WRITE_ACTIONS = frozenset(
     }
 )
 # The controls that write a bay template or a bay mapping from the page device's bays or types.
-PAGE_DEVICE_ACTIONS = frozenset({"add-bay-mapping", "map-existing-bay", "fix-model", "fix-device-type"})
+PAGE_DEVICE_ACTIONS = frozenset(
+    {"add-bay-mapping", "map-existing-bay", "add-carrier-rule", "fix-model", "fix-device-type"}
+)
 # The controls that keep a flagged row's actions: rules and types keyed by LibreNMS text, and the VC report.
-UNGATED_ACTIONS = frozenset({"add-carrier-rule", "add-type-mapping", "add-module-type", "report-vc-issue"})
+UNGATED_ACTIONS = frozenset({"add-type-mapping", "add-module-type", "report-vc-issue"})
 FLAG_WITHHOLDS = {"member_unattributed": WRITE_ACTIONS | PAGE_DEVICE_ACTIONS, "unlinked_optic": WRITE_ACTIONS}
 
 
