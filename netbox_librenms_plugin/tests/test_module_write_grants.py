@@ -2104,6 +2104,24 @@ def test_a_stack_row_that_no_member_reported_offers_no_device_type_fix_or_bay_ma
     assert ('data-action="map-existing-bay"' in row) is (not withheld)
 
 
+@pytest.mark.parametrize(
+    ("card", "withheld"),
+    [({"entPhysicalContainedIn": 0}, True), ({}, False)],
+    ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
+)
+def test_a_stack_row_that_no_member_reported_offers_no_bay_mapping_suggestion(ui, vc_grants, card, withheld):
+    """The suggestion maps "0/1" to the page device's "Cage 1", a bay that the reporting member can lack."""
+    page, _member = vc_grants(
+        card={"entPhysicalName": "0/1", "entPhysicalDescr": "0/1", "entPhysicalSerialNum": "12", **card}
+    )
+    content = render(ui, page)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+
+    assert "No Bay" in row
+    assert ("data-member-unattributed" in row) is withheld
+    assert ('data-action="add-bay-mapping"' in row) is (not withheld)
+
+
 @pytest.mark.parametrize("pick_page", [False, True], ids=["other-member", "page-device"])
 def test_a_member_pick_offers_the_install_of_a_stack_row_that_no_member_reported(ui, vc_grants, pick_page):
     """The user names the member, so the table pinned to it offers the install there.

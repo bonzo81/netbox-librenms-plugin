@@ -1158,6 +1158,8 @@ class LibreNMSModuleTable(tables.Table):
             record.get("status") == "No Bay"
             and record.get("model_suggestion")
             and getattr(self, "can_add_module_bay_mapping", False)
+            # The suggestion names a page device bay, and an unattributed row can belong to another member.
+            and not record.get("member_unattributed")
         ):
             sug = record["model_suggestion"]
             base_url = reverse("plugins:netbox_librenms_plugin:modulebaymapping_add")
