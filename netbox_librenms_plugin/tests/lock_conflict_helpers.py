@@ -47,7 +47,8 @@ def first_row_lock(statements, model, pk):
             qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
             # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
             key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
-            if re.search(key, where) is not None:
+            # Only a positive predicate selects the row: NOT (... id = 7) excludes it.
+            if any(not re.search(r"\bNOT \(?$", where[: found.start()]) for found in re.finditer(key, where)):
                 return True
         return False
 
