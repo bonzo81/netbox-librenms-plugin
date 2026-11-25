@@ -3254,6 +3254,42 @@ def _seed_decorated_serial_rule():
     )
 
 
+@contextmanager
+def _action_branch_queries(view_class):
+    """Yield a list that receives the SQL run after the first validation returns and before any later validation."""
+    from unittest.mock import patch
+
+    validate = view_class.get_validated_device_with_selections
+    marks = []
+
+    def validate_and_mark(self, *args, **kwargs):
+        marks.append(len(connection.queries_log))
+        result = validate(self, *args, **kwargs)
+        marks.append(len(connection.queries_log))
+        return result
+
+    branch = []
+    with (
+        patch.object(view_class, "get_validated_device_with_selections", validate_and_mark),
+        CaptureQueriesContext(connection) as queries,
+    ):
+        yield branch
+    assert marks, "the request ran no validation"
+    end = marks[2] if len(marks) > 2 else queries.final_queries
+    branch += [query["sql"] for query in connection.queries[marks[1] : end]]
+
+
+def _serial_rule_queries(statements):
+    """Return the SQL statements that read the serial-scope NormalizationRules."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    return [
+        sql
+        for sql in statements
+        if '"netbox_librenms_plugin_normalizationrule"' in sql and f"'{NormalizationRule.SCOPE_SERIAL}'" in sql
+    ]
+
+
 def _hidden_twin_scope(change, *devices):
     """Return Device grant constraints that hide a later twin from the requester in the ``hidden-duplicate`` case."""
     return {"pk__in": [device.pk for device in devices]} if change == "hidden-duplicate" else None
@@ -4400,6 +4436,7 @@ class TestDeviceConflictActionBranches:
         from django.urls import reverse
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         target = make_device("branches-blank-serial-link", serial="STORED-SN-1")
         rule = NormalizationRule.objects.create(
@@ -4418,21 +4455,24 @@ class TestDeviceConflictActionBranches:
         assert details.context["validation"]["existing_device"] == target
         assert b'name="action" value="link"' in details.content
 
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
-            {**server, "action": "link", "existing_device_id": target.pk},
-            HTTP_HX_REQUEST="true",
-        )
+        with _action_branch_queries(DeviceConflictActionView) as branch:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
+                {**server, "action": "link", "existing_device_id": target.pk},
+                HTTP_HX_REQUEST="true",
+            )
 
         assert response.headers.get("HX-Trigger") == "closeModal"
         target.refresh_from_db()
         assert (target.serial, stored_mapping_for_test(target)) == ("STORED-SN-1", {self.server_key: 42})
+        assert branch and _serial_rule_queries(branch) == []
 
     @pytest.mark.parametrize("action", ["update_serial", "sync_serial"])
     def test_a_serial_action_without_an_incoming_serial_refuses_before_it_reads_a_serial_rule(self, action):
         from dcim.models import Device
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         target = make_device(f"branches-blank-{action}".replace("_", "-"), serial="STORED-SN-2")
         rule = NormalizationRule.objects.create(
@@ -4442,11 +4482,14 @@ class TestDeviceConflictActionBranches:
         NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
         self._register_device(42, target.name, serial="")
 
-        response = post_view(self._make_view(), self._request(action, target, f"{target.name}-user"), device_id=42)
+        request = self._request(action, target, f"{target.name}-user")
+        with _action_branch_queries(DeviceConflictActionView) as branch:
+            response = post_view(self._make_view(), request, device_id=42)
 
         self._assert_htmx_error(response, "No valid serial from LibreNMS")
         reloaded = Device.objects.get(pk=target.pk)
         assert (reloaded.serial, stored_mapping_for_test(reloaded)) == ("STORED-SN-2", None)
+        assert branch and _serial_rule_queries(branch) == []
 
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
