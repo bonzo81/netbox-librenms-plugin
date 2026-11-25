@@ -73,7 +73,7 @@ For Virtual Chassis devices, the Modules tab automatically distributes inventory
 
 When the inventory is a stack that import detection recognizes, only a member row (for example a stack chassis or a Junos FPC) names a member by its position. Rows below a member row belong to that member, unless a serial names another member. The stack root and rows directly under it belong to the device whose page is open. For an inventory that is not a recognized stack, the plugin reads a position of 1 or more, or a leading number in the name, as the member number.
 
-On a Junos Virtual Chassis, all members hang under one root. A row such as "FPC 1 Power Supply 0" belongs to the same member as the FPC that reports slot 1, and a row below an FPC belongs to that FPC's member. An FPC's member comes from its serial first, then from its detected position. If no FPC or more than one FPC reports the slot, the row stays on the open page. Routing Engine numbers are not member numbers.
+On a Junos Virtual Chassis, all members hang under one root. A row such as "FPC 1 Power Supply 0" belongs to the same member as the FPC that reports slot 1, and a row below an FPC belongs to that FPC's member. The plugin reads this link only from the description of the row, with the surrounding spaces removed. An FPC's member comes only from its serial. If the FPC serial is blank, the FPC gives no link, and its rows resolve as before through their parent rows. A row that names an FPC is unattributed if the FPC serial has no identity, or if no FPC or more than one FPC reports the slot. An unattributed row shows "Select a member" and offers no write until you select a member. Routing Engine numbers are not member numbers.
 
 ## Screenshot
 
