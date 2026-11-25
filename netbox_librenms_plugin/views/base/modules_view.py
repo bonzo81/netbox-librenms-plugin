@@ -3927,15 +3927,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # Bay exists, type matched, no module installed → can install
                 row["can_install"] = True
 
+        unlinked_optic_refusal = _unlinked_optic_refusal(item, serial, serial_context) if matched_type else ""
         if matched_type and not row.get("installed_module_id"):
             from dcim.models import Module
 
             # An install creates the module with the LibreNMS serial, and the writer refuses one that does not fit.
-            row["serial_fit_refusal"] = stored_form_refusal(serial, Module) or _unlinked_optic_refusal(
-                item, serial, serial_context
-            )
+            row["serial_fit_refusal"] = stored_form_refusal(serial, Module) or unlinked_optic_refusal
             if row["serial_fit_refusal"]:
                 row["can_install"] = False
+        elif unlinked_optic_refusal:
+            # A Replace deletes the occupant and installs the optic, so it refuses as the install does.
+            row["serial_fit_refusal"] = unlinked_optic_refusal
+            row["can_replace"] = False
 
         if matched_type:
             row["module_type_url"] = matched_type.get_absolute_url()

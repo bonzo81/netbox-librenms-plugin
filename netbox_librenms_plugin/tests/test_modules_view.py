@@ -1337,29 +1337,25 @@ class TestMergeTransceiverDataPortIdentity:
             for item in inventory
         ) == [(10, 1, False), (20, 2, True)]
 
-    @pytest.mark.parametrize(
-        ("optic_serial", "install_offered"),
-        [("AB-12", False), ("OPTIC12345", True), ("", True)],
-        ids=["short-serial", "identity-serial", "blank-serial"],
-    )
-    def test_the_modules_tab_offers_no_install_of_an_unlinked_optic_with_a_short_serial(
-        self, client, settings, recording_server, optic_serial, install_offered
-    ):
-        """The entity reports the optic's short serial text, but nothing links the two, so Install is withheld."""
+    @staticmethod
+    def _render_unlinked_optic_tab(client, settings, recording_server, name, optic_serial, *, occupant_model=None):
+        """Render the Modules tab of a device whose optic no entity links to; return the content and the optic index."""
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import (
             configure_librenms_servers,
+            install_module,
             make_device_with_module_bays,
             make_module_type_with_bays,
             make_superuser,
             map_device_to_librenms,
         )
-        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
 
         librenms_id, server_key, optic = 4300, "optic-tab", 99
-        device = make_device_with_module_bays(f"optic-tab-{optic_serial or 'blank'}", [f"Transceiver {optic}"])
+        device = make_device_with_module_bays(name, [f"Transceiver {optic}"])
         make_module_type_with_bays("SFP-10G-SR")
+        if occupant_model:
+            install_module(device, f"Transceiver {optic}", occupant_model, serial="OCCUPANT9876")
         entity = {
             "entPhysicalIndex": 10,
             "entPhysicalContainedIn": 0,
@@ -1393,7 +1389,22 @@ class TestMergeTransceiverDataPortIdentity:
         )
 
         assert response.status_code == 200
-        content = response.content.decode()
+        return response.content.decode(), optic
+
+    @pytest.mark.parametrize(
+        ("optic_serial", "install_offered"),
+        [("AB-12", False), ("OPTIC12345", True), ("", True)],
+        ids=["short-serial", "identity-serial", "blank-serial"],
+    )
+    def test_the_modules_tab_offers_no_install_of_an_unlinked_optic_with_a_short_serial(
+        self, client, settings, recording_server, optic_serial, install_offered
+    ):
+        """The entity reports the optic's short serial text, but nothing links the two, so Install is withheld."""
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        content, optic = self._render_unlinked_optic_tab(
+            client, settings, recording_server, f"optic-tab-{optic_serial or 'blank'}", optic_serial
+        )
         installs = [
             form
             for form in module_tab_forms(content).forms
@@ -1404,6 +1415,35 @@ class TestMergeTransceiverDataPortIdentity:
         assert len(installs) == int(install_offered)
         assert ("data-serial-fit-refusal" in row) is (not install_offered)
         assert (" disabled" in checkbox) is (not install_offered)
+
+    @pytest.mark.parametrize(
+        ("optic_serial", "replace_offered"),
+        [("AB-12", False), ("OPTIC12345", True)],
+        ids=["short-serial", "identity-serial"],
+    )
+    def test_the_modules_tab_offers_no_replace_of_another_type_by_an_unlinked_optic_with_a_short_serial(
+        self, client, settings, recording_server, optic_serial, replace_offered
+    ):
+        """A Replace deletes the occupant of another type and installs the optic, so a short serial offers none."""
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        content, optic = self._render_unlinked_optic_tab(
+            client,
+            settings,
+            recording_server,
+            f"optic-replace-{optic_serial}",
+            optic_serial,
+            occupant_model="QSFP-OTHER",
+        )
+        replaces = [
+            link
+            for link in module_tab_forms(content).links
+            if "module-mismatch-preview" in link.get("hx-get", "") and f"ent_index={optic}" in link["hx-get"]
+        ]
+        (row,) = re.findall(rf'<tr[^>]*data-ent-index="{optic}".*?</tr>', content, flags=re.S)
+        assert "Type Mismatch" in row
+        assert len(replaces) == int(replace_offered)
+        assert ("data-serial-fit-refusal" in row) is (not replace_offered)
 
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
