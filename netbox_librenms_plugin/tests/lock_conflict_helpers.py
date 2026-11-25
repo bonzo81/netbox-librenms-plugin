@@ -35,18 +35,21 @@ def first_row_lock(statements, model, pk):
     row_lock = re.compile(r'\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b(?: OF ("?\w+"?(?:, "?\w+"?)*))?')
 
     def locks_the_row(sql):
-        read = source.search(sql)
-        name = read.group(2) if read else None
-        locked = name or model._meta.db_table
         # A clause without OF locks every table; OF locks only the tables it names.
         clauses = row_lock.findall(sql)
-        if read is None or not any(not of or locked in of.replace('"', "").split(", ") for of in clauses):
-            return False
-        names = [re.escape(name)] if name else [table]
-        qualifier = "|".join(rf'"{known}"|(?<![\w"]){known}' for known in names)
-        # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
-        key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
-        return re.search(key, sql.partition(" WHERE ")[2]) is not None
+        where = sql.partition(" WHERE ")[2]
+        # A self-join reads the table more than once, so every alias must be checked.
+        for read in source.finditer(sql):
+            name = read.group(2)
+            locked = name or model._meta.db_table
+            if not any(not of or locked in of.replace('"', "").split(", ") for of in clauses):
+                continue
+            qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
+            # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
+            key = rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)'
+            if re.search(key, where) is not None:
+                return True
+        return False
 
     return next(i for i, sql in enumerate(statements) if locks_the_row(sql))
 

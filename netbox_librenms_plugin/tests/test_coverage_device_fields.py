@@ -1787,6 +1787,20 @@ class TestConvertLegacyLibreNMSIdView:
         recognized = 'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE'
         assert first_row_lock([statement, recognized], Device, 7) == (0 if counts else 1)
 
+    @pytest.mark.parametrize(("selected", "counts"), [("m", True), ("d", False)])
+    def test_the_first_row_lock_checks_every_alias_of_a_self_join(self, selected, counts):
+        """A self-join that locks only its second Device alias locks the row that this alias selects."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import first_row_lock
+
+        statement = (
+            "SELECT 1 FROM dcim_device d JOIN dcim_device m ON m.id = d.vc_master_id"
+            f" WHERE {selected}.id = 7 FOR UPDATE OF m"
+        )
+        recognized = 'SELECT 1 FROM "dcim_device" WHERE id = 7 FOR UPDATE'
+        assert first_row_lock([statement, recognized], Device, 7) == (0 if counts else 1)
+
     @pytest.mark.parametrize("hidden_twin", [True, False])
     def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(
         self, client, librenms_server, hidden_twin
