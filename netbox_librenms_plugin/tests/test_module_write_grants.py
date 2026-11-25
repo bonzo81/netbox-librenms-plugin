@@ -2014,19 +2014,37 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_short_serial(
 def test_a_row_order_position_attributes_no_stack_member_with_a_serial_no_member_owns(
     ui, vc_grants, second_serial, withheld, reverse
 ):
-    """Switch 2 reports the member's serial; row order names no member for Switch 3's unowned "NEW123"."""
+    """Switch 2 reports the member's serial; row order names no member for Switch 3's unowned "NEW123".
+
+    A blank Switch 3 takes position 1 in reversed order, the page device, which Switch 2 does not own.
+    """
     rows = _stack_rows((-1, -1), serials=("VCB-0001", second_serial))
     if reverse:
         rows[1:3] = rows[2:0:-1]
     page, member = vc_grants(rows=rows)
     content = render(ui, page)
     parsed = module_tab_forms(content)
+    # In order, a blank Switch 3 takes position 2, the member that Switch 2 owns by serial.
+    withheld = withheld or not reverse
 
     (owned,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
     (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 1}".*?</tr>', content, flags=re.S)
     assert "data-member-unattributed" not in owned
     assert f'<option value="{member.pk}" selected>' in owned
     assert ("data-member-unattributed" in row) is withheld
+    assert bool(_row_forms(parsed, CARD + 1)) is (not withheld)
+
+
+@pytest.mark.parametrize(("first_serial", "withheld"), [("VCB-0001", True), ("VCA-0001", False)], ids=["taken", "free"])
+def test_a_reported_position_gives_no_member_that_another_switch_owns_by_serial(ui, vc_grants, first_serial, withheld):
+    """Switch 2 reports the member's serial at position 1, so position 2 can not give Switch 3 that member too."""
+    page, member = vc_grants(rows=_stack_rows((1, 2), serials=(first_serial, "12")))
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 1}".*?</tr>', content, flags=re.S)
+    assert ("data-member-unattributed" in row) is withheld
+    assert (f'<option value="{member.pk}" selected>' in row) is (not withheld)
     assert bool(_row_forms(parsed, CARD + 1)) is (not withheld)
 
 

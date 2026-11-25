@@ -423,6 +423,12 @@ class _Attribution:
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
         # The stack holds when the rules of any member explain it, as by_serial admits each row.
         self.stack = _stack_rows(rows, self.by_serial.contexts()) if vc_members else _StackRows(None, {}, False, {})
+        # The members that a member row owns by its serial; a position gives none of them to another member row.
+        self.serial_owned = {
+            member.pk
+            for index in self.stack.positions
+            if (member := self.serial_owner(self.by_index.get(index, {}))) is not None
+        }
         self.results = {}
 
     def member_at(self, position):
@@ -480,7 +486,8 @@ class _Attribution:
             return member
         if self._row_order_names_no_member(row):
             return None
-        return self.member_at(self.stack.positions.get(row.get("entPhysicalIndex")))
+        member = self.member_at(self.stack.positions.get(row.get("entPhysicalIndex")))
+        return None if member is not None and member.pk in self.serial_owned else member
 
     def _row_order_names_no_member(self, row):
         """Return whether a member row's position comes from row order and it reports a serial no member owns."""
@@ -563,8 +570,9 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
 
     This is all of module sync's member attribution. A row's own serial decides first. In a stack
     that :func:`extract_vc_members` recognizes, only a member row gives a member by its position
-    (a position from row order gives none to a member row that reports a serial no member owns;
-    a member row that names no NetBox member, and the rows below it, are unattributed),
+    (a position from row order gives none to a member row that reports a serial no member owns, and
+    no position gives a member that another member row owns by serial; a member row that names no
+    NetBox member, and the rows below it, are unattributed),
     its descendants inherit it unless a nearer serial names another member, and the stack root and
     the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
     follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row

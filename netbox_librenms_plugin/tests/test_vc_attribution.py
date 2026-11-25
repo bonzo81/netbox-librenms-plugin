@@ -398,9 +398,12 @@ class TestRecognizedStack:
         assert (owner[201], owner[203]) == ((owner_of[serials[0]], "serial"), (owner_of[serials[0]], "ancestor-serial"))
         if second is None:
             assert {owner[index] for index in (202, 204, 205)} == {(None, UNATTRIBUTED_SOURCE)}
+        elif reverse:
+            # Row order gives Switch 2 position 1, whose member Switch 1 owns by serial.
+            assert owner[202] == (None, UNATTRIBUTED_SOURCE)
         else:
             # A blank serial keeps the row-order position, as before.
-            assert owner[202] == (last if not reverse else first, "position")
+            assert owner[202] == (last, "position")
 
     @pytest.mark.parametrize(
         ("serial", "position"), [("NEW123", 3), ("", 3), ("100052", 3)], ids=["new", "blank", "owned"]
@@ -428,6 +431,40 @@ class TestRecognizedStack:
             assert (owner[213], owner[215]) == ((second, "serial"), (second, "ancestor-serial"))
         else:
             assert {owner[213], owner[215]} == {(None, UNATTRIBUTED_SOURCE)}
+
+    @pytest.mark.parametrize(
+        ("first_serial", "second_serial", "positions", "withheld"),
+        [
+            ("100062", "12", (1, 2), True),
+            ("100062", "", (-1, -1), True),
+            ("100061", "12", (1, 2), False),
+            ("100061", "", (-1, -1), False),
+        ],
+        ids=["reported-owned", "row-order-owned", "reported-free", "row-order-free"],
+    )
+    def test_a_position_names_no_member_that_another_member_row_owns_by_serial(
+        self, first_serial, second_serial, positions, withheld
+    ):
+        """Switch 1 reports member 2's serial, so position 2 can not give Switch 2 that member too."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        first, second = _vc_members(["100061", "100062"])
+        inventory = [
+            _row(220, "stack", 0),
+            _row(221, "chassis", 220, position=positions[0], entPhysicalSerialNum=first_serial),
+            _row(222, "chassis", 220, position=positions[1], entPhysicalSerialNum=second_serial),
+            _row(223, "module", 222, entPhysicalModelName="CARD", entPhysicalSerialNum="CARD123"),
+        ]
+
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[221] == ({"100061": first, "100062": second}[first_serial], "serial")
+        if withheld:
+            assert {owner[222], owner[223]} == {(None, UNATTRIBUTED_SOURCE)}
+        else:
+            assert (owner[222], owner[223]) == ((second, "position"), (second, "parent-context"))
 
     @pytest.mark.parametrize("stored", [("", ""), ("SN-AAA", "SN-BBB")], ids=["blank", "fpc-serials"])
     def test_junos_fpcs_sharing_a_slot_follow_only_their_serials(self, stored):
