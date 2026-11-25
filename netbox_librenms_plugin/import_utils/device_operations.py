@@ -101,8 +101,9 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
-# The fragment of the blocker of a row whose serial no lookup can read; the refresh strips a stale copy by it.
-SERIAL_UNAVAILABLE_ISSUE_MARKER = "cannot be matched:"
+# The start and end of the blocker of a row whose serial no lookup can read; the serial text lies between them.
+SERIAL_UNAVAILABLE_ISSUE_START = "Serial '"
+SERIAL_UNAVAILABLE_ISSUE_END = f"' cannot be matched: {UNAVAILABLE_MASTER_LINK}"
 STACK_DETECTION_FAILED_MESSAGE = "Stack detection failed. Refresh LibreNMS data and try again."
 
 
@@ -464,7 +465,16 @@ def check_legacy_id_serial(result, device, incoming_serial, serial_rules) -> Non
 def serial_unavailable_issue(incoming_serial) -> str:
     """Return the blocker of a row whose serial lookup is Unavailable; validation and the refresh both add it."""
     # The constant, not the lookup's reason: the issue text must carry nothing that an unscoped lookup returned.
-    return f"Serial '{display(incoming_serial)}' {SERIAL_UNAVAILABLE_ISSUE_MARKER} {UNAVAILABLE_MASTER_LINK}"
+    return f"{SERIAL_UNAVAILABLE_ISSUE_START}{display(incoming_serial)}{SERIAL_UNAVAILABLE_ISSUE_END}"
+
+
+def is_serial_unavailable_issue(issue) -> bool:
+    """Return whether *issue* is a ``serial_unavailable_issue()`` text; other issues can quote its words."""
+    return (
+        isinstance(issue, str)
+        and issue.startswith(SERIAL_UNAVAILABLE_ISSUE_START)
+        and issue.endswith(SERIAL_UNAVAILABLE_ISSUE_END)
+    )
 
 
 def _serial_taken_message(device_id, incoming_serial, taken) -> str:

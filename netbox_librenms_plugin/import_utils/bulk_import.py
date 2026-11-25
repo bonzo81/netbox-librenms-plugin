@@ -55,13 +55,13 @@ from .cache import (
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
-    SERIAL_UNAVAILABLE_ISSUE_MARKER,
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
     _describe_existing_librenms_link,
     check_legacy_id_serial,
     effective_import_device_type,
     import_single_device,
+    is_serial_unavailable_issue,
     resolve_device_by_host_ip,
     serial_unavailable_issue,
     validate_device_for_import,
@@ -1101,9 +1101,7 @@ def _refresh_existing_device(  # noqa: C901
         # Same for the serial-unavailable blocker: the serial fallback below adds it again while the lookup cannot read.
         msgs = validation.get("issues")
         if isinstance(msgs, list):
-            validation["issues"] = [
-                m for m in msgs if not (isinstance(m, str) and SERIAL_UNAVAILABLE_ISSUE_MARKER in m)
-            ]
+            validation["issues"] = [m for m in msgs if not is_serial_unavailable_issue(m)]
 
         new_device = None
         match_type = None
@@ -1399,7 +1397,7 @@ def _block_failed_recheck(validation: dict) -> None:
 
 def _stopped_at_unavailable_serial(validation: dict) -> bool:
     """Return whether validation stopped at an Unavailable serial lookup, before the site and type checks."""
-    return any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", []))
+    return any(is_serial_unavailable_issue(issue) for issue in validation.get("issues", []))
 
 
 def _empty_return(return_cache_status: bool):

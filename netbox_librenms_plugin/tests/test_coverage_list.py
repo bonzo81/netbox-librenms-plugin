@@ -469,7 +469,7 @@ class TestImportListRequest:
         """Validation stops before the site and type checks, so the cached row must not be reused once the lookup reads."""
         from dcim.models import Device, DeviceType, Manufacturer, Site
 
-        from netbox_librenms_plugin.import_utils.device_operations import SERIAL_UNAVAILABLE_ISSUE_MARKER
+        from netbox_librenms_plugin.import_utils.device_operations import is_serial_unavailable_issue
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
         manufacturer = Manufacturer.objects.create(name="Test Vendor", slug="test-vendor")
@@ -486,7 +486,7 @@ class TestImportListRequest:
             return response, row["_validation"]
 
         _first, blocked = validation()
-        assert any(SERIAL_UNAVAILABLE_ISSUE_MARKER in issue for issue in blocked["issues"])
+        assert any(is_serial_unavailable_issue(issue) for issue in blocked["issues"])
         assert blocked["site"]["found"] is False
 
         # The stray member gets another serial, so the lookup reads and finds no holder.
@@ -494,7 +494,7 @@ class TestImportListRequest:
         second, revalidated = validation()
 
         assert second.context["from_cache"] is True
-        assert not any(SERIAL_UNAVAILABLE_ISSUE_MARKER in issue for issue in revalidated["issues"])
+        assert not any(is_serial_unavailable_issue(issue) for issue in revalidated["issues"])
         assert revalidated["site"]["site"].name == "Test Lab"
         assert revalidated["device_type"]["device_type"].model == "Test Router"
 
@@ -696,7 +696,7 @@ class TestImportListRequest:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils.cache import serial_rules_version
-        from netbox_librenms_plugin.import_utils.device_operations import SERIAL_UNAVAILABLE_ISSUE_MARKER
+        from netbox_librenms_plugin.import_utils.device_operations import is_serial_unavailable_issue
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
         device = _device(4112)
@@ -723,8 +723,61 @@ class TestImportListRequest:
         results = client.get(_import_url(), {"job_id": job.pk})
 
         (row,) = results.context["table"].data
-        assert any(SERIAL_UNAVAILABLE_ISSUE_MARKER in issue for issue in row["_validation"]["issues"])
+        assert any(is_serial_unavailable_issue(issue) for issue in row["_validation"]["issues"])
         assert row["_validation"]["can_import"] is False
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("linked", [True, False])
+    def test_the_background_results_page_refreshes_a_row_whose_location_quotes_the_unavailable_text(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+        linked,
+    ):
+        """The site issue quotes the LibreNMS location, so a location with the blocker's words is no blocker."""
+        from core.models import Job
+
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+        from netbox_librenms_plugin.import_validation_helpers import SITE_ISSUE_PREFIX
+
+        device_id = 4114 if linked else 4115
+        location = "Site cannot be matched: annex"
+        device = {**_device(device_id), "location": location}
+        _register_devices(librenms_server, [device])
+        user = _create_user(django_user_model, f"results-quoted-location-{linked}")
+        client.force_login(user)
+        (searched,) = client.get(_import_url(), _search_params()).context["table"].data
+        site_issue = f"{SITE_ISSUE_PREFIX} '{location}'"
+        assert site_issue in searched["_validation"]["issues"]
+        if linked:
+            holder = make_device("results-quoted-location-linked", librenms_cf={SERVER_KEY: {"id": device_id}})
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={
+                "device_ids": [device_id],
+                "filters": {"hostname": "edge"},
+                "server_key": SERVER_KEY,
+                "serial_rules": serial_rules_version(),
+            },
+        )
+
+        results = client.get(_import_url(), {"job_id": job.pk})
+
+        (row,) = results.context["table"].data
+        validation = row["_validation"]
+        if linked:
+            # The refresh finds the Device that was linked after the search.
+            assert validation["existing_device"] == holder
+            assert site_issue not in validation["issues"]
+        else:
+            # The refresh keeps the site issue: it is no stale serial blocker.
+            assert validation["existing_device"] is None
+            assert site_issue in validation["issues"]
+        assert validation["can_import"] is False
 
     @pytest.mark.django_db
     def test_clear_cache_forces_a_fresh_http_search(
