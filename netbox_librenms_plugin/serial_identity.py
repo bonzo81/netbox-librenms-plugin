@@ -394,9 +394,9 @@ def display(value) -> str:
     return "" if is_librenms_placeholder(text) else text
 
 
-def page_text(value):
-    """Return *value* with each unpaired surrogate in its text replaced by U+FFFD: a UTF-8 page cannot encode one."""
-    return _SURROGATE.sub("\ufffd", value) if isinstance(value, str) else value
+def page_text(value) -> str:
+    """Return ``display(value)`` with each unpaired surrogate replaced by U+FFFD: a UTF-8 page cannot encode one."""
+    return _SURROGATE.sub("\ufffd", display(value))
 
 
 def stored_form(value, model) -> str:

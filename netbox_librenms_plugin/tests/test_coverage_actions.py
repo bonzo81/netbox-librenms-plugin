@@ -2104,14 +2104,17 @@ class TestDeviceValidationDetailsView:
         assert stored_mapping_for_test(member) == {"default": 1}
         assert member.serial == ("ABC123" if match_type == "serial" else "MEMBER-OLD")
 
-    def test_a_serial_with_an_unpaired_surrogate_renders_the_blocked_dialog(self):
-        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
-        infrastructure = make_device("details-surrogate-infrastructure")
+    @pytest.mark.parametrize(
+        ("serial", "shown"), [("ABC\ud800DEF", "ABC\ufffdDEF"), (0, "0")], ids=["surrogate", "zero"]
+    )
+    def test_the_dialog_shows_the_text_of_the_librenms_serial(self, serial, shown):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape; a JSON 0 is the serial "0", not a gap."""
+        infrastructure = make_device("details-serial-text-infrastructure")
         self.primary_server.device_info_response(
             device_id=1,
-            hostname="details-surrogate",
+            hostname="details-serial-text",
             hardware=infrastructure.device_type.model,
-            serial="ABC\ud800DEF",
+            serial=serial,
             ip="198.18.0.11",
         )
         self.primary_server.vc_inventory_callable(1, [], {})
@@ -2121,7 +2124,9 @@ class TestDeviceValidationDetailsView:
         assert response.status_code == 200
         content = response.content.decode()
         assert "Cannot Import" in content
-        assert "ABC\ufffdDEF" in content
+        start = content.index('<td style="padding-left: 0.75rem;">Serial</td>')
+        serial_row = content[start : content.index("</tr>", start)]
+        assert re.search(rf'<td class="text-break">\s*{re.escape(shown)}\s*</td>', serial_row)
 
     @staticmethod
     def _link_forms(response):
@@ -2800,9 +2805,12 @@ class TestDeviceVCDetailsView:
         assert b"stack-master-M1" in result.content
         assert b"stack-master-M2" in result.content
 
-    def test_a_member_serial_with_an_unpaired_surrogate_renders(self, settings, librenms_server):
-        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
-        server_key = "vc-details-surrogate"
+    @pytest.mark.parametrize(
+        ("serial", "shown"), [("ABC\ud800DEF", "ABC\ufffdDEF"), (0, "0")], ids=["surrogate", "zero"]
+    )
+    def test_the_dialog_shows_the_text_of_a_member_serial(self, settings, librenms_server, serial, shown):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape; a JSON 0 is the serial "0", not a gap."""
+        server_key = "vc-details-serial-text"
         view = self._view(settings, librenms_server, server_key)
         librenms_server.device_info_response(
             device_id=43, hostname="stack-surrogate", serial="MEMBER-1", hardware=_shared_infra()[2].model
@@ -2812,13 +2820,13 @@ class TestDeviceVCDetailsView:
             for position in (1, 2)
         ]
         rows[0]["entPhysicalSerialNum"] = "MEMBER-1"
-        rows[1]["entPhysicalSerialNum"] = "ABC\ud800DEF"
+        rows[1]["entPhysicalSerialNum"] = serial
         librenms_server.vc_inventory_callable(43, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}], {100: rows})
 
         result = get_view(view, make_view_request("get", {"server_key": server_key}), device_id=43)
 
         assert result.status_code == 200
-        assert "ABC�DEF" in result.content.decode()
+        assert f"<strong>Serial:</strong> <code>{shown}</code>" in result.content.decode()
 
     def test_rule_read_failure_renders_detection_failure(self, client, live_librenms):
         from django.urls import reverse

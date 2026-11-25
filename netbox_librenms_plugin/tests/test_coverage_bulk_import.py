@@ -1273,11 +1273,42 @@ def test_the_bulk_confirmation_renders_a_member_serial_with_an_unpaired_surrogat
 
     assert response.status_code == 200
     (entry,) = response.context["devices"]
-    label = "Stack member 2" if numbered else "Stack member with serial 'ABC�DEF'"
+    label = "Stack member 2" if numbered else "Stack member with serial 'ABC\ufffdDEF'"
     assert f"{label}: {stored_form_refusal(member_serial, Device)}" in entry["validation"]["issues"]
     content = response.content.decode()
-    assert "SN ABC�DEF" in content
+    assert "SN ABC\ufffdDEF" in content
     assert escape(label) in content
+
+
+@pytest.mark.django_db
+def test_the_bulk_confirmation_shows_a_numeric_zero_member_serial(client, live_librenms):
+    """LibreNMS sends a one-digit member serial as the JSON number 0; the import stores "0", so the dialog shows it."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 394
+    row = _libre_device(
+        device_id,
+        "confirm-stack-zero",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], 0))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser("confirm-stack-zero-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    assert '<span class="text-muted">SN 0</span>' in response.content.decode()
 
 
 @pytest.mark.django_db

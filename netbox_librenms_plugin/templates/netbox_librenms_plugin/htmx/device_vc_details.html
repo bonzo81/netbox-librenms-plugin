@@ -102,12 +102,14 @@
                   {% if member.model %}
                     <span><strong>Model:</strong> {{ member.model }}</span>
                   {% endif %}
-                  {% if member.serial %}
-                    <span><strong>Serial:</strong> <code>{{ member.serial|page_text }}</code></span>
+                  {% with member_serial=member.serial|page_text %}
+                  {% if member_serial %}
+                    <span><strong>Serial:</strong> <code>{{ member_serial }}</code></span>
                   {% endif %}
-                  {% if not member.model and not member.serial %}
+                  {% if not member.model and not member_serial %}
                     <span>No additional metadata</span>
                   {% endif %}
+                  {% endwith %}
                 </div>
               </li>
             {% endfor %}

@@ -699,11 +699,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
 
 def _stack_member_label(position, serial) -> str:
     """Return how a stack member issue names a member: its position, or its serial in a stack without numbers."""
-    return (
-        f"Stack member {position}"
-        if position is not None
-        else f"Stack member with serial '{page_text(display(serial))}'"
-    )
+    return f"Stack member {position}" if position is not None else f"Stack member with serial '{page_text(serial)}'"
 
 
 def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list:
