@@ -302,14 +302,23 @@ def _vc_serials_modal(items):
     def url(name, **kwargs):
         return "https://plugin.example.com/devices/1/assign-vc-serial/"
 
+    # The plugin package needs NetBox, so the serial text filter is a stub.
+    @urls.filter(name="page_text")
+    def page_text(value):
+        return "" if value is None else str(value)
+
     engine.template_builtins.append(urls)
     source = (templates / "netbox_librenms_plugin/librenms_sync_base.html").read_text()
     # The dialog is the body of one {% if %} block, so the slice holds balanced tags.
     start = source.index("<!-- VC Member Serials Modal -->")
     dialog = source[start : source.index("{% endif %}", source.index("</table>", start))]
     members = [SimpleNamespace(pk=pk, name=f"core-stack-building-a-m{pk}") for pk in (1, 2)]
-    device = SimpleNamespace(pk=1, virtual_chassis=SimpleNamespace(members=SimpleNamespace(all=members)))
-    context = {"object": device, "vc_inventory_serials": items, "csrf_token": "test-token"}
+    context = {
+        "object": SimpleNamespace(pk=1),
+        "vc_inventory_serials": items,
+        "vc_serial_members": members,
+        "csrf_token": "test-token",
+    }
     return engine.from_string(dialog).render(Context(context, use_l10n=False))
 
 
