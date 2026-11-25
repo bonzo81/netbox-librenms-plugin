@@ -117,9 +117,17 @@
         modules. Please resolve the conflict manually before proceeding.
     </div>
 </div>
+{% elif serial_conflict_unavailable %}
+<div class="alert alert-warning py-2 mb-3">
+    <i class="mdi mdi-alert me-1"></i>
+    <div>
+        <strong>Serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> cannot be matched, so
+        <em>Replace</em> is not available.
+    </div>
+</div>
 {% endif %}
 
-{% if installed_module and not replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_hidden and not serial_conflict_owns_bay %}
+{% if installed_module and not replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_unavailable and not serial_conflict_hidden and not serial_conflict_owns_bay %}
 <div class="alert alert-warning py-2 mb-3">
     <i class="mdi mdi-alert me-1"></i>
     <div>
@@ -177,7 +185,7 @@
     {% endif %}
 
     {# Replace: delete current + install fresh from LibreNMS data #}
-    {% if installed_module and replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_hidden and not serial_conflict_owns_bay and not serial_fit_refusal and not legacy_replace %}
+    {% if installed_module and replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_unavailable and not serial_conflict_hidden and not serial_conflict_owns_bay and not serial_fit_refusal and not legacy_replace %}
     <span class="small text-muted w-100 text-end order-first" data-replace-removes="{{ replace_removal.count }}">
         <em>Replace</em> deletes {{ replace_removal.count }} module{{ replace_removal.count|pluralize }}{% if replace_removal.names %}: {{ replace_removal.names|join:", " }}{% endif %}{% if replace_removal.hidden %} and {{ replace_removal.hidden }} that you cannot view{% endif %}.
     </span>

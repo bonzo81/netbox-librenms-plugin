@@ -380,6 +380,57 @@ def test_replace_refuses_a_serial_conflict_that_appeared_after_its_preview(ui, c
     assert Module.objects.filter(pk=elsewhere.pk, device=elsewhere_device).exists()
 
 
+def _unavailable_holder_lookup(monkeypatch):
+    """Error injection: no rule context gives the Replace holder lookup this state today."""
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK, Resolution, ResolutionKind
+
+    unavailable = Resolution(ResolutionKind.UNAVAILABLE, reason=UNAVAILABLE_MASTER_LINK)
+    monkeypatch.setattr(
+        "netbox_librenms_plugin.views.sync.modules._resolve_replacement_holder", lambda *args, **kwargs: unavailable
+    )
+
+
+@pytest.mark.parametrize("lookup", ["unavailable", "available"])
+def test_replace_refuses_an_unavailable_serial_holder_lookup(ui, c8300, monkeypatch, lookup):
+    """A lookup that cannot tell which module holds the serial must not let Replace delete and install."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.views.sync.modules import REPLACE_SERIAL_UNAVAILABLE
+
+    device, entities = c8300
+    action, fields = _replace_form(ui, device, entities)
+    installed = Module.objects.get(pk=fields["module_id"])
+    before = written_state(device)
+    if lookup == "unavailable":
+        _unavailable_holder_lookup(monkeypatch)
+
+    response = post(ui, action, fields)
+
+    refused = REPLACE_SERIAL_UNAVAILABLE.format(serial=_nim(entities)[1]) in messages_of(response)
+    assert refused is (lookup == "unavailable")
+    if lookup == "unavailable":
+        assert written_state(device) == before
+    else:
+        replacement = Module.objects.get(device=device, module_bay_id=installed.module_bay_id)
+        assert replacement.pk != installed.pk
+        assert replacement.serial == _nim(entities)[1]
+
+
+@pytest.mark.parametrize("lookup", ["unavailable", "available"])
+def test_the_preview_withholds_replace_for_an_unavailable_serial_holder_lookup(ui, c8300, monkeypatch, lookup):
+    """The Replace POST refuses this state, so the dialog must not offer it."""
+    device, entities = c8300
+    install_module(device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD")
+    table = render(ui, device)
+    if lookup == "unavailable":
+        _unavailable_holder_lookup(monkeypatch)
+
+    preview = ui.get(rendered_preview_url(table, REAL_NIM), HTTP_HX_REQUEST="true")
+
+    assert preview.status_code == 200, preview.content
+    assert len(_replace_forms(preview.content.decode())) == (0 if lookup == "unavailable" else 1)
+
+
 @pytest.mark.parametrize(
     ("reported_serial", "admitted"),
     [("TAG 12", False), ("TAG CARD123", True)],

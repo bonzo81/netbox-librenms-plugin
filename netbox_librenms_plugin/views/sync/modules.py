@@ -50,6 +50,7 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.serial_identity import (
     RELOCATION_HELD,
     REFUSING,
+    UNAVAILABLE_MASTER_LINK,
     Comparison,
     SerialRules,
     Resolution,
@@ -465,6 +466,11 @@ MOVE_OUTSIDE_CHANGE_SCOPE = "A module that Move would change is outside your cha
 MOVE_OCCUPANT_HOLDS_MODULE = "The module in the destination bay contains the module to move. Nothing was moved."
 MOVE_STALE = "The modules or module bays changed. Refresh Modules and try again."
 MOVE_INTO_OWN_SUBTREE = "The destination bay belongs to the module or to a module below it. Nothing was moved."
+
+
+REPLACE_SERIAL_UNAVAILABLE = (
+    "Serial '{serial}' cannot be matched: " + UNAVAILABLE_MASTER_LINK + " Nothing was replaced."
+)
 
 
 class _SerialConflictUnavailable(Exception):
@@ -2997,6 +3003,8 @@ class ModuleMismatchPreviewView(
                 "replace_removal": replace_removal,
                 "serial_conflict_ambiguous": serial_conflict_ambiguous,
                 "serial_conflict_hidden": serial_conflict_hidden,
+                # The Replace POST refuses a holder lookup that cannot decide.
+                "serial_conflict_unavailable": elsewhere.kind is ResolutionKind.UNAVAILABLE,
                 "ent_index": ent_index_int,
                 "server_key": server_key or "",
                 "selected_device_id": target_device.pk,
@@ -3153,9 +3161,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 incoming = librenms_item.get("entPhysicalSerialNum")
                 serial_rules = granted.policy.serial_identity_rules
                 removals = {installed_module.pk: module_subtree_serials(installed_module.pk)}
-                previous = _resolve_replacement_holder(
+                held = _resolve_replacement_holder(
                     incoming, serial_rules.for_module_target(target_device), rules=serial_rules, exclude_pk=module_id
-                ).object
+                )
+                # The write cannot tell which module holds the serial, so it fails closed before any lock or delete.
+                if held.kind is ResolutionKind.UNAVAILABLE:
+                    raise _ModuleActionRefused(REPLACE_SERIAL_UNAVAILABLE.format(serial=display(incoming)))
+                previous = held.object
                 if previous is not None:
                     # A holder that the preview can show refuses before the write walks it or locks its Device.
                     # A hidden holder keeps the stale-grant answer after the lock, so the refusal does not disclose it.
