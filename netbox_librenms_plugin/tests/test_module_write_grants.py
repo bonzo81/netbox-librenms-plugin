@@ -2145,6 +2145,32 @@ def test_a_stack_row_that_no_member_reported_offers_no_bay_mapping_suggestion(ui
     assert ('data-action="add-bay-mapping"' in row) is (not withheld)
 
 
+@pytest.mark.parametrize(
+    ("card", "withheld"),
+    [({"entPhysicalContainedIn": 0}, True), ({}, False)],
+    ids=["unattributed-short-serial", "attributed-by-the-page-serial"],
+)
+def test_a_stack_row_that_no_member_reported_names_no_bay_in_its_type_mapping(ui, vc_grants, card, withheld):
+    """The card matches the page device's "Card Slot", which the reporting member can lack, so no bay is named."""
+    page, _member = vc_grants(
+        card={
+            "entPhysicalModelName": "GR-UNKNOWN",
+            "entPhysicalDescr": "Line card",
+            "entPhysicalSerialNum": "12",
+            **card,
+        }
+    )
+    content = render(ui, page)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    (href,) = re.findall(r'href="([^"]*module-type-mappings[^"]*)"', row)
+    description = parse_qs(urlsplit(href.replace("&amp;", "&")).query)["description"][0]
+
+    assert "No Type" in row
+    assert ("data-member-unattributed" in row) is withheld
+    assert "GR-UNKNOWN" in description
+    assert ("Card Slot" in description) is (not withheld)
+
+
 @pytest.mark.parametrize("pick_page", [False, True], ids=["other-member", "page-device"])
 def test_a_member_pick_offers_the_install_of_a_stack_row_that_no_member_reported(ui, vc_grants, pick_page):
     """The user names the member, so the table pinned to it offers the install there.

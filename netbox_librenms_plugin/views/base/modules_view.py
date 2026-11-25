@@ -2162,6 +2162,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         row["member_resolution_source"] = resolution_source
         row["member_unattributed"] = resolution_source == UNATTRIBUTED_SOURCE
         row["member_withheld"] = target_context["withheld"]
+        self._describe_type_mapping_without_page_bay(row, item)
         self._apply_carrier_install_rules(row, item, selected_device)
         self._attach_interface_match(row, item, target_context)
         parent_row_idx = len(table_data)
@@ -2282,6 +2283,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sub_row["member_resolution_source"] = sub_resolution_source
             sub_row["member_unattributed"] = sub_resolution_source == UNATTRIBUTED_SOURCE
             sub_row["member_withheld"] = sub_target_context["withheld"]
+            self._describe_type_mapping_without_page_bay(sub_row, sub_item)
             self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
             self._attach_interface_match(sub_row, sub_item, sub_target_context)
             table_data.append(sub_row)
@@ -3047,6 +3049,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if manufacturer_id not in rule_cache:
             rule_cache[manufacturer_id] = self._get_carrier_install_rules(manufacturer)
         return rule_cache[manufacturer_id]
+
+    def _describe_type_mapping_without_page_bay(self, row, item):
+        """Leave the matched page device bay out of the type mapping text of a row that no member reported."""
+        if row["member_unattributed"] and row.get("type_suggestion"):
+            row["type_suggestion"]["description"] = self._suggest_type_mapping(item, None)["description"]
 
     def _apply_carrier_install_rules(self, row, item, selected_device):
         """
