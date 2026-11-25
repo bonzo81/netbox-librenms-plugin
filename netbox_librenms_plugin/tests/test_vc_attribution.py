@@ -487,6 +487,32 @@ class TestRecognizedStack:
         else:
             assert {owner[121], owner[1210]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize(("fpc_serial", "linked"), [("12", False), ("12350", True)], ids=["short", "unchanged"])
+    def test_a_junos_row_that_names_an_fpc_with_a_short_serial_is_unattributed(self, fpc_serial, linked):
+        """The PSU and fan name FPC 1, which reports "12", so they do not fall through to the root's master serial."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-short-link-{fpc_serial}")
+        inventory = [
+            *(
+                {**row, "entPhysicalSerialNum": fpc_serial} if row["entPhysicalIndex"] == 121 else row
+                for row in junos_vc_inventory()
+            ),
+            _row(41, "fan", 4, entPhysicalModelName="PSU-FAN"),
+        ]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[2][0] == master
+        if linked:
+            assert (owner[4], owner[30]) == ((member, "junos-member"), (member, "junos-member"))
+            assert owner[41] == (member, "parent-context")
+        else:
+            # The PSU's fan crosses the PSU's link on its way to the root's serial.
+            assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
+
     @pytest.mark.parametrize("serial", ["12", "0", "CARD999"], ids=["short", "zero", "identity"])
     def test_a_non_member_row_with_a_short_serial_keeps_its_member_row(self, serial):
         """The stack shape names the member rows, so a carrier below Switch 1 that reports "12" is no member."""

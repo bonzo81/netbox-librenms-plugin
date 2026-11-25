@@ -2067,6 +2067,41 @@ def test_a_card_below_a_junos_fpc_with_a_short_serial_is_offered_on_no_member(ui
     assert bool(_row_forms(parsed, CARD)) is (not withheld)
 
 
+@pytest.mark.parametrize(("fpc_serial", "withheld"), [("12", True), ("VCB-0001", False)], ids=["short", "identity"])
+def test_a_junos_row_that_names_an_fpc_with_a_short_serial_is_offered_on_no_member(ui, vc_grants, fpc_serial, withheld):
+    """The card names FPC 2, which reports "12", so it does not fall through to the root's serial of the page device."""
+
+    def row(index, entity_class, descr, serial, **fields):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalClass": entity_class,
+            "entPhysicalName": descr,
+            "entPhysicalDescr": descr,
+            "entPhysicalSerialNum": serial,
+            **fields,
+        }
+
+    rows = [
+        {**row(1, "chassis", "Juniper Virtual Chassis Switch", "VCA-0001"), "entPhysicalContainedIn": 0},
+        row(120, "container", "FPC: EX4400-24X @ 1/*/*", "VCA-0001", entPhysicalParentRelPos=1),
+        row(121, "container", "FPC: EX4400-24X @ 2/*/*", fpc_serial, entPhysicalParentRelPos=2),
+        {
+            **row(CARD, "module", "FPC 2 Card 0", "SN-CARD-1", entPhysicalModelName="GR-CARD"),
+            "entPhysicalName": "Card Slot",
+        },
+    ]
+    page, member = vc_grants(rows=rows)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    (card,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    assert ("data-member-unattributed" in card) is withheld
+    assert (f'<option value="{member.pk}" selected>' in card) is (not withheld)
+    assert f'<option value="{page.pk}" selected>' not in card
+    assert bool(_row_forms(parsed, CARD)) is (not withheld)
+
+
 @pytest.mark.parametrize(("first_serial", "withheld"), [("VCB-0001", True), ("VCA-0001", False)], ids=["taken", "free"])
 def test_a_reported_position_gives_no_member_that_another_switch_owns_by_serial(ui, vc_grants, first_serial, withheld):
     """Switch 2 reports the member's serial at position 1, so position 2 can not give Switch 3 that member too."""

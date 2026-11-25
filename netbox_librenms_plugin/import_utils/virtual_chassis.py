@@ -429,6 +429,13 @@ class _Attribution:
             for index in self.stack.positions
             if (member := self.serial_owner(self.by_index.get(index, {}))) is not None
         }
+        # The Junos FPC rows below a Virtual Chassis root, by (root index, slot), for a link outside a stack.
+        self.junos_fpcs = {}
+        for item in rows:
+            root = self.by_index.get(item.get("entPhysicalContainedIn"))
+            if isinstance(root, dict) and _is_junos_vc_root(root) and _is_junos_fpc(item):
+                slot = (root.get("entPhysicalIndex"), _as_int(item.get("entPhysicalParentRelPos")))
+                self.junos_fpcs.setdefault(slot, []).append(item)
         self.results = {}
 
     def member_at(self, position):
@@ -480,6 +487,15 @@ class _Attribution:
         serial = row.get("entPhysicalSerialNum")
         return bool(display(serial)) and not self.by_serial.admits(serial)
 
+    def _names_unidentified_fpc(self, row):
+        """Return whether a Junos "FPC <n> ..." row names an FPC whose serial has no identity."""
+        descr = row.get("entPhysicalDescr")
+        named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
+        if named is None:
+            return False
+        fpcs = self.junos_fpcs.get((row.get("entPhysicalContainedIn"), int(named.group("member"))), ())
+        return any(not self.by_serial.admits(fpc.get("entPhysicalSerialNum")) for fpc in fpcs)
+
     def _member_row_owner(self, row):
         """Return the member a member row resolves to: its serial first, then its detected position."""
         if (member := self.serial_owner(row)) is not None:
@@ -523,20 +539,23 @@ class _Attribution:
         return None, "default"
 
     def _inherited(self, row, resolving):
-        """Return ``(inherits, member)`` from the row's parent; a generic root owns nothing."""
+        """Return ``(inherits, member, source)`` from the row's parent; a generic root owns nothing."""
         parent = self.by_index.get(row.get("entPhysicalContainedIn"))
         if parent is None or id(parent) in resolving:
-            return False, None
+            return False, None, None
         member, source = self.resolve(parent, resolving)
         parent_class = librenms_text(parent.get("entPhysicalClass"))
         parent_model = librenms_text(parent.get("entPhysicalModelName")).lower()
         generic_root = source == "default" and (
             parent_class == "stack" or (parent_class == "container" and parent_model in GENERIC_CONTAINER_MODELS)
         )
-        return not generic_root, member
+        return not generic_root, member, source
 
     def _without_stack(self, row, resolving):
         """Attribute a row of an unrecognized shape with the position and name heuristic."""
+        # A row that names an FPC without an identity belongs to that FPC's unknown member, not to an ancestor's.
+        if self._names_unidentified_fpc(row):
+            return None, UNATTRIBUTED_SOURCE
         parent_index = row.get("entPhysicalContainedIn", 0)
         visited = set()
         # A row whose serial has no identity can be a member row itself, so no member is inherited across it.
@@ -546,12 +565,12 @@ class _Attribution:
             parent = self.by_index[parent_index]
             if (member := self.serial_owner(parent)) is not None:
                 return (None, UNATTRIBUTED_SOURCE) if crossed else (member, "ancestor-serial")
-            crossed = crossed or self._has_serial_without_identity(parent)
+            crossed = crossed or self._has_serial_without_identity(parent) or self._names_unidentified_fpc(parent)
             parent_index = parent.get("entPhysicalContainedIn", 0)
         # A descendant's parentRelPos is its hardware slot, so it inherits its parent's member.
-        inherits, member = self._inherited(row, resolving)
+        inherits, member, source = self._inherited(row, resolving)
         if inherits:
-            if member is not None and self._has_serial_without_identity(row):
+            if source == UNATTRIBUTED_SOURCE or (member is not None and self._has_serial_without_identity(row)):
                 return None, UNATTRIBUTED_SOURCE
             return member, "parent-context"
         # This shape has no member rows, so any row's position or name hint from 1 names a member.
@@ -584,7 +603,8 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
     follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
     inherits its parent's member, or a position or leading name number of 1 or more names one.
     Outside a recognized stack, no row inherits a member across a row (itself included) whose serial
-    has no identity, because such a row can be a member row; it is unattributed instead.
+    has no identity, or that names a Junos FPC whose serial has no identity, because such a row can
+    be or follow a member row; it and a child of an unattributed parent are unattributed instead.
     A row that no rule attributes has the source "default", or :data:`UNATTRIBUTED_SOURCE` when it
     or an ancestor reports a serial that has no identity, because such a serial names no member.
 
