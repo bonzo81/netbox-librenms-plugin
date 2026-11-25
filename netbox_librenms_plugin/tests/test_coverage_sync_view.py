@@ -421,8 +421,10 @@ class TestSyncPageRouting:
         (form,) = re.findall(
             rf'<form[^>]*action="{re.escape(action)}"[^>]*>(.*?)</form>', response.content.decode(), re.S
         )
+        buttons = [dict(re.findall(r'([\w-]+)(?:="([^"]*)")?', tag)) for tag in re.findall(r"<button\b([^>]*)>", form)]
+        enabled_submits = [b for b in buttons if b.get("type", "submit") == "submit" and "disabled" not in b]
         # Only the sole holder gets an enabled Convert ID button.
-        assert ('<button type="submit"' in form) is (not shared)
+        assert len(enabled_submits) == (0 if shared else 1)
 
     @pytest.mark.parametrize(("reported", "offered"), [("12", False), ("NEW-SERIAL-12", True)])
     def test_a_librenms_serial_without_an_identity_offers_no_serial_sync(
