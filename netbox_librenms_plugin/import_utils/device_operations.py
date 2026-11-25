@@ -80,7 +80,7 @@ from .virtual_chassis import (
     members_to_create,
     numbering_refusal_text,
     prepare_virtual_chassis,
-    unnamed_member_refusal,
+    unnamed_member_reason,
     unnamed_members,
     unnumbered_virtual_chassis,
 )
@@ -690,6 +690,11 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
+def _stack_member_label(position, serial) -> str:
+    """Return how a stack member issue names a member: its position, or its serial in a stack without numbers."""
+    return f"Stack member {position}" if position is not None else f"Stack member with serial '{display(serial)}'"
+
+
 def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list:
     """Return an issue for each stack member that the import creates with a serial that does not fit the field."""
     vc = result.get("virtual_chassis") or {}
@@ -705,7 +710,8 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     pattern = _load_vc_member_name_pattern()
     unnamed_ids = {id(member) for member, _position in unnamed_members(vc["members"], pattern, context)}
     unnamed = [
-        unnamed_member_refusal(member.get("position"), member.get("serial"), pattern)
+        f"{_stack_member_label(member.get('position'), member.get('serial'))}: "
+        f"{unnamed_member_reason(member.get('serial'), pattern)}"
         for member in vc["members"]
         if id(member) in unnamed_ids
     ]
@@ -714,7 +720,7 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
     # The member writer refuses the whole stack for an Unavailable member, so validation blocks it too.
     unavailable = [
-        f"Stack member {position}: {member_serial_unavailable_message(serial)}"
+        f"{_stack_member_label(position, serial)}: {member_serial_unavailable_message(serial)}"
         for _member, position, serial in members
         if taken[serial].kind is ResolutionKind.UNAVAILABLE
     ]
@@ -728,7 +734,7 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     }
     # The text comes from the LibreNMS members only: the lookup is unrestricted, so it selects and names nothing.
     return unnamed + [
-        f"Stack member {position}: {refusal}"
+        f"{_stack_member_label(position, serial)}: {refusal}"
         for member, position, serial in members
         if id(member) in created and (refusal := stored_form_refusal(serial, Device))
     ]

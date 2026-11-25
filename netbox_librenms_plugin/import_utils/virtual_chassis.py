@@ -885,11 +885,16 @@ def unnamed_members(members_info, pattern, context) -> list[tuple]:
     ]
 
 
-def unnamed_member_refusal(position, serial, pattern) -> str:
-    """Return the issue of a stack member at *position* that *pattern* gives no name."""
+def unnamed_member_reason(serial, pattern) -> str:
+    """Return why *pattern* gives a stack member with *serial* no name."""
     reported = display(serial)
     reason = f"its serial '{reported}' has no identity" if reported else "it reports no serial"
-    return f"Stack member {position}: {reason}, so the member name pattern '{pattern}' gives it no name."
+    return f"{reason}, so the member name pattern '{pattern}' gives it no name."
+
+
+def unnamed_member_refusal(position, serial, pattern) -> str:
+    """Return the issue of a stack member at *position* that *pattern* gives no name."""
+    return f"Stack member {position}: {unnamed_member_reason(serial, pattern)}"
 
 
 def _vc_name_fields(pattern):
