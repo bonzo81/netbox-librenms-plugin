@@ -1824,9 +1824,11 @@ class TestConvertLegacyLibreNMSIdView:
         statements = [
             'SELECT 1 FROM "dcim_device" WHERE NOT ("dcim_device"."id" = 7) FOR UPDATE',
             'SELECT 1 FROM "dcim_device" WHERE NOT ("dcim_device"."id" IN (3, 7)) FOR UPDATE',
-            'SELECT 1 FROM "dcim_device" WHERE "dcim_device"."id" = 7 FOR UPDATE',
+            'SELECT 1 FROM "dcim_device" WHERE NOT (("dcim_device"."id" = 7)) FOR UPDATE',
+            'SELECT 1 FROM "dcim_device" WHERE NOT ( ( ("dcim_device"."id" IN (3, 7)) ) ) FOR UPDATE',
+            'SELECT 1 FROM "dcim_device" WHERE (("dcim_device"."id" = 7)) FOR UPDATE',
         ]
-        assert first_row_lock(statements, Device, 7) == 2
+        assert first_row_lock(statements, Device, 7) == 4
 
     @pytest.mark.parametrize("hidden_twin", [True, False])
     def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(
