@@ -625,7 +625,9 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
     from django.test import Client
     from django.urls import reverse
 
+    from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import Resolution, ResolutionKind
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
     from netbox_librenms_plugin.tests.lock_conflict_helpers import wait_for_lock_wait
     from netbox_librenms_plugin.views.sync import device_fields
@@ -634,7 +636,7 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
     member = make_device("ctx-race-member", serial="OLD123")
     chassis = make_virtual_chassis("ctx-race-chassis", master, member)
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
-    make_device("ctx-race-holder", serial="ABC")
+    holder = make_device("ctx-race-holder", serial="ABC")
     new_maker = Manufacturer.objects.create(name="Context race maker", slug="ctx-race-maker")
     NormalizationRule.objects.create(
         scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
@@ -673,7 +675,10 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
                 return execute(sql, params, many, context)
 
             with connection.execute_wrapper(observe_lock):
-                return client.post(reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": master.pk}), data)
+                response = client.post(
+                    reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": master.pk}), data
+                )
+                return response.status_code, messages_on(response.wsgi_request)
         finally:
             connection.close()
 
@@ -691,13 +696,18 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
             assert not assign.done()
         finally:
             release.set()
-        assert retype.result(timeout=30).status_code == 302
-        assert assign.result(timeout=30).status_code == 302
+        assert retype.result(timeout=30)[0] == 302
+        assign_status, assign_messages = assign.result(timeout=30)
+        assert assign_status == 302
 
     retyped = Device.objects.get(pk=master.pk).device_type_id == new_type.pk
     member_serial = Device.objects.get(pk=member.pk).serial
     assert retyped, "the type change itself must commit"
     assert member_serial == "OLD123", member_serial
+    conflict = Resolution(ResolutionKind.UNIQUE, (holder,))
+    assert [text for level, text in assign_messages if level == "error"] == [
+        f"{member.name}: {serial_conflict_text(conflict, 'XABC', user)}"
+    ]
 
 
 @transactional_db_with_all_apps()
@@ -712,7 +722,9 @@ def test_a_member_serial_write_waits_for_a_chassis_master_change(librenms_server
     from django.test import Client
     from django.urls import reverse
 
+    from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import Resolution, ResolutionKind
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
     from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection, wait_for_lock_wait
 
@@ -729,7 +741,7 @@ def test_a_member_serial_write_waits_for_a_chassis_master_change(librenms_server
     new_master.save()
     chassis = make_virtual_chassis("master-race-chassis", old_master, member, new_master)
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=old_master)
-    make_device("master-race-holder", serial="ABC")
+    holder = make_device("master-race-holder", serial="ABC")
     user = make_superuser("master-race-user")
     writer_pids = []
 
@@ -747,10 +759,11 @@ def test_a_member_serial_write_waits_for_a_chassis_master_change(librenms_server
                 return execute(sql, params, many, context)
 
             with connection.execute_wrapper(observe_lock):
-                return client.post(
+                response = client.post(
                     reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": member.pk}),
                     {"server_key": SERVER_KEY, "member_id_1": str(member.pk), "librenms_serial_1": "XABC"},
-                ).status_code
+                )
+                return response.status_code, messages_on(response.wsgi_request)
         finally:
             connection.close()
 
@@ -770,10 +783,15 @@ def test_a_member_serial_write_waits_for_a_chassis_master_change(librenms_server
             assert not writer.done()
         finally:
             other.commit()
-        assert writer.result(timeout=30) == 302
+        status, assign_messages = writer.result(timeout=30)
+        assert status == 302
 
     assert VirtualChassis.objects.get(pk=chassis.pk).master_id == new_master.pk
     assert Device.objects.get(pk=member.pk).serial == "OLD123"
+    conflict = Resolution(ResolutionKind.UNIQUE, (holder,))
+    assert [text for level, text in assign_messages if level == "error"] == [
+        f"{member.name}: {serial_conflict_text(conflict, 'XABC', user)}"
+    ]
 
 
 @transactional_db_with_all_apps()
