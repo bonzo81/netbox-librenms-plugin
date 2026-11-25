@@ -174,6 +174,21 @@ def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialC
     return not _clean_librenms_value(item.get("entPhysicalModelName"))
 
 
+def _reports_the_short_serial_of_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
+    """Return whether an entity optic candidate reports the serial text of an optic whose serial has no identity."""
+    serial = transceiver.get("serial")
+    if not display(serial) or is_identity(serial, context) or _never_an_optic(item):
+        return False
+    if item.get("_from_transceiver_api") or not display(item.get("entPhysicalSerialNum")):
+        return False
+    # _names_another_part refuses another text, so an entity that passes it reports the same text.
+    if _names_another_part(item, transceiver, context):
+        return False
+    entity_model = _clean_librenms_value(item.get("entPhysicalModelName"))
+    optic_model = _clean_librenms_value(transceiver.get("model"))
+    return not (entity_model and optic_model and entity_model != optic_model)
+
+
 # Physical classes whose entities only hold hardware when they report no serial.
 _SERIAL_HOLDER_CLASSES = frozenset({"container", "port"})
 
@@ -2467,6 +2482,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
                 if inv_serials.contains(serial):
+                    continue
+                # A serial without an identity names the same optic only on an entity optic with that text.
+                if any(
+                    _reports_the_short_serial_of_the_optic(item, txr, serial_context)
+                    and (port_ifindex is None or _coerce_idx(item.get("ifIndex")) in {None, port_ifindex})
+                    for item in inventory_data
+                ):
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
                 if ifname:

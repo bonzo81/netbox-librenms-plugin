@@ -1255,6 +1255,49 @@ class TestMergeTransceiverDataPortIdentity:
         assert len(inventory) == 2
         assert (inventory[1].get("entPhysicalModelName"), inventory[1].get("_librenms_port_id")) == port_row
 
+    @pytest.mark.parametrize(
+        ("entity_class", "entity_model", "synthesized"),
+        [
+            ("port", "SFP-10G-SR", False),
+            ("port", "", False),
+            ("powerSupply", "SFP-10G-SR", True),
+            ("port", "QSFP", True),
+        ],
+        ids=["same-optic", "optic-without-model", "non-optic", "other-model"],
+    )
+    def test_an_optic_at_a_free_index_with_the_short_serial_text_of_an_entity_optic(
+        self, settings, librenms_server, entity_class, entity_model, synthesized
+    ):
+        """Without port metadata, only the same short serial text on an optic candidate names the same optic."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        view = _real_api_view(settings, librenms_server, librenms_id=113)
+        librenms_server.register(
+            "/api/v0/devices/113/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 99, "model": "SFP-10G-SR", "serial": "AB-12"}],
+            },
+            method="GET",
+        )
+        librenms_server.register("/api/v0/devices/113/ports", {"status": "ok", "ports": []}, method="GET")
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 10,
+                "entPhysicalClass": entity_class,
+                "entPhysicalModelName": entity_model,
+                "entPhysicalSerialNum": "AB-12",
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
+
+        assert error is None
+        assert inventory[0] == inventory_seed[0]
+        assert [item["entPhysicalIndex"] for item in inventory[1:]] == ([99] if synthesized else [])
+
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
     ):
