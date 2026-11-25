@@ -487,10 +487,9 @@ class TestRecognizedStack:
         else:
             assert {owner[121], owner[1210]} == {(None, UNATTRIBUTED_SOURCE)}
 
-    @pytest.mark.parametrize(("serial", "inherits"), [("12", False), ("CARD999", True)], ids=["short", "identity"])
-    def test_a_row_inherits_no_member_row_across_a_short_serial(self, serial, inherits):
-        """The module below Switch 1 reports "12", so neither it nor its card follows Switch 1 by parent context."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+    @pytest.mark.parametrize("serial", ["12", "0", "CARD999"], ids=["short", "zero", "identity"])
+    def test_a_non_member_row_with_a_short_serial_keeps_its_member_row(self, serial):
+        """The stack shape names the member rows, so a carrier below Switch 1 that reports "12" is no member."""
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         first, second = _vc_members(["100071", "100072"])
@@ -506,10 +505,7 @@ class TestRecognizedStack:
 
         owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
         assert owner[231] == (first, "position")
-        if inherits:
-            assert (owner[233], owner[234]) == ((first, "parent-context"), (first, "parent-context"))
-        else:
-            assert {owner[233], owner[234]} == {(None, UNATTRIBUTED_SOURCE)}
+        assert (owner[233], owner[234]) == ((first, "parent-context"), (first, "parent-context"))
 
     @pytest.mark.parametrize("stored", [("", ""), ("SN-AAA", "SN-BBB")], ids=["blank", "fpc-serials"])
     def test_junos_fpcs_sharing_a_slot_follow_only_their_serials(self, stored):

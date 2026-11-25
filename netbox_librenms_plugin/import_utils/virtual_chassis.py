@@ -499,28 +499,26 @@ class _Attribution:
         # Walk up to the stack root, which owns no member: a nearer serial wins over a member row.
         current = row
         visited = set()
-        # Whether the walk passed a row whose serial has no identity; such a row can be a member row itself.
-        crossed = False
+        # The stack shape names its member rows, so a short serial on another row names no member.
         while isinstance(current, dict) and current.get("entPhysicalIndex") != self.stack.root_index:
             if id(current) in visited:
                 break
             visited.add(id(current))
             if current is not row and (member := self.serial_owner(current)) is not None:
-                return (None, UNATTRIBUTED_SOURCE) if crossed else (member, "ancestor-serial")
+                return member, "ancestor-serial"
             if current.get("entPhysicalIndex") in self.stack.positions:
                 member = self._member_row_owner(current)
                 # A member row that names no NetBox member belongs to a member that NetBox does not hold.
-                if member is None or crossed:
+                if member is None:
                     return None, UNATTRIBUTED_SOURCE
                 return member, "position" if current is row else "parent-context"
             # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows it.
             fpc = self.by_index.get(self.stack.fpc_named_by(current))
             if fpc is not None:
                 member = self._member_row_owner(fpc)
-                if member is None or crossed:
+                if member is None:
                     return None, UNATTRIBUTED_SOURCE
                 return member, "junos-member" if current is row else "parent-context"
-            crossed = crossed or self._has_serial_without_identity(current)
             current = self.by_index.get(current.get("entPhysicalContainedIn"))
         return None, "default"
 
@@ -585,8 +583,8 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
     the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
     follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
     inherits its parent's member, or a position or leading name number of 1 or more names one.
-    No row inherits a member across a row (itself included) whose serial has no identity, because
-    such a row can be a member row; it is unattributed instead.
+    Outside a recognized stack, no row inherits a member across a row (itself included) whose serial
+    has no identity, because such a row can be a member row; it is unattributed instead.
     A row that no rule attributes has the source "default", or :data:`UNATTRIBUTED_SOURCE` when it
     or an ancestor reports a serial that has no identity, because such a serial names no member.
 
