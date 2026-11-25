@@ -1606,6 +1606,44 @@ class TestMergeTransceiverDataPortIdentity:
         assert "mdi-swap-vertical" in status
         assert ('data-action="review-interface-types"' in row) is offered
 
+    @pytest.mark.parametrize(
+        ("optic_serial", "offered"), [("AB-12", False), ("OPTIC12345", True)], ids=["short-serial", "identity-serial"]
+    )
+    def test_an_unlinked_optic_with_a_short_serial_offers_no_carrier_install(
+        self, client, settings, recording_server, optic_serial, offered
+    ):
+        """A carrier rule matches the optic's class and name, but the optic can be another row's part."""
+        from dcim.models import Device, Module
+
+        from netbox_librenms_plugin.models import CarrierAutoInstallRule
+        from netbox_librenms_plugin.tests.conftest import make_module_type_with_bays
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        CarrierAutoInstallRule.objects.create(
+            librenms_child_class="port",
+            librenms_child_name_pattern=r"Transceiver \d+",
+            netbox_bay_name_pattern="Carrier Bay",
+            carrier_module_type=make_module_type_with_bays("OPTIC-CARRIER"),
+        )
+        name = f"optic-carrier-{optic_serial}"
+        content, optic = self._render_unlinked_optic_tab(
+            client, settings, recording_server, name, optic_serial, bay="Carrier Bay"
+        )
+        (row,) = re.findall(rf'<tr[^>]*data-ent-index="{optic}".*?</tr>', content, flags=re.S)
+        # A carrier install form posts to install-module without an inventory row.
+        carriers = [
+            form
+            for form in module_tab_forms(row).forms
+            if "/install-module/" in form["action"] and "ent_index" not in form["fields"]
+        ]
+
+        assert "No Bay" in row
+        assert len(carriers) == int(offered)
+        for form in carriers:
+            client.post(form["action"], form["fields"])
+        installed = Module.objects.filter(device=Device.objects.get(name=name), module_type__model="OPTIC-CARRIER")
+        assert installed.exists() is offered
+
     @pytest.mark.parametrize("netbox_change", ["type-added", "occupant-removed"])
     @pytest.mark.parametrize(
         ("optic_serial", "refused"), [("AB-12", True), ("OPTIC12345", False)], ids=["short-serial", "identity-serial"]

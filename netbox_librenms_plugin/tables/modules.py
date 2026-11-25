@@ -1063,7 +1063,13 @@ class LibreNMSModuleTable(tables.Table):
         # "Install Carrier" buttons for No Bay rows where one or more
         # CarrierAutoInstallRule rows match. One button per (rule, empty bay)
         # candidate. Suggest-only — the user clicks to install.
-        if self.can_add_module and record.get("carrier_install_options") and not record.get("member_unattributed"):
+        # The carrier form posts no inventory row, so this table check is the only gate for these rows.
+        if (
+            self.can_add_module
+            and record.get("carrier_install_options")
+            and not record.get("member_unattributed")
+            and not record.get("unlinked_optic")
+        ):
             install_url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             for opt in record["carrier_install_options"]:
                 buttons.append(
