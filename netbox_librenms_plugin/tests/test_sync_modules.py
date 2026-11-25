@@ -2384,8 +2384,12 @@ class TestVirtualChassisInterfaceNormalization:
         request = make_request("post", user=make_superuser("normalize-event-user"))
         request.id = uuid4()
         request_token, queue_token = current_request.set(request), events_queue.set({})
+
+        def target_delete(sql, params):
+            return sql.startswith('DELETE FROM "dcim_interface"') and interface.pk in (params or ())
+
         try:
-            with failing_statement(lambda sql, params: sql.startswith('DELETE FROM "dcim_interface"'), "23503"):
+            with failing_statement(target_delete, "23503") as failed:
                 result = _normalize_module_interface_names_for_vc_member(
                     device, module, Interface.objects.all(), Interface.objects.all()
                 )
@@ -2394,6 +2398,8 @@ class TestVirtualChassisInterfaceNormalization:
             current_request.reset(request_token)
             events_queue.reset(queue_token)
 
+        # The removal reached the DELETE of the target interface; a skip before it also counts one.
+        assert len(failed) == 1
         assert result["skipped"] == 1
         assert Interface.objects.filter(pk=interface.pk).exists()
         assert ("interface", interface.pk) not in queued
