@@ -248,8 +248,8 @@ def test_mismatch_action_disables_competing_modal_submissions(page):
 
 def test_an_unbroken_long_serial_stays_inside_the_mismatch_modal_on_a_narrow_screen(page):
     """A 51-character serial has no break point, so the serial cells must wrap it inside the dialog."""
-    serial = "A" * 51
-    fragment = _mismatch_modal(installed_serial=serial, librenms_serial=serial)
+    serials = ["A" * 51, "B" * 51]
+    fragment = _mismatch_modal(installed_serial=serials[0], librenms_serial=serials[1])
     page.set_viewport_size({"width": 400, "height": 800})
     page.set_content(
         f"<style>{NETBOX_TABLE_CSS} .modal-dialog {{ margin: 0 16px; }}</style>"
@@ -266,11 +266,15 @@ def test_an_unbroken_long_serial_stays_inside_the_mismatch_modal_on_a_narrow_scr
                 scrollWidth: body.scrollWidth,
                 clientWidth: body.clientWidth,
                 dialogRight: dialog.right,
+                cellTexts: Array.from(row.cells).slice(1).map((cell) => cell.textContent.trim()),
+                cellOverflows: Array.from(row.cells).slice(1).map((cell) => cell.scrollWidth - cell.clientWidth),
                 cellRights: Array.from(row.cells).slice(1).map((cell) => cell.getBoundingClientRect().right),
             };
         }"""
     )
 
+    assert state["cellTexts"] == serials, state
+    # A cell that clips its text with overflow: hidden stays inside the dialog, so check the text itself.
+    assert all(overflow <= 0 for overflow in state["cellOverflows"]), state
     assert state["scrollWidth"] <= state["clientWidth"] + 1, state
-    assert len(state["cellRights"]) == 2, state
     assert all(right <= state["dialogRight"] + 1 for right in state["cellRights"]), state
