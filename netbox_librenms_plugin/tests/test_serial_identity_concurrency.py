@@ -651,7 +651,7 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
     def check_then_wait(*args, **kwargs):
         refused = original(*args, **kwargs)
         checked.set()
-        release.wait(timeout=20)
+        assert release.wait(timeout=20), "the controller never released the type change"
         return refused
 
     monkeypatch.setattr(device_fields, "retype_conflict", check_then_wait)
@@ -1084,7 +1084,7 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     def check_then_wait(*args, **kwargs):
         refused = original(*args, **kwargs)
         checked.set()
-        release.wait(timeout=20)
+        assert release.wait(timeout=20), "the controller never released the type change"
         return refused
 
     monkeypatch.setattr(device_fields, "retype_conflict", check_then_wait)
