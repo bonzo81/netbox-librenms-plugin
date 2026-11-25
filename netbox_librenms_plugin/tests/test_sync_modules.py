@@ -2151,12 +2151,14 @@ class TestModulesActionResponse:
         ids=["update_serial_only", "move"],
     )
     def test_the_mismatch_preview_answers_a_whole_modal_of_bound_forms(
-        self, client, settings, conflict, expected_action
+        self, client, settings, monkeypatch, conflict, expected_action
     ):
         """The preview fills #htmx-modal-content, so it must carry the header the JS used to build."""
 
         from netbox_librenms_plugin.tests._html_helpers import open_tags
 
+        # The preview offers Move only from NetBox 4.7; CI also runs older NetBox versions.
+        monkeypatch.setattr("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", lambda: True)
         self._configure_server(settings)
         suffix = "move" if conflict else "serial"
         device, module = self._seed_serial_mismatch(suffix, conflict=conflict, librenms_id=9210 + int(conflict))
