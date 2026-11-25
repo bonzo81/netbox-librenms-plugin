@@ -4757,6 +4757,29 @@ class TestDeviceConflictActionBranches:
         assert target.serial == "STORED-SERIAL"
         assert stored_mapping_for_test(target) == {self.server_key: 42}
 
+    def test_update_by_primary_ip_stores_no_json_boolean_serial(self):
+        """LibreNMS sends `serial: true`; the value names no hardware, so Update & Link keeps the stored serial."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        target = make_device("update-boolean-serial", serial="STORED-SERIAL")
+        ip = ip_on(target, "198.18.20.16/24", "management")
+        Device.objects.filter(pk=target.pk).update(primary_ip4=ip)
+        hostname = "boolean-serial-reported-name"
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=hostname, hardware=target.device_type.model, serial=True, ip=str(ip.address.ip)
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        request = self._request("update", target, "update-boolean-serial-user")
+
+        post_view(self._make_view(), request, device_id=42)
+
+        target.refresh_from_db()
+        assert target.name == hostname
+        assert target.serial == "STORED-SERIAL"
+        assert stored_mapping_for_test(target) == {self.server_key: 42}
+
     @pytest.mark.parametrize("action", ["update", "update_serial"])
     @pytest.mark.parametrize("outcome", ["absent", "exact", "new"])
     def test_a_forced_serial_and_link_action_requires_an_admitted_serial(self, client, action, outcome):

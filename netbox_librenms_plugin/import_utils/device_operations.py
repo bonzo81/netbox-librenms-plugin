@@ -35,6 +35,7 @@ from ..serial_identity import (
     compare,
     display,
     is_identity,
+    is_serial_value,
     keeps_stored_serial,
     other_device_holder,
     resolve_device,
@@ -1248,7 +1249,8 @@ def validate_device_for_import(  # noqa: C901
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101). The owner counts equivalent rows under
                     # the serial rules, also rows that the user cannot see.
-                    if serial and serial_discoveries is not None:
+                    # The batch keys text, and the text of a boolean or a list can equal a stored serial.
+                    if serial and is_serial_value(incoming_serial) and serial_discoveries is not None:
                         discovery = serial_discoveries()[serial]
                     else:
                         discovery = resolve_device(incoming_serial, rules=serial_rules)
@@ -2119,7 +2121,8 @@ def import_single_device(  # noqa: C901
         with atomic_with_events():
             # The serial identity locks come first; then the lookup sees a concurrent import's committed device.
             serial_rules = serial_rules or SerialRules.load()
-            incoming_serial = display(libre_device.get("serial"))
+            # The LibreNMS value, not its text: the text of a boolean or a list is no serial.
+            incoming_serial = stored_form(libre_device.get("serial"), Device)
             assignment_lock([incoming_serial], model=Device, rules=serial_rules)
             # The insert writes the type row's device count anyway; lock it now, so the context is its manufacturer.
             device_type = DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
@@ -2184,9 +2187,8 @@ def import_single_device(  # noqa: C901
                 device_data["platform"] = platform_plan.platform
 
             # Persist the trimmed LibreNMS text; serial_identity keys it when it compares.
-            serial = stored_form(incoming_serial, Device)
-            if serial:
-                device_data["serial"] = serial
+            if incoming_serial:
+                device_data["serial"] = incoming_serial
 
             location_name = libre_device.get("location", "")
             parsed_location = parse_location_for_import(location_name)

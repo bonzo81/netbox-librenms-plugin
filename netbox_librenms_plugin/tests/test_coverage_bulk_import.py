@@ -346,6 +346,45 @@ class TestBulkImportIntegration:
         assert imported.serial == "TEST-SERIAL-81"
         assert stored_mapping_for_test(imported)["default"] == 81
 
+    @pytest.mark.parametrize(
+        "serial", [True, ["SECOND-CARD"], "ABC\x00DEF", "ABC\ud800DEF"], ids=["boolean", "list", "nul", "surrogate"]
+    )
+    def test_the_create_stores_no_serial_that_is_not_text_or_a_number(self, live_librenms, serial):
+        """The manual mappings let the create run on its own; it checks the LibreNMS value, not the text of it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
+        from netbox_librenms_plugin.serial_identity import stored_form_refusal
+
+        prerequisites = self._prerequisites()
+        row = _libre_device(
+            86,
+            "bulk-malformed-serial",
+            hardware=prerequisites["hardware"],
+            location=prerequisites["location"],
+            serial=serial,
+        )
+        _register_device(live_librenms, row)
+
+        result = bulk_import_devices(
+            [86],
+            server_key="default",
+            manual_mappings_per_device={
+                86: {
+                    "site_id": prerequisites["site_id"],
+                    "device_type_id": prerequisites["device_type_id"],
+                    "device_role_id": prerequisites["device_role_id"],
+                }
+            },
+            libre_devices_cache={86: row},
+            user=make_superuser("bulk-malformed-serial-user"),
+        )
+
+        assert result["success"] == []
+        (failure,) = result["failed"]
+        assert stored_form_refusal(serial, Device) in failure["error"]
+        assert not Device.objects.filter(name="bulk-malformed-serial").exists()
+
     def test_a_later_import_row_sees_the_serial_created_earlier_in_its_batch(self, live_librenms):
         from dcim.models import Device
 

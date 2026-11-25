@@ -460,6 +460,24 @@ class TestImportListRequest:
         assert len(requests) == 1
 
     @pytest.mark.django_db
+    def test_a_search_binds_no_device_that_stores_the_text_of_a_json_boolean_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """A Device stores "True" and LibreNMS sends `serial: true`; the batch serial lookup reads the value."""
+        make_device("search-boolean-text-holder", serial="True")
+        _register_devices(librenms_server, [{**_device(4116), "serial": True}])
+        client.force_login(_create_user(django_user_model, "search-boolean-serial"))
+
+        response = client.get(_import_url(), _search_params())
+
+        (row,) = response.context["table"].data
+        assert row["_validation"]["existing_device"] is None
+        assert row["_validation"]["existing_match_type"] is None
+
+    @pytest.mark.django_db
     def test_a_warm_search_validates_a_row_again_that_stopped_at_an_unavailable_serial(
         self,
         client,

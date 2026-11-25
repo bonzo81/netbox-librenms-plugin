@@ -2509,15 +2509,16 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     fields = ["name"]
                     require_serial = updates_serial and is_identity(
-                        incoming_serial, serial_rules.for_device(existing_device)
+                        reported_serial, serial_rules.for_device(existing_device)
                     )
                     # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
                     if updates_serial:
+                        # The LibreNMS value, not its text: the text of a boolean or a list is no serial.
                         err, changed = _apply_conflict_checked_serial(
-                            existing_device, incoming_serial, request.user, serial_rules, require_serial=require_serial
+                            existing_device, reported_serial, request.user, serial_rules, require_serial=require_serial
                         )
                         if err:
                             return err

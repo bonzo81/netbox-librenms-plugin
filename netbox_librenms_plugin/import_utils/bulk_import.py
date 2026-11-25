@@ -34,6 +34,7 @@ from ..serial_identity import (
     compare,
     display,
     fingerprint,
+    is_serial_value,
     is_sole_holder,
     resolve_device,
     resolve_devices,
@@ -1541,7 +1542,10 @@ def process_device_filters(  # noqa: C901
 
     @functools.cache
     def serial_discoveries():
-        return resolve_devices((display(row.get("serial")) for row in libre_devices), rules=serial_rules)
+        return resolve_devices(
+            (display(row.get("serial")) for row in libre_devices if is_serial_value(row.get("serial"))),
+            rules=serial_rules,
+        )
 
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
