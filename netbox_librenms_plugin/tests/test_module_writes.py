@@ -564,6 +564,11 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
         assert not populated, "a refused template write must leave no partial bays"
     if first_writer == "template":
         assert template_exists
+    else:
+        # The template revalidates after its lock: a new Module changes the instances, a new bay the topology.
+        instances_changed = "The bay template instances changed. Refresh Modules and try again."
+        stale = _CHANGED if target_kind == "device_type" else instances_changed
+        assert (template_exists, results["template"][1]) == (False, [f"Failed to add bay template: {stale}"])
     for device in (first, second):
         device.refresh_from_db()
         assert device.module_bay_count == ModuleBay.objects.filter(device=device).count()
