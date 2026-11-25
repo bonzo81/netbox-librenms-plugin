@@ -3470,6 +3470,7 @@ class TestModuleWriterOwnership:
         "delete",
         "bulk_create",
         "bulk_update",
+        "queryset.update",
         "update_existing_row",
         "_install_single",
         "_save_module_with_scoped_component_adoption",
@@ -3477,6 +3478,17 @@ class TestModuleWriterOwnership:
         "_instantiate_template_on_existing",
         "_bind_and_adopt",
     }
+
+    @staticmethod
+    def _call_name(node):
+        """Return the called name; an ``update()`` on a queryset or a manager is ``queryset.update``."""
+        import ast
+
+        name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+        receiver = getattr(node.func, "value", None)
+        if name == "update" and (isinstance(receiver, ast.Call) or getattr(receiver, "attr", None) == "objects"):
+            return "queryset.update"
+        return name
 
     @classmethod
     def _violations(cls, tree, writers):
@@ -3499,7 +3511,7 @@ class TestModuleWriterOwnership:
                     walk(child, (*parents, node))
                 # After its receiver and arguments, so the list is in call order.
                 if isinstance(node, ast.Call):
-                    calls.append((getattr(node.func, "id", getattr(node.func, "attr", "")), node, parents))
+                    calls.append((cls._call_name(node), node, parents))
 
             walk(method)
             # A conditional expression arm or a short-circuited operand can skip a lock, as an if statement can.
@@ -3546,6 +3558,8 @@ class TestModuleWriterOwnership:
             "lock_module_write(observe_module_write(device_ids=targets), incoming=[Module.objects.select_for_update()])",
             "lock_module_write(observe_module_write(device_ids=targets)) if indexed else None\nModule().save()",
             "indexed and lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+            "Module.objects.filter(pk=pk).update(serial=value)\nlock_module_write(observe_module_write(device_ids=targets))",
+            "Module.objects.update(serial=value)\nlock_module_write(observe_module_write(device_ids=targets))",
         ],
         ids=[
             "missing",
@@ -3555,6 +3569,8 @@ class TestModuleWriterOwnership:
             "write-in-owner-argument",
             "owner-in-conditional-expression",
             "owner-in-short-circuit",
+            "queryset-update-before-owner",
+            "manager-update-before-owner",
         ],
     )
     def test_guard_rejects_known_omissions(self, body):
