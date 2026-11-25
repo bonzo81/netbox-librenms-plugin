@@ -975,7 +975,7 @@ def test_a_batch_write_lookup_compares_no_rows_beside_many_duplicate_holders(mon
     """Thirty holders of one serial and a serial without a holder: the read goes on, and each row costs one check."""
     from django.db.models import Model
 
-    from netbox_librenms_plugin.serial_identity import SerialRules, resolve_devices_write
+    from netbox_librenms_plugin.serial_identity import ResolutionKind, SerialRules, resolve_devices_write
 
     for n in range(30):
         make_device(f"duplicate-holder-{n}", serial="DUP-HOLDER-SN")
@@ -992,6 +992,7 @@ def test_a_batch_write_lookup_compares_no_rows_beside_many_duplicate_holders(mon
         found = resolve_devices_write(["DUP-HOLDER-SN", "NO-HOLDER-SN"], rules.context(None), rules=rules)
 
     assert len(found["DUP-HOLDER-SN"].matches) == 30
+    assert found["NO-HOLDER-SN"].kind is ResolutionKind.NO_MATCH
     # A list scan per row compares each new holder with every earlier one: 435 comparisons for 30 rows.
     assert len(comparisons) < 30
 
