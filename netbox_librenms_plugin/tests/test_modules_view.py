@@ -4193,6 +4193,15 @@ class TestCheckIgnoreRules:
         index_map = {1: grandparent, 30: parent, 7: item}
         assert self._check(item, parent, [self._rule()], index_map=index_map) == action
 
+    def test_a_child_that_reports_the_short_serial_text_of_its_parent_is_skipped(self):
+        """The guard matches equal serial text, also when the serial rules give that text no identity."""
+        from netbox_librenms_plugin.serial_identity import is_identity, plain_context
+
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "AB-12"}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "AB-12"}
+        assert is_identity("AB-12", plain_context()) is False
+        assert self._check(item, parent, [self._rule()]) == "skip"
+
     @pytest.mark.parametrize("parent_serial", ["AB-12", ""])
     def test_the_ancestor_walk_stops_at_the_same_parent_after_anonymization(self, parent_serial):
         from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording

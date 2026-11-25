@@ -580,7 +580,8 @@ def _check_ignore_rules(
         Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
         is True the item is only matched if its serial number is non-empty and
         equals **any ancestor's** serial in the ENTITY-MIB hierarchy (walking
-        up from the direct parent).
+        up from the direct parent). Equal serial text matches; so does a serial
+        that the module serial rules give the same identity.
 
     **class_is**
         Matches on ``entPhysicalClass``, ignoring case, with the same serial
@@ -628,10 +629,10 @@ def _check_ignore_rules(
 
 
 def _serial_matches_an_ancestor(item: dict, parent_item: dict | None, index_map: dict | None, context) -> bool:
-    """Return True when the first ancestor that reports a serial reports the serial of *item*."""
+    """Return True when the first ancestor that reports a serial reports the serial text or identity of *item*."""
     item_serial = item.get("entPhysicalSerialNum")
     # Without a parent or an own serial the guard can not be satisfied, so the rule does not apply.
-    if parent_item is None or not is_identity(item_serial, context):
+    if parent_item is None or not display(item_serial):
         return False
     current = parent_item
     visited: set = set()
@@ -644,7 +645,11 @@ def _serial_matches_an_ancestor(item: dict, parent_item: dict | None, index_map:
         ancestor_serial = current.get("entPhysicalSerialNum")
         # A reported serial without an identity still stops the walk; only a blank ancestor is passed.
         if display(ancestor_serial):
-            return compare(ancestor_serial, item_serial, context) is Comparison.SAME
+            # Equal text matches also when the serial rules give it no identity.
+            return (
+                display(ancestor_serial) == display(item_serial)
+                or compare(ancestor_serial, item_serial, context) is Comparison.SAME
+            )
         if index_map is None:
             return False
         next_idx = current.get("entPhysicalContainedIn")
