@@ -1125,8 +1125,9 @@ class TestAssignVCSerialView:
         assert len(_messages(response, "error")) == 1
 
     @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("released", [False, True])
     def test_a_lock_conflict_wrapped_in_a_validation_error_gives_the_try_again_answer(
-        self, logged_in_client, librenms_server
+        self, logged_in_client, librenms_server, released
     ):
         """A member save meets NetBox's wrapped lock conflict, so the runner retries instead of reporting a refusal."""
         from dcim.models import Device
@@ -1142,11 +1143,16 @@ class TestAssignVCSerialView:
         make_virtual_chassis("vc-serial-wrapped", first, second)
         user_model = get_user_model()
         user_pk = int(logged_in_client.session["_auth_user_id"])
+        conflicts = []
 
         def save_meets_a_wrapped_conflict(**_kwargs):
             try:
                 lock_row_nowait(user_model, user_pk)
             except OperationalError:
+                conflicts.append(user_pk)
+                if released:
+                    # The other session ends its transaction, so the retry can take the lock.
+                    other.rollback()
                 raise ValidationError("The hierarchy was modified concurrently; please retry.") from None
 
         pre_save.connect(save_meets_a_wrapped_conflict, sender=Device, weak=False)
@@ -1163,9 +1169,15 @@ class TestAssignVCSerialView:
             pre_save.disconnect(save_meets_a_wrapped_conflict, sender=Device)
 
         first.refresh_from_db()
-        assert first.serial == "WRAPPED-OLD"
         assert response.status_code == 302
-        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        if released:
+            assert (first.serial, len(conflicts)) == ("WRAPPED-NEW", 1)
+            assert messages_on(response.wsgi_request) == [
+                ("success", "Successfully assigned 1 serial number(s) to VC members")
+            ]
+        else:
+            assert (first.serial, len(conflicts)) == ("WRAPPED-OLD", 2)
+            assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
 
     def test_a_swap_with_a_serial_held_outside_the_chassis_changes_neither(self, logged_in_client, librenms_server):
         """The outside holder refuses the second member, so the first member's serial is not freed either."""
