@@ -510,8 +510,8 @@ class _Attribution:
             linked = [fpc for fpc in fpcs if _as_int(fpc.get("entPhysicalParentRelPos")) == slot]
         else:
             return None
-        # A blank FPC serial gives no link, so its rows keep the develop walk for blank serial chains.
-        if len(linked) == 1 and not display(linked[0].get("entPhysicalSerialNum")):
+        # Blank FPC serials give no link, so their rows keep the develop walk for blank serial chains.
+        if linked and not any(display(fpc.get("entPhysicalSerialNum")) for fpc in linked):
             return None
         return linked
 
@@ -631,7 +631,7 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
     inherits its parent's member, or a position or leading name number of 1 or more names one.
     Outside a recognized stack, a Junos FPC that reports a serial, and a row whose description names
     "FPC <n>", resolve only through that one FPC: the member that owns its serial, else unattributed.
-    A blank FPC serial gives no link, so its rows resolve as on develop. No row inherits a member across a row (itself
+    A link to FPCs that all report a blank serial gives no link, so its rows resolve as on develop. No row inherits a member across a row (itself
     included) whose serial has no identity, because such a row can be a member row; it and a child of
     an unattributed parent are unattributed instead.
     A row that no rule attributes has the source "default", or :data:`UNATTRIBUTED_SOURCE` when it

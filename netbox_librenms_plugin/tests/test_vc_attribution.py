@@ -513,6 +513,25 @@ class TestRecognizedStack:
             # The PSU's fan crosses the PSU's link on its way to the root's serial.
             assert {owner[4], owner[30], owner[41]} == {(None, UNATTRIBUTED_SOURCE)}
 
+    @pytest.mark.parametrize(("other_serial", "unattributed"), [("", False), ("SN-BBB", True)], ids=["blank", "mixed"])
+    def test_a_link_to_a_slot_of_blank_fpcs_only_gives_no_link(self, other_serial, unattributed):
+        """Both FPCs report slot 1; when all of them are blank the PSU resolves as develop does, by parent context."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-blank-slot-{other_serial or 'blank'}")
+        inventory = [
+            {**row, "entPhysicalSerialNum": "", "entPhysicalParentRelPos": 1}
+            if row["entPhysicalIndex"] == 120
+            else {**row, "entPhysicalSerialNum": other_serial if row["entPhysicalIndex"] == 121 else ""}
+            for row in junos_vc_inventory()
+        ]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[4] == ((None, UNATTRIBUTED_SOURCE) if unattributed else (None, "parent-context"))
+
     @pytest.mark.parametrize("bay", [True, False], ids=["named-bay", "no-bay"])
     def test_a_container_that_names_an_fpc_is_no_fpc(self, bay):
         """ "FPC 1 Power Supply Bay" names FPC 1; it is no FPC row, so its PSU follows FPC 1 and not the root's serial."""
