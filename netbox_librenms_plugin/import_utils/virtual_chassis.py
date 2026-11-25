@@ -370,7 +370,7 @@ class _StackRows(NamedTuple):
 
     root_index: object
     positions: dict
-    # False when the positions come from row order, which names no member of a serial without an identity.
+    # False when the positions come from row order, which names a member only for a member row without a serial.
     positions_reported: bool
     # Junos only: {FPC slot: FPC row index} for slots that exactly one FPC reports.
     fpc_slots: dict
@@ -478,9 +478,18 @@ class _Attribution:
         """Return the member a member row resolves to: its serial first, then its detected position."""
         if (member := self.serial_owner(row)) is not None:
             return member
-        if not self.stack.positions_reported and self._has_serial_without_identity(row):
+        if self._row_order_names_no_member(row):
             return None
         return self.member_at(self.stack.positions.get(row.get("entPhysicalIndex")))
+
+    def _row_order_names_no_member(self, row):
+        """Return whether a member row's position comes from row order and it reports a serial no member owns."""
+        serial = row.get("entPhysicalSerialNum")
+        return not self.stack.positions_reported and bool(display(serial)) and self.serial_owner(row) is None
+
+    def _unowned(self, member_row):
+        """Return the result of a row below a member row that names no member."""
+        return None, UNATTRIBUTED_SOURCE if self._row_order_names_no_member(member_row) else "default"
 
     def _in_stack(self, row):
         """Attribute a row of a recognized stack to the member row it is or sits under."""
@@ -496,14 +505,14 @@ class _Attribution:
             if current.get("entPhysicalIndex") in self.stack.positions:
                 member = self._member_row_owner(current)
                 if member is None:
-                    break
+                    return self._unowned(current)
                 return member, "position" if current is row else "parent-context"
             # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows it.
             fpc = self.by_index.get(self.stack.fpc_named_by(current))
             if fpc is not None:
                 member = self._member_row_owner(fpc)
                 if member is None:
-                    break
+                    return self._unowned(fpc)
                 return member, "junos-member" if current is row else "parent-context"
             current = self.by_index.get(current.get("entPhysicalContainedIn"))
         return None, "default"
@@ -557,7 +566,8 @@ def attribute_inventory(rows: list, vc_members: list, context, member_context=No
 
     This is all of module sync's member attribution. A row's own serial decides first. In a stack
     that :func:`extract_vc_members` recognizes, only a member row gives a member by its position
-    (a position from row order gives none to a member row whose serial has no identity),
+    (a position from row order gives none to a member row that reports a serial no member owns,
+    and that row and the rows below it are unattributed),
     its descendants inherit it unless a nearer serial names another member, and the stack root and
     the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
     follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row

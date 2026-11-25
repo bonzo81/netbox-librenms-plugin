@@ -1945,8 +1945,8 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
     assert _installed(member) == set()
 
 
-def _stack_rows(positions):
-    """Return a stack root with two chassis members that report "AB-12" and "CD-34" and hold one card each."""
+def _stack_rows(positions, serials=("AB-12", "CD-34")):
+    """Return a stack root with two chassis members that report *serials* and hold one card each."""
 
     def row(index, parent, entity_class, name, serial, **fields):
         return {
@@ -1961,7 +1961,7 @@ def _stack_rows(positions):
 
     members = [
         row(index, 1, "chassis", f"Switch {index}", serial, entPhysicalParentRelPos=position)
-        for index, serial, position in zip((2, 3), ("AB-12", "CD-34"), positions, strict=True)
+        for index, serial, position in zip((2, 3), serials, positions, strict=True)
     ]
     return [
         row(1, 0, "stack", "Stack", ""),
@@ -1996,6 +1996,29 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_short_serial(
         on_page = CARD if positions[0] == 1 else CARD + 1
         _action, fields = rendered_module_form(content, "install-module", on_page)
         assert fields["selected_device_id"] == str(page.pk)
+
+
+@pytest.mark.parametrize(
+    ("second_serial", "withheld"), [("NEW123", True), ("", False)], ids=["unowned-serial", "blank"]
+)
+@pytest.mark.parametrize("reverse", [False, True], ids=["in-order", "reversed"])
+def test_a_row_order_position_attributes_no_stack_member_with_a_serial_no_member_owns(
+    ui, vc_grants, second_serial, withheld, reverse
+):
+    """Switch 2 reports the member's serial; row order names no member for Switch 3's unowned "NEW123"."""
+    rows = _stack_rows((-1, -1), serials=("VCB-0001", second_serial))
+    if reverse:
+        rows[1:3] = rows[2:0:-1]
+    page, member = vc_grants(rows=rows)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    (owned,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+    (row,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD + 1}".*?</tr>', content, flags=re.S)
+    assert "data-member-unattributed" not in owned
+    assert f'<option value="{member.pk}" selected>' in owned
+    assert ("data-member-unattributed" in row) is withheld
+    assert bool([form for form in parsed.forms if str(CARD + 1) in form["fields"].values()]) is (not withheld)
 
 
 @pytest.mark.parametrize("occupant", [None, "GR-OTHER", "GR-CARD"], ids=["empty-bay", "other-type", "same-type"])
