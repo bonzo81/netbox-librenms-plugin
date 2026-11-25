@@ -4461,6 +4461,8 @@ class TestDeviceConflictActionBranches:
             DeviceConflictActionView, lambda: link(make_device(f"{target.name}-decoy"))
         )
         self._assert_htmx_error(control, "Device ID mismatch")
+        # Validation reads the serial rules once, for the VC detection key.
+        assert validation_reads == 1
         response, reads, validations = _serial_rule_reads(DeviceConflictActionView, lambda: link(target))
 
         assert response.headers.get("HX-Trigger") == "closeModal"
@@ -4491,6 +4493,8 @@ class TestDeviceConflictActionBranches:
             DeviceConflictActionView, lambda: post_view(self._make_view(), control_request, device_id=42)
         )
         self._assert_htmx_error(control, "Device ID mismatch")
+        # Validation reads the serial rules once, for the VC detection key.
+        assert validation_reads == 1
         request = self._request(action, target, f"{target.name}-user")
         response, reads, validations = _serial_rule_reads(
             DeviceConflictActionView, lambda: post_view(self._make_view(), request, device_id=42)
