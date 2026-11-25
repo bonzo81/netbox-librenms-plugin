@@ -2067,6 +2067,28 @@ def test_a_card_below_a_junos_fpc_with_a_short_serial_is_offered_on_no_member(ui
     assert bool(_row_forms(parsed, CARD)) is (not withheld)
 
 
+@pytest.mark.parametrize(("optic_serials", "branch"), [(("12", "34"), False), (("SN-O1X1", "SN-O2X2"), True)])
+def test_a_carrier_whose_typed_children_no_member_reported_offers_no_install_branch(
+    ui, vc_grants, optic_serials, branch
+):
+    """The optics report "12" and "34", so no member owns them; the carrier offers its own Install only."""
+    rows = _vc_rows("VCA-0001", "VCB-0001", optic_1_serial=optic_serials[0])
+    rows = [
+        {**row, "entPhysicalSerialNum": optic_serials[1]} if row["entPhysicalIndex"] == OPTIC_2 else row for row in rows
+    ]
+    page, _member = vc_grants(rows=rows)
+    content = render(ui, page)
+    parsed = module_tab_forms(content)
+
+    (carrier,) = re.findall(rf'<tr[^>]*data-ent-index="{CARRIER}".*?</tr>', content, flags=re.S)
+    for optic in (OPTIC_1, OPTIC_2):
+        (row,) = re.findall(rf'<tr[^>]*data-ent-index="{optic}".*?</tr>', content, flags=re.S)
+        assert ("data-member-unattributed" in row) is (not branch)
+    assert 'data-action="install"' in carrier
+    assert ('data-action="install-branch"' in carrier) is branch
+    assert bool([form for form in _row_forms(parsed, CARRIER) if "install-branch" in form["action"]]) is branch
+
+
 @pytest.mark.parametrize("third_fpc", ["12", None], ids=["short-fpc-3", "no-fpc-3"])
 def test_a_junos_row_follows_its_named_fpc_when_another_fpc_has_a_short_serial(ui, vc_grants, third_fpc):
     """FPC 3 reports "12", which turns off the stack shape; the card that names FPC 2 still follows FPC 2's member."""

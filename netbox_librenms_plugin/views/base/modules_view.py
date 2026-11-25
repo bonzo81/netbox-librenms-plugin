@@ -2322,13 +2322,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     scope_preserved_by_depth[depth + 1] = True
                 scope_empty_installed_bays_by_depth[depth + 1] = scope_empty_installed_bays
 
-            if sub_selected_device == selected_device and sub_row.get("can_install"):
+            # A child that no member reported can sit on any member, so it installs with no branch.
+            installs_here = sub_selected_device == selected_device and not sub_row["member_unattributed"]
+            if installs_here and sub_row.get("can_install"):
                 table_data[parent_row_idx]["has_installable_children"] = True
             # When parent bay is uninstalled, sub-rows have empty bays so
             # can_install is False, but module_type_id is still resolved.
             # Use it to enable "Install Branch" without a second resolve pass.
             elif (
-                sub_selected_device == selected_device
+                installs_here
                 and parent_bay_matched_but_uninstalled
                 and sub_row.get("module_type_id")
                 and not _install_refused(sub_row)
