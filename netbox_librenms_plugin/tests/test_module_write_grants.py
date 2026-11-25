@@ -559,6 +559,53 @@ def test_replace_refuses_a_module_added_below_a_removal_tree_after_its_preview(u
     }
 
 
+@pytest.mark.parametrize("parent", ["holder", "installed"])
+def test_replace_signs_the_removal_trees_that_its_preview_summarized(ui, c8300, parent, monkeypatch):
+    """A child added between two preview reads of a removal tree must not enter the grant without the dialog."""
+    from dcim.models import Module, ModuleBay
+
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+    from netbox_librenms_plugin.serial_identity import module_subtree_serials
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device, entities = c8300
+    remote = make_device_with_module_bays("replace-tree-holder", ["Slot 1"])
+    holder = install_in_bay(remote, "Slot 1", "TREE-CARD", serial=_nim(entities)[1], child_bays=["Child"])
+    installed = install_module(
+        device, _bay_name(entities, REAL_NIM), entities[SERVICE_MODULE]["entPhysicalModelName"], "OLD"
+    )
+    ModuleBay.objects.create(device=device, module=installed, name="Added child")
+    root, bay_device, bay_name = (holder, remote, "Child") if parent == "holder" else (installed, device, "Added child")
+    added = []
+
+    def read_then_add_a_child(module_pk):
+        tree = module_subtree_serials(module_pk)
+        if module_pk == root.pk and not added:
+            added.append(install_in_bay(bay_device, bay_name, "TREE-CHILD", serial="TREE-CHILD-1", parent_module=root))
+        return tree
+
+    preview_url = rendered_preview_url(render(ui, device), REAL_NIM)
+    with monkeypatch.context() as reading:
+        reading.setattr("netbox_librenms_plugin.views.sync.modules.module_subtree_serials", read_then_add_a_child)
+        preview = ui.get(preview_url, HTTP_HX_REQUEST="true")
+    assert preview.status_code == 200, preview.content
+    form = rendered_module_form(preview.content.decode(), "replace-module", REAL_NIM)
+    assert form[1]["conflict_module_id"] == str(holder.pk)
+    [child] = added
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.STALE.message in messages_of(response)
+    assert written_state(device) == before
+    assert set(Module.objects.filter(pk__in=[holder.pk, installed.pk, child.pk]).values_list("pk", flat=True)) == {
+        holder.pk,
+        installed.pk,
+        child.pk,
+    }
+
+
 def _remote_holder_with_child(device, entities, parent):
     """Hold the NIM serial on another device; install a child below the holder or below the module in the NIM bay."""
     from dcim.models import ModuleBay

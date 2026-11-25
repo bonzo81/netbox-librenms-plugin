@@ -2791,17 +2791,17 @@ def _removal_note(view, trees):
     return {"count": len(pks), "names": names, "hidden": len(pks) - len(names)}
 
 
-def _removal_trees_token(module, elsewhere):
-    """Return a positive int for the module pks that a replace deletes: the subtree of *module* and of the holder."""
+def _removal_trees_token(module, elsewhere, trees):
+    """Return a positive int for the module pks that a replace deletes: the *trees* of *module* and of the holder."""
     roots = [module.pk] if elsewhere.object is None else [module.pk, elsewhere.object.pk]
-    return keyed_token([[pk for pk, _serial in module_subtree_serials(root)] for root in roots])
+    return keyed_token([[pk for pk, _serial in trees[root]] for root in roots])
 
 
-def _replace_target(module, replacement_type, serial_context, elsewhere):
+def _replace_target(module, replacement_type, serial_context, elsewhere, trees):
     """
     Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved.
 
-    It also signs the holder of the incoming serial and the modules below both.
+    It also signs the holder of the incoming serial and the modules below both, from the observed *trees* by root pk.
     The replace then deletes only the modules that the preview showed.
     """
     target = {
@@ -2811,7 +2811,7 @@ def _replace_target(module, replacement_type, serial_context, elsewhere):
         "module_serial_token": freshness_token(module.serial, serial_context),
         "serial_holder_token": _serial_holder_token(elsewhere),
         # A module added below a removal tree after the preview refuses the grant.
-        "removal_trees_token": _removal_trees_token(module, elsewhere),
+        "removal_trees_token": _removal_trees_token(module, elsewhere, trees),
     }
     if replacement_type is not None:
         target["replacement_module_type_id"] = replacement_type.pk
@@ -2925,13 +2925,17 @@ class ModuleMismatchPreviewView(
         elif elsewhere.kind is ResolutionKind.AMBIGUOUS:
             serial_conflict_ambiguous = True
 
+        # One read of each removal tree serves the dialog and the Replace grant, so the grant signs what the dialog shows.
+        removal_trees = {installed_module.pk: module_subtree_serials(installed_module.pk)}
+        if elsewhere.object is not None:
+            removal_trees[elsewhere.object.pk] = module_subtree_serials(elsewhere.object.pk)
+        installed_tree = removal_trees[installed_module.pk]
+        holder_trees = [] if serial_conflict is None else [removal_trees[serial_conflict.pk]]
         # Replace would delete the bay, and Move would put the holder into a bay of its own subtree.
         serial_conflict_owns_bay = serial_conflict is not None and subtree_owns_bay(
-            module_subtree_serials(serial_conflict.pk), installed_module.module_bay.module_id
+            holder_trees[0], installed_module.module_bay.module_id
         )
         deletable = self.restricted_queryset(Module, "delete")
-        installed_tree = module_subtree_serials(installed_module.pk)
-        holder_trees = [] if serial_conflict is None else [module_subtree_serials(serial_conflict.pk)]
         replace_in_delete_scope = all_trees_in_scope(deletable, [installed_tree, *holder_trees])
         # Move deletes the installed tree first; Replace deletes it and the holder's tree.
         move_removal = _removal_note(self, [installed_tree])
@@ -3000,7 +3004,9 @@ class ModuleMismatchPreviewView(
                 "replace_inventory_binding": self._derived_grant(
                     grant,
                     ACTION_REPLACE_MODULE,
-                    action_target=_replace_target(installed_module, matched_type, serial_context, elsewhere),
+                    action_target=_replace_target(
+                        installed_module, matched_type, serial_context, elsewhere, removal_trees
+                    ),
                 ),
             },
         )
@@ -3217,18 +3223,19 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 elsewhere = _resolve_replacement_holder(
                     incoming, serial_context, rules=serial_rules, exclude_pk=module_id
                 )
+                if elsewhere.kind is ResolutionKind.UNIQUE:
+                    scope.require_devices([elsewhere.object.device_id])
+                    if elsewhere.object.pk not in removals:
+                        raise _ModuleActionRefused("The conflicting module changed. Refresh Modules and try again.")
                 # The locked module and the locked holder of the incoming serial must be the ones the preview showed.
                 granted.grant.require(
-                    action_target=_replace_target(installed_module, matched_type, serial_context, elsewhere)
+                    action_target=_replace_target(installed_module, matched_type, serial_context, elsewhere, removals)
                 )
                 if elsewhere.kind is ResolutionKind.AMBIGUOUS:
                     # Roll back and surface a clear error: we don't want to
                     # guess which of N conflicts to remove.
                     raise _SerialConflictAmbiguous(serial)
                 if elsewhere.kind is ResolutionKind.UNIQUE:
-                    scope.require_devices([elsewhere.object.device_id])
-                    if elsewhere.object.pk not in removals:
-                        raise _ModuleActionRefused("The conflicting module changed. Refresh Modules and try again.")
                     # The success message names the holder's place, so the user must also see it.
                     conflict_module = (
                         self.restricted_queryset(Module, "delete")
