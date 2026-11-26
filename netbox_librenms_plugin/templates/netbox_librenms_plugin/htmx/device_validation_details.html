@@ -1,5 +1,6 @@
 {# HTMX template for device validation details modal #}
 {# Redesigned to match the sync page's clean table layout #}
+{% load librenms_serial %}
 
 <div class="modal-header">
   <h5 class="modal-title">
@@ -126,6 +127,8 @@
                           <i class="mdi mdi-sync"></i>
                         </button>
                       </form>
+                    {% elif validation.member_name_refusal %}
+                      <span class="text-muted small d-block" data-member-name-refusal>{{ validation.member_name_refusal }}</span>
                     {% endif %}
                   {% else %}
                     <span class="text-muted">New device</span>
@@ -311,18 +314,25 @@
               {% if not validation.existing_device and not validation.import_as_vm or validation.existing_device and existing_device_model_name != "virtualmachine" %}
               <tr>
                 <td style="padding-left: 0.75rem;">Serial</td>
-                <td>
+                <td class="text-break">
                   {% if validation.existing_device %}
                     {% if validation.existing_device.serial %}
                       {{ validation.existing_device.serial }}
                     {% else %}
                       <span class="text-muted">Not set</span>
                     {% endif %}
-                    {% if sync_info and not sync_info.serial_synced %}
+                    {% if sync_info and sync_info.serial_unavailable %}
+                      <span class="text-warning ms-1" title="{{ sync_info.serial_unavailable }}" data-serial-unavailable>
+                        <i class="mdi mdi-help-circle-outline"></i>
+                      </span>
+                      <span class="text-muted small">{{ sync_info.serial_unavailable }}</span>
+                    {% elif sync_info and not sync_info.serial_synced %}
                       {% if validation.serial_action == 'conflict' %}
-                        <span class="text-danger ms-1" title="Serial conflict — another device already has this serial">
+                        <span class="text-danger ms-1" title="{% if validation.serial_conflict.unavailable %}Serial conflict: {{ validation.serial_conflict.unavailable }}{% else %}Serial conflict — another device already has this serial{% endif %}">
                           <i class="mdi mdi-alert-circle"></i>
                         </span>
+                      {% elif sync_info.serial_fit_refusal %}
+                        <span class="d-block text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
                       {% else %}
                       <form style="display:inline" class="ms-1"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
@@ -337,15 +347,15 @@
                         </button>
                       </form>
                       {% endif %}
-                    {% elif sync_info and sync_info.serial_synced and sync_info.librenms_serial != '-' %}
+                    {% elif sync_info and sync_info.serial_same %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% else %}
                     <span class="text-muted">—</span>
                   {% endif %}
                 </td>
-                <td>
-                  {{ libre_device.serial|default:"—" }}
+                <td class="text-break">
+                  {{ libre_device.serial|page_text|default:"—" }}
                   {% if validation.serial_duplicate %}
                     <span class="badge bg-danger text-white ms-1">Conflict</span>
                   {% endif %}
@@ -571,6 +581,44 @@
         </button>
       </form>
 
+    {% elif row_is_oob_controller %}
+      {# A controller row is only attached to its host: no control here writes the row's data on the host. #}
+      <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        {% if validation.existing_match_type == 'librenms_oob' %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB linked</span>
+          <span class="text-muted ms-1">
+            — LibreNMS ID {{ libre_device.device_id }} is already linked as the OOB controller for
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
+          </span>
+        {% elif validation.oob_candidate %}
+          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
+          <span class="text-muted ms-1">
+            — LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
+            (<strong>{{ validation.oob_candidate.type }}</strong>{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})
+            appears to be the OOB management controller of
+            {% with target=validation.oob_candidate.device %}
+              {# The offer's device is its OOB target: the owner of the matched device's LibreNMS links. #}
+              <a href="{% url 'dcim:device' pk=target.pk %}" target="_blank" rel="noopener noreferrer">{{ target.name }}</a>{% if target.pk == validation.existing_device.pk %}{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}{% else %},
+              the chassis member that holds the LibreNMS links of
+              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.{% endif %}
+            {% endwith %}
+          </span>
+        {% else %}
+          {# No offer: the warnings below give the reason (an OOB link exists, or the target is out of scope). #}
+          <span class="badge bg-info-lt me-1" data-oob-controller-no-offer><i class="mdi mdi-chip"></i> OOB controller</span>
+          <span class="text-muted ms-1">
+            — This LibreNMS device is an OOB controller of
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>; no OOB action is offered.
+          </span>
+        {% endif %}
+      </div>
+      {% if validation.oob_candidate and existing_device_model_name == "device" %}
+        {# The request carries the naming rules of this dialog, so Add as OOB validates the row as this dialog did. #}
+        <div class="mb-3" hx-vals='{"use_sysname": "{{ use_sysname|yesno:"true,false" }}", "strip_domain": "{{ strip_domain|yesno:"true,false" }}"}'>
+          {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
+        </div>
+      {% endif %}
+
     {% elif validation.existing_match_type == 'librenms_id' %}
       <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         {% if existing_id_servers %}
@@ -585,8 +633,12 @@
         {% elif validation.name_sync_available %}
           <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Name differs</span>
         {% endif %}
-        {% if validation.serial_confirmed %}
-          <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Serial confirmed</span>
+        {% if validation.serial_confirmed and validation.librenms_id_needs_migration and validation.legacy_id_serial_shared %}
+          <span class="badge bg-warning-lt me-1" data-serial-state="shared"><i class="mdi mdi-alert"></i> Serial matches, but other devices hold it too</span>
+        {% elif validation.serial_confirmed and validation.librenms_id_needs_migration and not validation.legacy_id_serial_confirmed %}
+          <span class="badge bg-warning-lt me-1" data-serial-state="unavailable"><i class="mdi mdi-alert"></i> Serial matches, but its other holders cannot be checked</span>
+        {% elif validation.serial_confirmed %}
+          <span class="badge bg-success-lt me-1" data-serial-state="confirmed"><i class="mdi mdi-check-circle-outline"></i> Serial confirmed</span>
         {% elif validation.serial_action == 'conflict' %}
           <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Serial conflict</span>
         {% elif validation.serial_action == 'update_serial' %}
@@ -612,16 +664,22 @@
           {% if validation.existing_device.cluster %}
           <input type="hidden" name="cluster_{{ libre_device.device_id }}" value="{{ validation.existing_device.cluster.pk }}">
           {% endif %}
-          {% if not validation.serial_confirmed %}
+          {% if not validation.legacy_id_serial_confirmed %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-migrate-{{ libre_device.device_id }}"
                      onchange="this.closest('form').querySelector('.migrate-btn').disabled = !this.checked">
               <label class="form-check-label text-warning" for="force-migrate-{{ libre_device.device_id }}">
-                <i class="mdi mdi-alert"></i> Serial not confirmed — check to migrate anyway
+                {% if validation.legacy_id_serial_shared %}
+                  <span data-force-reason="shared"><i class="mdi mdi-alert"></i> Several devices hold this serial — check to migrate anyway</span>
+                {% elif validation.serial_confirmed %}
+                  <span data-force-reason="unavailable"><i class="mdi mdi-alert"></i> The other holders of this serial cannot be checked — check to migrate anyway</span>
+                {% else %}
+                  <span data-force-reason="unconfirmed"><i class="mdi mdi-alert"></i> Serial not confirmed — check to migrate anyway</span>
+                {% endif %}
               </label>
             </div>
           {% endif %}
-          <button type="submit" class="btn btn-sm btn-warning migrate-btn"{% if not validation.serial_confirmed %} disabled{% endif %}>
+          <button type="submit" class="btn btn-sm btn-warning migrate-btn"{% if not validation.legacy_id_serial_confirmed %} disabled{% endif %}>
             <i class="mdi mdi-database-sync"></i> Migrate ID format
           </button>
         </form>
@@ -646,11 +704,22 @@
           <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
         </span>
       </div>
-      {% if validation.serial_action == 'conflict' %}
+      {% if validation.serial_action == 'conflict' and validation.serial_conflict.unavailable %}
+        <div class="alert alert-danger py-2 mb-3" data-serial-conflict="unavailable">
+          <i class="mdi mdi-alert-circle"></i>
+          Import blocked: The serial lookup cannot check the other devices that can hold the incoming serial number.
+          {{ validation.serial_conflict.unavailable }}
+        </div>
+      {% elif validation.serial_action == 'conflict' %}
         <div class="alert alert-danger py-2 mb-3">
           <i class="mdi mdi-alert-circle"></i>
           Import blocked: The incoming serial number is already assigned to another device in NetBox.
           Resolve the duplicate serial before linking.
+        </div>
+      {% elif validation.serial_action == 'update_serial' and sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
+        <div class="alert alert-warning py-2 mb-3" data-serial-fit-refusal>
+          <i class="mdi mdi-alert"></i>
+          {{ sync_info.serial_fit_refusal }}
         </div>
       {% else %}
       <div class="mb-3">
@@ -672,7 +741,7 @@
               </label>
             </div>
           {% endif %}
-          {% if validation.serial_action == 'update_serial' %}
+          {% if validation.serial_action == 'update_serial' and not validation.existing_device.virtual_chassis_id %}
             <input type="hidden" name="action" value="update_serial">
             <button type="submit" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
               <i class="mdi mdi-swap-horizontal"></i> Update Serial &amp; Link
@@ -693,8 +762,6 @@
           <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
         {% elif validation.serial_action == 'promote_to_host' %}
           <span class="badge bg-info-lt me-1"><i class="mdi mdi-server"></i> Host Detected</span>
-        {% elif validation.serial_action == 'oob_already_linked' %}
-          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB Already Linked</span>
         {% else %}
           <span class="badge bg-warning-lt me-1"><i class="mdi mdi-barcode"></i> Serial match</span>
         {% endif %}
@@ -774,15 +841,19 @@
             {% if validation.device_type_mismatch %}
               <div class="form-check mb-2">
                 <input class="form-check-input" type="checkbox" name="force" id="force-promote-{{ libre_device.device_id }}"
-                       onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+                       onchange="this.closest('form').querySelector('.force-action-btn')?.toggleAttribute('disabled', !this.checked)">
                 <label class="form-check-label text-danger" for="force-promote-{{ libre_device.device_id }}">
                   <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
                 </label>
               </div>
             {% endif %}
-            <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
-              <i class="mdi mdi-pencil"></i> Update &amp; Link
+            {% if sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
+            <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
+            {% else %}
+            <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+              {% if validation.existing_device.virtual_chassis_id %}<i class="mdi mdi-link-plus"></i> Link to LibreNMS{% else %}<i class="mdi mdi-pencil"></i> Update &amp; Link{% endif %}
             </button>
+            {% endif %}
           </form>
         </div>
       </div>
@@ -795,8 +866,9 @@
           <div>
             <div class="d-flex align-items-center gap-2 mb-1">
               <i class="mdi mdi-swap-horizontal"></i>
+              {# The offer's device is its OOB target; the disclosure gate withdraws an offer whose target is hidden. #}
               <strong>OOB attach effect on
-                <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+                <a href="{% url 'dcim:device' pk=validation.oob_candidate.device.pk %}" target="_blank" rel="noopener noreferrer">{{ validation.oob_candidate.device.name }}</a>
               </strong>
             </div>
             <table class="table table-sm table-borderless mb-1" style="width:auto;">
@@ -811,9 +883,9 @@
               <tbody>
                 <tr>
                   <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
-                  <td class="py-0 pe-3 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }}{% else %}--{% endif %}</td>
+                  <td class="py-0 pe-3 text-muted">{% if validation.oob_candidate.target_host_id %}#{{ validation.oob_candidate.target_host_id }}{% else %}--{% endif %}</td>
                   <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
-                  <td class="py-0 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
+                  <td class="py-0 text-muted">{% if validation.oob_candidate.target_host_id %}#{{ validation.oob_candidate.target_host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
                 </tr>
                 <tr>
                   <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
@@ -829,7 +901,8 @@
             </div>
           </div>
         </div>
-        <div class="mb-3">
+        {# The request carries the naming rules of this dialog, so Add as OOB validates the row as this dialog did. #}
+        <div class="mb-3" hx-vals='{"use_sysname": "{{ use_sysname|yesno:"true,false" }}", "strip_domain": "{{ strip_domain|yesno:"true,false" }}"}'>
           {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
         </div>
       </div>
@@ -1070,7 +1143,7 @@
           {% if validation.device_type_mismatch %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-serial-{{ libre_device.device_id }}"
-                     onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+                     onchange="this.closest('form').querySelector('.force-action-btn')?.toggleAttribute('disabled', !this.checked)">
               <label class="form-check-label text-danger" for="force-serial-{{ libre_device.device_id }}">
                 <i class="mdi mdi-alert-circle"></i> Device type mismatch -- check to force
               </label>
@@ -1082,38 +1155,19 @@
               <i class="mdi mdi-link-plus"></i> Link to LibreNMS
             </button>
           {% elif validation.serial_action == 'hostname_differs' %}
-            <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
-              <i class="mdi mdi-pencil"></i> Update &amp; Link
+            {% if sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
+            <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
+            {% else %}
+            <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+              {% if validation.existing_device.virtual_chassis_id %}<i class="mdi mdi-link-plus"></i> Link to LibreNMS{% else %}<i class="mdi mdi-pencil"></i> Update &amp; Link{% endif %}
             </button>
+            {% endif %}
           {% endif %}
         </form>
       </div>
       {% endif %}
 
     {% elif validation.existing_match_type == 'primary_ip' %}
-      {# device_add_as_oob sets device.oob_ip (VMs lack it) — only offer OOB attach for real devices; a VM IP-match falls through to the info message below. #}
-      {% if validation.serial_action == 'oob_candidate' and existing_device_model_name != "virtualmachine" %}
-        <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
-          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
-          <span class="text-muted ms-1">
-            — Exists as
-            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
-            (matched via IP {{ libre_device.ip }}).
-          </span>
-        </div>
-        <div class="alert alert-info py-2 mb-3">
-          <i class="mdi mdi-information-outline me-2"></i>
-          <div>
-            LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
-            appears to be an OOB management controller
-            (<strong>{{ validation.oob_candidate.type }}</strong>
-            {% if validation.oob_candidate.ip %}— {{ validation.oob_candidate.ip }}{% endif %}).
-          </div>
-        </div>
-        <div class="mb-3">
-          {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
-        </div>
-      {% else %}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         <span class="badge bg-warning-lt me-1"><i class="mdi mdi-ip-network"></i> IP match</span>
         <span class="text-muted ms-1">
@@ -1133,26 +1187,20 @@
           {% if validation.device_type_mismatch %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-primary-ip-{{ libre_device.device_id }}"
-                     onchange="this.closest('form').querySelector('.force-action-btn').disabled = !this.checked">
+                     onchange="this.closest('form').querySelector('.force-action-btn')?.toggleAttribute('disabled', !this.checked)">
               <label class="form-check-label text-danger" for="force-primary-ip-{{ libre_device.device_id }}">
                 <i class="mdi mdi-alert-circle"></i> Device type mismatch, check to force
               </label>
             </div>
           {% endif %}
-          <button type="submit" name="action" value="update" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
-            <i class="mdi mdi-pencil"></i> Update &amp; Link
+          {% if sync_info.serial_fit_refusal and not validation.existing_device.virtual_chassis_id %}
+          <span class="text-muted small" data-serial-fit-refusal>{{ sync_info.serial_fit_refusal }}</span>
+          {% else %}
+          <button type="submit" name="action" value="{% if validation.existing_device.virtual_chassis_id %}link{% else %}update{% endif %}" class="btn btn-sm btn-warning{% if validation.device_type_mismatch %} force-action-btn{% endif %}"{% if validation.device_type_mismatch %} disabled{% endif %}>
+            {% if validation.existing_device.virtual_chassis_id %}<i class="mdi mdi-link-plus"></i> Link to LibreNMS{% else %}<i class="mdi mdi-pencil"></i> Update &amp; Link{% endif %}
           </button>
+          {% endif %}
         </form>
-      </div>
-      {% endif %}
-
-    {% elif validation.existing_match_type == 'librenms_oob' %}
-      <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
-        <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB linked</span>
-        <span class="text-muted ms-1">
-          — LibreNMS ID {{ libre_device.device_id }} is already linked as the OOB controller for
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
-        </span>
       </div>
 
     {% else %}

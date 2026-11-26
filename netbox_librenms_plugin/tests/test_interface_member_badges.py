@@ -83,6 +83,7 @@ def _render_tab(device, rows, *, per_page=None, table_class=None):
     from django.test import RequestFactory
     from django_tables2 import RequestConfig
 
+    from netbox_librenms_plugin.sync_filters import parse_sync_filters
     from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
@@ -95,6 +96,7 @@ def _render_tab(device, rows, *, per_page=None, table_class=None):
         "interface_sync": {
             "object": device,
             "table": table,
+            "filters": parse_sync_filters(request.GET, table.filter_spec()),
             "server_key": SERVER_KEY,
             "netbox_only_interfaces": [],
             "virtual_chassis_members": [],

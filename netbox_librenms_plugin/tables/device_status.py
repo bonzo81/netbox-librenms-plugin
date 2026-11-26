@@ -15,6 +15,7 @@ from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMeth
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.serial_identity import display
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
 
@@ -1004,8 +1005,12 @@ class DeviceImportTable(tables.Table):
             kwargs={"device_id": device_id},
         )
         server_key = getattr(self, "server_key", None)
-        if server_key:
-            vc_url += f"?server_key={quote_plus(str(server_key))}"
+        params = {"server_key": server_key} if server_key else {}
+        # The dialog names the members with the naming of this row's validation.
+        naming = validation.get("naming_criteria") or {}
+        params.update({key: str(bool(naming[key])).lower() for key in ("use_sysname", "strip_domain") if key in naming})
+        if params:
+            vc_url += "?" + "&".join(f"{key}={quote_plus(str(value))}" for key, value in params.items())
 
         # Show error button if detection failed
         if vc_data.get("detection_failed") or vc_data.get("detection_error"):
@@ -1123,7 +1128,7 @@ class DeviceImportTable(tables.Table):
             members_payload.append(
                 {
                     "position": member.get("position"),
-                    "serial": member.get("serial"),
+                    "serial": display(member.get("serial")),
                     "suggested_name": member.get("suggested_name"),
                 }
             )

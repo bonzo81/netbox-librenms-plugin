@@ -1,5 +1,7 @@
 """End-to-end tests for the module install actions and their inventory ignore rules."""
 
+import re
+
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
@@ -382,13 +384,15 @@ class TestInstallBranchView:
         seed_inventory(view, device, rows, librenms_id=72)
         request = make_request("post", _branch_post(device, 10), user=make_superuser(), path="/modules/")
         key = _seed_pre_version_snapshot(view, device, rows, 72)
+        cached = cache.get(key)
 
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 302
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
-        assert cache.get(key) is None
+        # A refresh can store a current snapshot under the key after the read, so the reader deletes nothing.
+        assert cache.get(key) == cached
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_row_below_a_skipped_holder_has_no_branch(self, live_librenms, holder_class, holder_model):
@@ -458,12 +462,14 @@ class TestInstallSelectedView:
         _action, fields = rendered_module_form(render_module_tab(device), "install-selected")
         request = make_request("post", {**fields, "select": ["10"]}, user=make_superuser(), path="/modules/")
         key = _seed_pre_version_snapshot(view, device, rows, 73)
+        cached = cache.get(key)
 
         view_post(view, request, pk=device.pk)
 
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
-        assert cache.get(key) is None
+        # A refresh can store a current snapshot under the key after the read, so the reader deletes nothing.
+        assert cache.get(key) == cached
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_selected_row_below_a_skipped_holder_installs_nothing(self, live_librenms, holder_class, holder_model):
@@ -475,6 +481,129 @@ class TestInstallSelectedView:
 
         assert message_texts(request, "error") == [SELECTED_ROWS_REFUSED_MESSAGE.format(rows="Optic 1")]
         assert not Module.objects.filter(device=device).exists()
+
+
+@pytest.mark.parametrize(("action", "occupied"), [("branch", True), ("selected", True), ("selected", False)])
+def test_batch_install_checks_serial_length_only_for_creation(live_librenms, action, occupied):
+    from dcim.models import Interface, Module
+
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    device = make_device_with_module_bays("batch-serial-length", ["Slot 1"])
+    seed_mapping(device, "default", own=74)
+    module_type = make_module_type("BATCH-SERIAL-LENGTH-CARD")
+    NormalizationRule.objects.create(
+        scope="serial",
+        match_pattern=r"^TAG (ABC123) .+$",
+        replacement=r"\1",
+        manufacturer=device.device_type.manufacturer,
+    )
+    occupant = None
+    if occupied:
+        occupant = install_module(device, "Slot 1", module_type.model, serial="ABC123", child_bays=["Child Bay"])
+    interface = make_interface(device, "Te1/1/1")
+    if occupant:
+        Interface.objects.filter(pk=interface.pk).update(module=occupant)
+    serial = "TAG ABC123 " + "X" * Module._meta.get_field("serial").max_length
+    rows = [
+        _item(
+            10,
+            module_type.model,
+            "Slot 1",
+            entPhysicalSerialNum=serial,
+            _librenms_port_id=7401,
+            _librenms_ifname=interface.name,
+        )
+    ]
+
+    if action == "branch":
+        child_type = make_module_type("BATCH-SERIAL-LENGTH-CHILD")
+        rows.append(_item(11, child_type.model, "Child Bay", parent=10))
+        _post_branch(device, rows, 10, 74, live_librenms)
+    else:
+        request = _post_selected(device, rows, [10], 74, live_librenms)
+
+    interface.refresh_from_db()
+    if occupant:
+        occupant.refresh_from_db()
+        assert occupant.serial == "ABC123"
+        assert occupant.module_bay.name == "Slot 1"
+        assert read_mapping(interface).own_id("default") == 7401
+    else:
+        # The table offers no install for a serial that does not fit, so the post names a row it does not offer.
+        assert message_texts(request, "error") == [SELECTED_ROWS_REFUSED_MESSAGE.format(rows="Slot 1")]
+        assert not Module.objects.filter(device=device).exists()
+        assert read_mapping(interface).own_id("default") is None
+
+
+@pytest.mark.parametrize(("held", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
+def test_an_empty_bay_offers_no_install_beside_a_legacy_row_that_stores_the_rule_output(live_librenms, held, offered):
+    """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123"; the install refuses beside it."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    device = make_device_with_module_bays(f"install-legacy-{offered}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=77)
+    module_type = make_module_type(f"INSTALL-LEGACY-CARD-{offered}")
+    install_module(device, "Slot 2", f"INSTALL-LEGACY-HOLDER-{offered}", serial=held)
+    child_type = make_module_type(f"INSTALL-LEGACY-CHILD-{offered}")
+    rows = [
+        _item(10, module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123"),
+        _item(11, child_type.model, "Child Bay", parent=10),
+    ]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=77)
+
+    html = render_module_tab(device)
+
+    forms = module_tab_forms(html).forms
+    install_forms = [
+        form for form in forms if "install-module" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(install_forms) == (1 if offered else 0)
+    # Install Selected and Install Branch create the module too, so the row is neither selectable nor a branch.
+    checkbox = re.search(r'<input type="checkbox" name="select" value="10"[^>]*>', html).group(0)
+    assert ("disabled" not in checkbox) is offered
+    branch_forms = [
+        form for form in forms if "install-branch" in form["action"] and form["fields"].get("parent_index") == "10"
+    ]
+    assert len(branch_forms) == (1 if offered else 0)
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_an_empty_bay_offers_no_install_for_a_serial_that_does_not_fit(live_librenms, fits):
+    """The serial field holds 50 characters; Install, Install Selected and Install Branch create the module."""
+    import re
+
+    from django.utils.html import escape
+
+    device = make_device_with_module_bays(f"install-fit-{fits}", ["Slot 1"])
+    seed_mapping(device, "default", own=76)
+    module_type = make_module_type(f"INSTALL-FIT-CARD-{fits}")
+    child_type = make_module_type(f"INSTALL-FIT-CHILD-{fits}")
+    serial = "N" * (50 if fits else 51)
+    rows = [
+        _item(10, module_type.model, "Slot 1", entPhysicalSerialNum=serial),
+        _item(11, child_type.model, "Child Bay", parent=10),
+    ]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=76)
+
+    html = render_module_tab(device)
+
+    actions = [form["action"] for form in module_tab_forms(html).forms]
+    assert any("install-module" in action for action in actions) is fits
+    assert any("install-branch" in action for action in actions) is fits
+    checkbox = re.search(r'<input type="checkbox" name="select" value="10"[^>]*>', html).group(0)
+    assert ("disabled" not in checkbox) is fits
+    reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (escape(reason) in html) is (not fits)
+
+
+def _view_for_seed():
+    from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+    return InstallModuleView()
 
 
 class TestUpdateModuleSerialView:
@@ -498,8 +627,8 @@ class TestUpdateModuleSerialView:
         assert message_texts(request, "warning") == []
 
     @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
-    def test_a_placeholder_serial_updates_as_blank(self, live_librenms, placeholder):
-        """A grant signed for a placeholder row, e.g. by an older page, must store a blank serial."""
+    def test_a_placeholder_serial_keeps_the_stored_serial(self, live_librenms, placeholder):
+        """An update never clears a stored serial because LibreNMS reports none."""
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.module_grants import (
             ACTION_UPDATE_SERIAL,
@@ -508,7 +637,12 @@ class TestUpdateModuleSerialView:
             module_inventory_snapshot_digest,
             sign_module_grant,
         )
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView, _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import (
+            NO_INCOMING_SERIAL_MESSAGE,
+            UpdateModuleSerialView,
+            _get_cached_module_snapshot,
+        )
 
         device = make_device_with_module_bays(f"serial-placeholder-{len(placeholder)}", ["Slot 1"])
         seed_mapping(device, "default", own=68)
@@ -517,7 +651,7 @@ class TestUpdateModuleSerialView:
         view._librenms_api = live_librenms.api
         rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
         seed_inventory(view, device, rows, librenms_id=68)
-        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        inventory = cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key))
         grant = sign_module_grant(
             page_device_id=device.pk,
             device_id=device.pk,
@@ -535,8 +669,60 @@ class TestUpdateModuleSerialView:
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 302
+        # A stale grant also redirects and keeps the serial, so the refusal must be the missing serial.
+        assert message_texts(request, "error") == [NO_INCOMING_SERIAL_MESSAGE]
         module.refresh_from_db()
-        assert module.serial == ""
+        assert module.serial == "OLD"
+
+    def test_a_snapshot_merged_under_another_serial_context_refuses_the_update(self, live_librenms):
+        """The grant signs the policy and the rows; the snapshot stamp must also be the policy's context."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.module_grants import (
+            ACTION_UPDATE_SERIAL,
+            RENDER_ATTRIBUTED,
+            GrantRefusal,
+            installed_module_target,
+            module_inventory_snapshot_digest,
+            sign_module_grant,
+        )
+        from netbox_librenms_plugin.serial_identity import SerialContext
+        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device_with_module_bays("serial-other-stamp", ["Slot 1"])
+        seed_mapping(device, "default", own=68)
+        module = install_module(device, "Slot 1", "SERIAL-OTHER-STAMP-CARD", serial="OLD-SERIAL")
+        view = UpdateModuleSerialView()
+        view._librenms_api = live_librenms.api
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW-SERIAL")]
+        key = view.get_cache_key(device, "inventory", server_key="default")
+        other = SerialContext(None, (), unavailable="another context")
+        cache.set(key, module_inventory_cache_payload(rows, 68, None, serial_context=other), timeout=300)
+        grant = sign_module_grant(
+            page_device_id=device.pk,
+            device_id=device.pk,
+            server_key="default",
+            action=ACTION_UPDATE_SERIAL,
+            inventory_digest=module_inventory_snapshot_digest(rows),
+            policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
+            render_mode=RENDER_ATTRIBUTED,
+            ent_index=11,
+            action_target=installed_module_target(module.pk, module.module_bay_id),
+        )
+        data = {"module_id": module.pk, "ent_index": 11, "server_key": "default", "inventory_binding": grant}
+        request = make_request("post", data, user=make_superuser(), path="/modules/")
+
+        try:
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(key)
+
+        assert response.status_code == 302
+        assert message_texts(request, "error") == [GrantRefusal.SNAPSHOT.message]
+        module.refresh_from_db()
+        assert module.serial == "OLD-SERIAL"
 
     def test_an_invalid_module_id_is_reported(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
@@ -549,6 +735,45 @@ class TestUpdateModuleSerialView:
 
         assert response.status_code == 302
         assert "Missing or invalid module ID." in message_texts(request, "error")
+
+    @pytest.mark.parametrize(("other_serial", "refused"), [("S/N LEGACY-SN1", True), ("OTHER-SN2", False)])
+    def test_a_legacy_row_that_stores_the_rule_output_refuses_the_update(self, live_librenms, other_serial, refused):
+        """An earlier release stored "S/N S/N LEGACY-SN1" as its rule output "S/N LEGACY-SN1", which keys again."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device_with_module_bays(f"serial-legacy-holder-{refused}", ["Slot 1", "Slot 2"])
+        seed_mapping(device, "default", own=69)
+        module = install_module(device, "Slot 1", f"SERIAL-LEGACY-CARD-{refused}", serial="OLD-SN1")
+        other = install_module(device, "Slot 2", f"SERIAL-LEGACY-OTHER-{refused}", serial="PRE-RENDER-SN")
+        view = UpdateModuleSerialView()
+        view._librenms_api = live_librenms.api
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N LEGACY-SN1")]
+        seed_inventory(view, device, rows, librenms_id=69)
+        _action, data = rendered_module_form(render_module_tab(device), "update-module-serial", 11)
+        # The table offers no update beside the legacy row, so its serial lands after the render.
+        Module.objects.filter(pk=other.pk).update(serial=other_serial)
+        request = make_request("post", data, user=make_superuser(), path="/modules/")
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        module.refresh_from_db()
+        other.refresh_from_db()
+        if refused:
+            assert message_texts(request, "error") == [
+                "Serial 'S/N S/N LEGACY-SN1' is already installed on this device. Nothing was changed."
+            ]
+            assert module.serial == "OLD-SN1"
+        else:
+            assert message_texts(request, "error") == []
+            assert module.serial == "S/N S/N LEGACY-SN1"
+        assert other.serial == other_serial
 
 
 class TestInventoryIgnoreRulesDuringCollection:
@@ -617,3 +842,132 @@ class TestInventoryIgnoreRulesDuringCollection:
         self._rule("root-skip", "IDPROM", "skip")
 
         assert self._rows(rows, "branch-skip-root") == {}
+
+
+@pytest.mark.parametrize(("held", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
+def test_an_occupied_bay_offers_no_serial_update_beside_a_legacy_row(live_librenms, held, offered):
+    """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123"; the update refuses beside it."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    device = make_device_with_module_bays(f"update-legacy-{offered}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=78)
+    module = install_module(device, "Slot 1", f"UPDATE-LEGACY-CARD-{offered}", serial="OLD-SN1")
+    install_module(device, "Slot 2", f"UPDATE-LEGACY-HOLDER-{offered}", serial=held)
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=78)
+
+    html = render_module_tab(device)
+
+    update_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(update_forms) == (1 if offered else 0)
+    # A batch install of an occupied bay creates no module and writes no serial, so the row stays selectable.
+    checkbox = re.search(r'<input type="checkbox" name="select" value="10"[^>]*>', html).group(0)
+    assert "disabled" not in checkbox
+
+
+def test_a_lone_legacy_module_keeps_its_own_serial_update(live_librenms):
+    """The module stores the rule output "S/N ABC123"; the update writer leaves that module out, so it heals it."""
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    device = make_device_with_module_bays("update-lone-legacy", ["Slot 1"])
+    seed_mapping(device, "default", own=79)
+    module = install_module(device, "Slot 1", "UPDATE-LONE-LEGACY-CARD", serial="S/N ABC123")
+    view = UpdateModuleSerialView()
+    view._librenms_api = live_librenms.api
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
+    seed_inventory(view, device, rows, librenms_id=79)
+
+    _action, data = rendered_module_form(render_module_tab(device), "update-module-serial", 10)
+    request = make_request("post", data, user=make_superuser(), path="/modules/")
+    response = view_post(view, request, pk=device.pk)
+
+    assert response.status_code == 302
+    assert message_texts(request, "error") == []
+    module.refresh_from_db()
+    assert module.serial == "S/N S/N ABC123"
+
+
+@pytest.mark.parametrize(("held", "offered"), [("NEW123", False), ("OTHER123", True)])
+def test_an_occupied_bay_offers_no_serial_update_beside_a_confirmed_holder(live_librenms, held, offered):
+    """Slot 2 already stores the reported serial, so the update writer refuses it for Slot 1."""
+    device = make_device_with_module_bays(f"update-holder-{offered}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=80)
+    module = install_module(device, "Slot 1", f"UPDATE-HOLDER-CARD-{offered}", serial="OLD123")
+    install_module(device, "Slot 2", f"UPDATE-HOLDER-OTHER-{offered}", serial=held)
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW123")]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=80)
+
+    html = render_module_tab(device)
+
+    update_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(update_forms) == (1 if offered else 0)
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_a_bayless_parent_with_a_long_serial_keeps_the_branch_of_its_children(live_librenms, fits):
+    """The parent matches no bay, so its children install into the device's own bays without it."""
+    from dcim.models import Module
+
+    device = make_device_with_module_bays(f"branch-bayless-{fits}", ["Slot 1"])
+    seed_mapping(device, "default", own=81)
+    parent_type = make_module_type(f"BRANCH-BAYLESS-PARENT-{fits}")
+    child_type = make_module_type(f"BRANCH-BAYLESS-CHILD-{fits}")
+    rows = [
+        _item(10, parent_type.model, "Chassis Carrier", entPhysicalSerialNum="N" * (50 if fits else 51)),
+        _item(11, child_type.model, "Slot 1", parent=10, entPhysicalSerialNum="CHILD-SN1"),
+    ]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=81)
+
+    html = render_module_tab(device)
+
+    branch_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "install-branch" in form["action"] and form["fields"].get("parent_index") == "10"
+    ]
+    assert len(branch_forms) == 1
+
+    request = _post_branch(device, rows, 10, 81, live_librenms)
+
+    assert message_texts(request, "error") == []
+    installed = Module.objects.filter(device=device)
+    assert [(module.module_bay.name, module.serial) for module in installed] == [("Slot 1", "CHILD-SN1")]
+    assert not Module.objects.filter(module_type=parent_type).exists()
+
+
+@pytest.mark.parametrize("held_here", [True, False])
+def test_the_serial_update_reads_its_device_again_when_the_lookup_stops_early(live_librenms, held_here):
+    """Three lower-pk holders elsewhere fill the bounded read, so a holder on the row's device needs its own read."""
+    for number in range(3):
+        elsewhere = make_device_with_module_bays(f"update-early-other-{held_here}-{number}", ["Slot 1"])
+        install_module(elsewhere, "Slot 1", f"UPDATE-EARLY-OTHER-{held_here}-{number}", serial="NEW123")
+    device = make_device_with_module_bays(f"update-early-{held_here}", ["Slot 1", "Slot 2"])
+    seed_mapping(device, "default", own=82)
+    module = install_module(device, "Slot 1", f"UPDATE-EARLY-CARD-{held_here}", serial="OLD123")
+    install_module(device, "Slot 2", f"UPDATE-EARLY-HOLDER-{held_here}", serial="NEW123" if held_here else "OTHER123")
+    rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW123")]
+    seed_inventory(_view_for_seed(), device, rows, librenms_id=82)
+
+    html = render_module_tab(device)
+
+    update_forms = [
+        form
+        for form in module_tab_forms(html).forms
+        if "update-module-serial" in form["action"] and form["fields"].get("ent_index") == "10"
+    ]
+    assert len(update_forms) == (0 if held_here else 1)

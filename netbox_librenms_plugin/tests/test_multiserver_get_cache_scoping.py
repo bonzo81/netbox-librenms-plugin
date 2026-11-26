@@ -137,13 +137,16 @@ class TestConfiguredServerCacheScoping:
     def test_modules_use_the_requested_server_mapping_and_snapshot(self, configured_servers):
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device("multiserver-module", librenms_cf={"production": 14})
         view = DeviceModuleTableView()
         request = _request("production")
         key = view.get_cache_key(device, "inventory", "production")
-        cache.set(key, module_inventory_cache_payload([], 14, None))
+        cache.set(
+            key, module_inventory_cache_payload([], 14, None, serial_context=SerialRules.load().for_device(device))
+        )
 
         context = _bind(view, request).get_context_data(request, device)
 

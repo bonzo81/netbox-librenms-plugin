@@ -26,9 +26,12 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     HOST_NAME_COLLISION_REASON,
+    MATCHING,
+    MISMATCHED,
     NAME_OWNER_LIVE,
     NAME_OWNER_STALE,
     NAME_OWNER_UNKNOWN,
+    NOT_IN_NETBOX,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
     OOB_NAME_SUFFIX,
@@ -2852,6 +2855,30 @@ def parse_location_for_import(location_string: str) -> dict:
     return parsed
 
 
+# The colour of each VLAN comparison on the VLAN sync tab.
+_VLAN_SYNC_CSS_CLASS = {MATCHING: "text-success", MISMATCHED: "text-warning", NOT_IN_NETBOX: "text-danger"}
+
+
+def vlan_sync_comparison(exists_in_netbox: bool, name_matches: bool = True) -> str:
+    """
+    Return how a LibreNMS VLAN compares to the NetBox VLAN it resolved to.
+
+    The row colours, the row action and the sync-state filter of the VLAN sync tab all read this
+    value, so they always agree.
+
+    Args:
+        exists_in_netbox: Whether the VLAN exists in NetBox (in the selected group or globally).
+        name_matches: Whether the VLAN name in NetBox matches the LibreNMS name.
+
+    Returns:
+        str: ``MATCHING``, ``MISMATCHED`` or ``NOT_IN_NETBOX`` from ``sync_filters``.
+
+    """
+    if not exists_in_netbox:
+        return NOT_IN_NETBOX
+    return MATCHING if name_matches else MISMATCHED
+
+
 def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -> str:
     """
     Determine CSS class for a VLAN row on the VLAN sync tab.
@@ -2868,11 +2895,37 @@ def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -
         CSS class string: 'text-success', 'text-warning', or 'text-danger'.
 
     """
-    if not exists_in_netbox:
-        return "text-danger"
-    if name_matches:
-        return "text-success"
-    return "text-warning"
+    return _VLAN_SYNC_CSS_CLASS[vlan_sync_comparison(exists_in_netbox, name_matches)]
+
+
+def _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled):
+    """Return the visible text and the markup of a VLAN row's status cell."""
+    comparison = vlan_sync_comparison(exists_in_netbox, name_matches)
+    canonical_vid = normalize_vlan_vid(vid)
+    can_submit = actions_enabled and canonical_vid is not None
+    css_class = _VLAN_SYNC_CSS_CLASS[comparison]
+    if comparison == NOT_IN_NETBOX:
+        if not can_submit:
+            return "Not in NetBox", format_html('<span class="{}">Not in NetBox</span>', css_class)
+        return "Create", format_html(
+            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
+            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
+            " Create</button>",
+            canonical_vid,
+        )
+    if comparison == MISMATCHED:
+        if not can_submit:
+            return "Name differs", format_html('<span class="{}">Name differs</span>', css_class)
+        return "Update", format_html(
+            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
+            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
+            " Update</button>",
+            canonical_vid,
+        )
+    return "Synced", format_html(
+        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
+        css_class,
+    )
 
 
 def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
@@ -2882,31 +2935,12 @@ def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enab
     Shared by the table renderer and the verify endpoint so the row action always matches
     the current VLAN synchronization state.
     """
-    canonical_vid = normalize_vlan_vid(vid)
-    can_submit = actions_enabled and canonical_vid is not None
-    css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
-    if not exists_in_netbox:
-        if not can_submit:
-            return format_html('<span class="{}">Not in NetBox</span>', css_class)
-        return format_html(
-            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
-            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
-            " Create</button>",
-            canonical_vid,
-        )
-    if not name_matches:
-        if not can_submit:
-            return format_html('<span class="{}">Name differs</span>', css_class)
-        return format_html(
-            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
-            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
-            " Update</button>",
-            canonical_vid,
-        )
-    return format_html(
-        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
-        css_class,
-    )
+    return _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled)[1]
+
+
+def vlan_sync_action_label(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
+    """Return the visible text of the status cell that ``render_vlan_sync_action`` renders."""
+    return _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled)[0]
 
 
 # ============================================
@@ -3036,83 +3070,19 @@ def check_vlan_group_matches(
     return True
 
 
-def normalize_serial(value) -> str:
+def librenms_text(value) -> str:
     """
-    Return the trimmed str form of a LibreNMS serial; only None means missing.
+    Return a LibreNMS text value (a model, class or name) as trimmed text; only None means missing.
 
-    LibreNMS returns all-digit serials as JSON numbers, so the value must be
-    coerced before stripping — and ``str(value or "")`` would silently drop the
-    real-but-falsey serial ``0``. Call sites skip a placeholder with
-    ``normalize_stack_serial``.
-
-    ``Device.serial`` stores this form. A vendor marker such as Juniper's leading "S/N "
-    stays: ``serials_match`` applies the ``serial`` NormalizationRule chain to both sides.
+    LibreNMS returns an all-digit value as a JSON number, so the value is coerced before it is
+    trimmed, and ``str(value or "")`` would drop the real value ``0``. A hardware serial goes
+    through ``serial_identity`` instead.
 
     Args:
-        value: The raw serial as returned by LibreNMS (str, number, or None).
+        value: The raw value as returned by LibreNMS (str, number, or None).
 
     """
     return "" if value is None else str(value).strip()
-
-
-def normalize_stack_serial(value) -> str:
-    """Return a serial usable as stack identity evidence, preserving numeric zero."""
-    serial = normalize_serial(value)
-    return "" if is_librenms_placeholder(serial) else serial
-
-
-def find_devices_by_serial(serial: str, limit: int | None = 2) -> list:
-    """
-    Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.
-
-    The exact lookup uses the serial index that migration 0012 creates. That migration also
-    canonicalizes existing rows, but a row written afterwards by another tool can hold padding
-    again, so a miss re-checks the trimmed column.
-
-    Args:
-        serial: The incoming serial, already passed through ``normalize_serial``.
-        limit: How many rows to read, enough to tell a unique match from a duplicate; None reads all.
-
-    """
-    from dcim.models import Device
-    from django.db.models import CharField, F, Func, Value
-
-    matches = list(Device.objects.filter(serial=serial)[:limit])
-    if limit is not None and len(matches) >= limit:
-        return matches
-    # An exact hit does not mean a unique one: a row written with padding normalizes to the same
-    # serial, and the caller uses len(matches) > 1 to refuse a duplicate. Returning early on the
-    # first exact match would hide that twin and let the import bind an arbitrary row.
-    # Django's Trim() strips spaces only; normalize_serial() uses str.strip(), so name the same set.
-    trimmed = Func(F("serial"), Value(" \t\n\r\v\f"), function="BTRIM", output_field=CharField())
-    remaining = None if limit is None else limit - len(matches)
-    matches.extend(
-        Device.objects.annotate(trimmed_serial=trimmed)
-        .filter(trimmed_serial=serial)
-        .exclude(pk__in=[device.pk for device in matches])[:remaining]
-    )
-    return matches
-
-
-def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -> str:
-    """
-    Trim a LibreNMS serial, then apply the serial-scope NormalizationRule chain.
-
-    Vendors decorate the ENTITY-MIB serial: Juniper reports "S/N BCFB9793". Keeping that
-    transformation in a rule shows the operator why a stored serial differs from the raw
-    inventory, and lets them add the next vendor without a release. Callers keep their own
-    placeholder guards, as ``normalize_serial`` does.
-    """
-    from netbox_librenms_plugin.models import NormalizationRule
-
-    serial = normalize_serial(value)
-    if not serial:
-        return serial
-    # Strip again: a rule that drops a prefix without its trailing space leaves the stored
-    # serial padded, which reads as a mismatch against the same serial normalized elsewhere.
-    return apply_normalization_rules(
-        serial, NormalizationRule.SCOPE_SERIAL, manufacturer=manufacturer, preloaded_rules=preloaded_rules
-    ).strip()
 
 
 def normalize_vlan_vid(value) -> int | None:
@@ -3223,6 +3193,20 @@ def oob_badge_html(record, leading_space=False):
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
 
+def _rule_block_pill(rule_block):
+    """Return the colour, icon and label of the pill that ``rule_block_html`` renders."""
+    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
+
+    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
+        return "secondary", "mdi-eye-off", "Ignored"
+    return "warning", "mdi-refresh", "Refresh needed"
+
+
+def rule_block_label(rule_block):
+    """Return the visible text of the pill that ``rule_block_html`` renders for *rule_block*."""
+    return _rule_block_pill(rule_block)[2]
+
+
 def rule_block_html(rule_block):
     """
     Return the pill that says why the interface rules or an IP mapping refuse a row's write.
@@ -3238,12 +3222,7 @@ def rule_block_html(rule_block):
         SafeString: The pill markup.
 
     """
-    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
-
-    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
-        color, icon, label = "secondary", "mdi-eye-off", "Ignored"
-    else:
-        color, icon, label = "warning", "mdi-refresh", "Refresh needed"
+    color, icon, label = _rule_block_pill(rule_block)
     return format_html(
         '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="Not synced: {}">'
         '<i class="mdi {}"></i>{}</span>',
@@ -4431,7 +4410,7 @@ def module_type_lookup_candidates(item):
     """
     candidates = []
     for key in ("entPhysicalModelName", "entPhysicalDescr"):
-        value = normalize_serial(item.get(key))
+        value = librenms_text(item.get(key))
         if not is_librenms_placeholder(value) and value not in candidates:
             candidates.append(value)
     return candidates

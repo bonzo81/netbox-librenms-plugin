@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
     make_virtual_chassis,
+    stack_inventory,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
@@ -58,6 +59,7 @@ class TestInstallSerialRulePreloading:
 
         from dcim.models import Interface, ModuleBay
 
+        from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
 
@@ -73,6 +75,11 @@ class TestInstallSerialRulePreloading:
         ]
         index_map = {item["entPhysicalIndex"]: item for item in items}
         remaining = list(bays)
+        scope = lock_module_write(
+            observe_module_write(device_ids=[device.pk]),
+            incoming=[item["entPhysicalSerialNum"] for item in items],
+            rules=kwargs.get("serial_rules"),
+        ).lock_module_types([module_type.pk])
         with (
             patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
             patch.object(BaseModuleTableView, "_match_bay_for_item", side_effect=lambda *a, **kw: remaining.pop(0)),
@@ -82,6 +89,7 @@ class TestInstallSerialRulePreloading:
                     device,
                     item,
                     {module_type.model: module_type},
+                    write_scope=scope,
                     naming_map=index_map,
                     ancestry_map=index_map,
                     module_bays=ModuleBay.objects.all(),
@@ -105,8 +113,8 @@ class TestInstallSerialRulePreloading:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.utils import preload_normalization_rules
 
         module_type = make_module_type("WS-X4748")
         device = make_device("install-serial-rules-dev")
@@ -116,17 +124,16 @@ class TestInstallSerialRulePreloading:
             self._install_two_items(device, first_bays, module_type)
 
         # Two items, so the unpreloaded path reads the rule table more than once.
-        assert len(self._rule_queries(per_item)) > 2, self._rule_queries(per_item)
+        assert len(self._rule_queries(per_item)) >= 2, self._rule_queries(per_item)
 
         other = make_device("install-serial-rules-dev-2")
         second_bays = [make_module_bay(other, "Slot 1"), make_module_bay(other, "Slot 2")]
 
         with CaptureQueriesContext(connection) as preloaded:
-            rules = preload_normalization_rules("serial", manufacturer=other.device_type.manufacturer)
-            self._install_two_items(other, second_bays, module_type, norm_rules_serial=rules)
+            self._install_two_items(other, second_bays, module_type, serial_rules=SerialRules.load())
 
-        # The preload itself reads both scopes once; the install loop then reads nothing.
-        assert len(self._rule_queries(preloaded)) == 2, self._rule_queries(preloaded)
+        # The preload itself reads the serial rules once; the install loop then reads nothing.
+        assert len(self._rule_queries(preloaded)) == 1, self._rule_queries(preloaded)
 
     def test_both_install_views_forward_the_serial_rules(self):
         """Every install loop must forward preloaded serial rules to the shared writer."""
@@ -152,7 +159,7 @@ class TestInstallSerialRulePreloading:
             ]
             assert installs, f"{view.name} must install its selected inventory"
             for install in installs:
-                assert "norm_rules_serial" in {keyword.arg for keyword in install.keywords}
+                assert "serial_rules" in {keyword.arg for keyword in install.keywords}
 
 
 pytestmark = pytest.mark.django_db
@@ -239,12 +246,17 @@ def _run_install_single(device, item, index_map, module_types):
     """Run the shared installer against unrestricted real model querysets."""
     from dcim.models import Interface, ModuleBay
 
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
     from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
 
+    scope = lock_module_write(
+        observe_module_write(device_ids=[device.pk]), incoming=[item.get("entPhysicalSerialNum")]
+    ).lock_module_types(module_type.pk for module_type in module_types.values())
     return InstallBranchView._install_single(
         device,
         item,
         module_types,
+        write_scope=scope,
         naming_map=index_map,
         ancestry_map=index_map,
         module_bays=ModuleBay.objects.all(),
@@ -272,34 +284,43 @@ class TestInventoryCacheContract:
             ({"inventory": "bad"}, None),
             ({"inventory": ["bad"]}, None),
             ({"version": True, "inventory": []}, None),
+            ({"inventory": [], "serial_context": None}, None),
+            ({"inventory": [], "serial_context": 7}, None),
         ],
     )
     def test_inventory_container_validation(self, payload, expected):
         from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION, cached_module_inventory
 
         if isinstance(payload, dict) and "version" not in payload:
-            payload = {"version": MODULE_INVENTORY_CACHE_VERSION, **payload}
+            payload = {"version": MODULE_INVENTORY_CACHE_VERSION, "serial_context": "stamp", **payload}
         assert cached_module_inventory(payload) == expected
 
+    def test_a_current_version_payload_without_a_serial_context_is_rejected(self):
+        from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION, cached_module_inventory
+
+        assert cached_module_inventory({"version": MODULE_INVENTORY_CACHE_VERSION, "inventory": []}) is None
+
     def test_current_fingerprint_returns_the_real_cached_rows(self, live_librenms):
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         device = make_device("module-current-cache", librenms_cf={"default": 41})
         view = _view(_cache_view_class(), _post_request({}), live_librenms)
         rows = [_inventory_item(1, "CARD", "Slot 1")]
         key = seed_inventory(view, device, rows, librenms_id=41)
 
-        assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) == rows
+        assert cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) == rows
         assert cache.get(key)["librenms_id"] == 41
 
     def test_stale_fingerprint_is_rejected(self, live_librenms):
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         device = make_device("module-stale-cache", librenms_cf={"default": 42})
         view = _view(_cache_view_class(), _post_request({}), live_librenms)
         seed_inventory(view, device, [_inventory_item(1, "CARD", "Slot 1")], librenms_id=99)
 
-        assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) is None
+        assert cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) is None
 
     def test_an_authorized_grant_hands_back_the_cached_row_itself(self, live_librenms):
         """The writer reads the row from the authenticated snapshot it checked the grant against."""
@@ -790,6 +811,28 @@ class TestSharedInstaller:
         assert module.module_type == module_type
         assert module.serial == "INSTALL-SERIAL"
 
+    @pytest.mark.parametrize(
+        ("serial", "installed"), [("AB-12", False), ("OPTIC12345", True)], ids=["short-serial", "identity-serial"]
+    )
+    def test_an_unlinked_optic_with_a_short_serial_skips_without_creating_a_module(self, serial, installed):
+        """The installer refuses the row itself, so a selection that the table no longer offers installs nothing."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.base.modules_view import UNLINKED_OPTIC_REFUSAL
+
+        device = make_device(f"installer-optic-{serial}")
+        make_module_bay(device, "Transceiver 99")
+        module_type = make_module_type("SFP-10G-SR")
+        item = _inventory_item(
+            99, module_type.model, "Transceiver 99", serial=serial, phys_class="port", _from_transceiver_api=True
+        )
+
+        result = _run_install_single(device, item, {99: item}, {module_type.model: module_type})
+
+        assert result["status"] == ("installed" if installed else "skipped")
+        assert (result.get("reason") == UNLINKED_OPTIC_REFUSAL) is (not installed)
+        assert Module.objects.filter(device=device).exists() is installed
+
     def test_missing_type_skips_without_creating_a_module(self):
         from dcim.models import Module
 
@@ -873,7 +916,8 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.module_grants import ACTION_INSTALL_MODULE, RENDER_ATTRIBUTED, sign_module_grant
-        from netbox_librenms_plugin.views.sync.modules import InstallModuleView, _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView, _get_cached_module_snapshot
 
         device = make_device(f"view-install-holder-{phys_class}", librenms_cf={"default": 52})
         bay = make_module_bay(device, "Holder Bay")
@@ -882,7 +926,7 @@ class TestInstallAndUpdateViews:
         view = InstallModuleView()
         view._librenms_api = live_librenms.api
         seed_inventory(view, device, [holder], librenms_id=52)
-        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        inventory = cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key))
         grant = sign_module_grant(
             page_device_id=device.pk,
             device_id=device.pk,
@@ -1412,6 +1456,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
+        VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
         seed_stored_mapping(page, {"default": {"id": 77}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
         # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
@@ -1427,7 +1472,7 @@ class TestInstallAndUpdateViews:
         view, request = _rendered_post(
             InstallSelectedView,
             page,
-            [item],
+            stack_inventory([item], [page, member]),
             77,
             live_librenms,
             "install-selected",
@@ -1461,6 +1506,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
+        VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
         seed_stored_mapping(page, {"default": {"id": 78}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="AncestorRulesOptic")
         # Scoped to the member's vendor: the serial-less parent stays with the page member, its child goes to the member.
@@ -1472,10 +1518,13 @@ class TestInstallAndUpdateViews:
             require_serial_match_parent=False,
             manufacturer=member_mfr,
         )
-        rows = [
-            _inventory_item(100, "ANCESTOR-PAGE-CARD", "Card A"),
-            _inventory_item(101, module_type.model, "Optic B", parent=100, serial="SN-MEMBER"),
-        ]
+        rows = stack_inventory(
+            [
+                _inventory_item(100, "ANCESTOR-PAGE-CARD", "Card A"),
+                _inventory_item(101, module_type.model, "Optic B", parent=100, serial="SN-MEMBER"),
+            ],
+            [page, member],
+        )
         table_indexes = {row["ent_physical_index"] for row in _run_build_context_real(_make_view(), rows, page)}
         view, request = _rendered_post(
             InstallSelectedView,
@@ -2125,23 +2174,32 @@ class TestModulesActionResponse:
         return device, module
 
     @pytest.mark.parametrize(
-        ("conflict", "expected_action"),
-        [(False, "update-module-serial"), (True, "move-module")],
-        ids=["update_serial_only", "move"],
+        ("conflict", "relocates", "expected_actions"),
+        [
+            (False, True, {"update-module-serial", "replace-module"}),
+            (True, True, {"move-module", "replace-module"}),
+            (True, False, {"replace-module"}),
+        ],
+        ids=["update_serial_only", "move", "move_unsupported"],
     )
     def test_the_mismatch_preview_answers_a_whole_modal_of_bound_forms(
-        self, client, settings, conflict, expected_action
+        self, client, settings, conflict, relocates, expected_actions
     ):
         """The preview fills #htmx-modal-content, so it must carry the header the JS used to build."""
+        from unittest.mock import patch
 
         from netbox_librenms_plugin.tests._html_helpers import open_tags
 
         self._configure_server(settings)
-        suffix = "move" if conflict else "serial"
-        device, module = self._seed_serial_mismatch(suffix, conflict=conflict, librenms_id=9210 + int(conflict))
+        suffix = ("move" if relocates else "no-move") if conflict else "serial"
+        librenms_id = {"serial": 9210, "move": 9211, "no-move": 9214}[suffix]
+        device, module = self._seed_serial_mismatch(suffix, conflict=conflict, librenms_id=librenms_id)
         client.force_login(make_superuser())
 
-        response = client.get(rendered_preview_url(render_module_tab(device, server_key=self.SERVER_KEY), 8201))
+        preview_url = rendered_preview_url(render_module_tab(device, server_key=self.SERVER_KEY), 8201)
+        # NetBox before 4.7 cannot move a module subtree, so the move POST refuses there.
+        with patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=relocates):
+            response = client.get(preview_url)
 
         assert response.status_code == 200
         body = response.content.decode()
@@ -2151,10 +2209,8 @@ class TestModulesActionResponse:
         assert "closeHtmxModal()" in body
         assert 'class="modal-body"' in body
         forms = open_tags(body, "form")
-        # Both branches render the replace form plus the one the conflict state selects.
-        assert len(forms) == 2
-        assert any(expected_action in form["action"] for form in forms)
-        assert any("replace-module" in form["action"] for form in forms)
+        # Each form action ends in its route, e.g. /move-module/.
+        assert {form["action"].rstrip("/").rsplit("/", 1)[-1] for form in forms} == expected_actions
         for form in forms:
             # The forms are swapped into the modal, so their own target must be the module tab.
             assert form["hx-target"] == "#module-sync-content"
@@ -2346,6 +2402,40 @@ class TestVirtualChassisInterfaceNormalization:
         assert result == {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 1}
         interface.refresh_from_db()
         assert interface.name == "Te1/1/4"
+
+    def test_a_skipped_removal_queues_no_delete_event(self):
+        """NetBox queues a delete event before the DELETE runs; the skipped removal must not send it."""
+        from uuid import uuid4
+
+        from dcim.models import Interface
+        from netbox.context import current_request, events_queue
+
+        from netbox_librenms_plugin.views.sync.modules import _normalize_module_interface_names_for_vc_member
+
+        device, module, interface = self._member_module_interface("normalize-event", "Te1/1/5")
+        make_interface(device, "Te2/1/5")
+        request = make_request("post", user=make_superuser("normalize-event-user"))
+        request.id = uuid4()
+        request_token, queue_token = current_request.set(request), events_queue.set({})
+
+        def target_delete(sql, params):
+            return sql.startswith('DELETE FROM "dcim_interface"') and interface.pk in (params or ())
+
+        try:
+            with failing_statement(target_delete, "23503") as failed:
+                result = _normalize_module_interface_names_for_vc_member(
+                    device, module, Interface.objects.all(), Interface.objects.all()
+                )
+            queued = {(event["object_type"].model, event["object_id"]) for event in events_queue.get().values()}
+        finally:
+            current_request.reset(request_token)
+            events_queue.reset(queue_token)
+
+        # The removal reached the DELETE of the target interface; a skip before it also counts one.
+        assert len(failed) == 1
+        assert result["skipped"] == 1
+        assert Interface.objects.filter(pk=interface.pk).exists()
+        assert ("interface", interface.pk) not in queued
 
     @pytest.mark.parametrize(
         ("counts", "expected"),
@@ -2904,9 +2994,8 @@ def test_existing_bay_mapping_rejects_unavailable_targets(client, target):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("raw_serial, expected", [("S/N SERIAL123", "SERIAL123"), ("00123", "0123")])
-def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, expected):
-    """Preview and replacement must interpret raw cached serials like installation."""
+def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text(client):
+    """A legacy stored rule output names the hardware of the cached serial; the replacement stores the LibreNMS text."""
     from dcim.models import Module
     from django.core.cache import cache
 
@@ -2914,9 +3003,9 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type, make_superuser
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
+    raw_serial, legacy = "S/N SERIAL123", "SERIAL123"
     NormalizationRule.objects.filter(scope="serial").delete()
     NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
-    NormalizationRule.objects.create(scope="serial", match_pattern=r"^0(.*)$", replacement=r"\1")
     device = make_device("serial-normalization")
     module_type = make_module_type("serial-card", manufacturer=device.device_type.manufacturer)
     bay = make_module_bay(device, "Slot 1")
@@ -2940,16 +3029,17 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     user = make_superuser()
     client.force_login(user)
     preview_url = rendered_preview_url(render_module_tab(device, user=user), 100)
-    # The row reads as installed once normalized, so the stored serial lands after the page renders.
-    Module.objects.filter(pk=installed.pk).update(serial=expected)
+    # An older release stored the rule output; it lands after the page renders, as an external edit does.
+    Module.objects.filter(pk=installed.pk).update(serial=legacy)
     preview = client.get(preview_url)
     assert preview.status_code == 200
-    assert preview.context["librenms_serial"] == expected
+    assert preview.context["librenms_serial"] == raw_serial
     assert preview.context["serial_mismatch"] is False
     replace_url, replace_fields = rendered_module_form(preview.content.decode(), "replace-module", 100)
     response = client.post(replace_url, replace_fields)
     assert response.status_code == 302
-    assert Module.objects.get(module_bay=bay).serial == expected
+    assert not Module.objects.filter(pk=installed.pk).exists()
+    assert Module.objects.get(module_bay=bay).serial == raw_serial
     assert cache.get(key)["inventory"][0]["entPhysicalSerialNum"] == raw_serial
 
 
@@ -2958,8 +3048,8 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     "endpoint,mixed_manufacturers",
     [("install_branch", False), ("install_selected", False), ("install_selected", True)],
 )
-def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint, mixed_manufacturers):
-    """A batch must normalize every serial without querying rules for every item."""
+def test_bulk_install_reads_serial_rules_once_per_policy_phase(client, endpoint, mixed_manufacturers):
+    """A batch compares every serial without querying rules for every item, and stores the LibreNMS text."""
     from dcim.models import Manufacturer, Module, VirtualChassis
     from django.core.cache import cache
     from django.db import connection
@@ -2992,7 +3082,7 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
             scope="serial",
             manufacturer=member.device_type.manufacturer,
             match_pattern=r"^S/N (.+)$",
-            replacement=r"MEMBER-\1",
+            replacement=r"\1",
         )
     rows = [
         {
@@ -3016,8 +3106,13 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         for number in (1, 2, 3)
     )
     if member is not None:
-        # The position attributes the slot to the member, so the table renders it there.
-        rows[2]["entPhysicalParentRelPos"] = member.vc_position
+        # The stack's member rows give Slot 2 to the member, so the table renders it there.
+        rows.extend(
+            {"entPhysicalIndex": index, "entPhysicalContainedIn": 1, "entPhysicalClass": "chassis", **position}
+            for index, position in ((10, {"entPhysicalParentRelPos": 1}), (11, {"entPhysicalParentRelPos": 2}))
+        )
+        for row, chassis_index in zip(rows[1:4], (10, 11, 10), strict=True):
+            row["entPhysicalContainedIn"] = chassis_index
     cache.set(
         CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
     )
@@ -3032,20 +3127,19 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
     with CaptureQueriesContext(connection) as queries:
         response = client.post(reverse(f"plugins:netbox_librenms_plugin:{endpoint}", args=[device.pk]), data)
     assert response.status_code == 302
-    expected = {"BATCH-1", "BATCH-3"}
+    expected = {"S/N BATCH-1", "S/N BATCH-3"}
     if member is None:
-        expected.add("BATCH-2")
+        expected.add("S/N BATCH-2")
     else:
-        assert Module.objects.get(device=member).serial == "MEMBER-BATCH-2"
+        assert Module.objects.get(device=member).serial == "S/N BATCH-2"
     assert set(Module.objects.filter(device=device).values_list("serial", flat=True)) == expected
     serial_queries = [
         query["sql"]
         for query in queries
         if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
     ]
-    # A preload reads the manufacturer's rules and the global rules. A mixed install preloads up to three times:
-    # once for the stack's member attribution and once for each destination manufacturer.
-    assert len(serial_queries) <= (6 if mixed_manufacturers else 2), serial_queries
+    # Planning and the post-owner recheck each read the rules once. The install loop reuses them.
+    assert len(serial_queries) == 2, serial_queries
 
 
 def _install_selected(client, device, rows, select):
@@ -3313,6 +3407,7 @@ def test_a_selected_install_uses_each_members_destination_and_ignore_policy(clie
             "entPhysicalSerialNum": member.serial,
         },
     ]
+    rows = stack_inventory(rows, [page, member])
     policy_inputs = load_inventory_policy(page.pk)
     _default, contexts = BaseModuleTableView()._build_inventory_ignore_contexts(
         policy_inputs.page_device, rows, policy_inputs.vc_members, policy_inputs
@@ -3505,7 +3600,7 @@ def test_branch_install_cuts_parent_bay_lookup_at_a_member_boundary(client, tran
             require_serial_match_parent=False,
         )
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     user = make_superuser("branch-boundary-user")
     client.force_login(user)
     try:
@@ -3569,7 +3664,7 @@ def _member_card_under_page_carrier(*, card_on_member):
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     return page, member, unrelated, card_type, key
 
 
@@ -3675,7 +3770,7 @@ def test_table_counts_a_bay_position_only_under_a_module_of_the_target_member(an
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     request = make_request("get", {"server_key": "default"}, user=make_superuser("position-boundary-user"), path="/m/")
     view = DeviceModuleTableView()
     view.setup(request, pk=page.pk)
@@ -3802,7 +3897,7 @@ def test_branch_install_runs_onto_the_signed_member_until_it_leaves_the_chassis(
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     user = make_superuser("branch-moved-user")
     fields = _rendered_fields(page, "install-branch", 2, user=user)
     assert fields["selected_device_id"] == str(member.pk)
@@ -3946,7 +4041,7 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
     expected = {
         "occupied": "Module bay 'Target' already has a module installed.",
         "duplicate_serial": "Serial 'RENDER-CARD' is already installed on this device. Nothing was installed.",
-        "missing": "Module bay no longer exists.",
+        "missing": "Failed to install module: The modules or module bays changed. Refresh Modules and try again.",
     }
     assert response.status_code == 200
     assert [str(message) for message in response.wsgi_request._messages] == [expected[refusal]]
@@ -3956,27 +4051,115 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
     assert set(observed) == {(False, 0)}
 
 
-def test_module_advisory_lock_sections_do_not_render_responses():
-    """Keep response rendering out of the transactions that hold page advisory locks."""
+# The package's transaction helpers, as a with-statement context or a decorator.
+_TRANSACTION_HELPERS = {"transaction.atomic", "atomic_with_events", "row_savepoint"}
+
+
+def _is_transaction(expression):
     import ast
-    import inspect
 
-    from netbox_librenms_plugin.views.sync import modules
+    helper = expression.func if isinstance(expression, ast.Call) else expression
+    return ast.unparse(helper) in _TRANSACTION_HELPERS
 
-    tree = ast.parse(inspect.getsource(modules))
+
+def _responses_under_module_owner_locks(source):
+    """Return the lines where a transaction that takes a Module owner lock renders a module response."""
+    import ast
+
     violations = set()
-    for node in ast.walk(tree):
-        atomic = isinstance(node, ast.With) or (
-            isinstance(node, ast.FunctionDef)
-            and any(ast.unparse(decorator) == "transaction.atomic" for decorator in node.decorator_list)
+    for node in ast.walk(ast.parse(source)):
+        atomic = (isinstance(node, ast.With) and any(_is_transaction(item.context_expr) for item in node.items)) or (
+            isinstance(node, ast.FunctionDef) and any(_is_transaction(decorator) for decorator in node.decorator_list)
         )
         if not atomic:
             continue
         calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
-        if not any(ast.unparse(call.func) == "_lock_page_device_serials" for call in calls):
+        # A call runs after its arguments, so its end position orders it after a lock in an argument.
+        locks = [
+            (call.end_lineno, call.end_col_offset) for call in calls if ast.unparse(call.func) == "lock_module_write"
+        ]
+        if not locks:
             continue
-        violations.update(call.lineno for call in calls if ast.unparse(call.func) == "_modules_action_response")
-    assert not violations, f"Response rendering holds a page advisory lock at lines {sorted(violations)}"
+        # A response that ends before the first lock is safe; a loop that locks first is not seen.
+        violations.update(
+            call.lineno
+            for call in calls
+            if ast.unparse(call.func) == "_modules_action_response"
+            and (call.end_lineno, call.end_col_offset) > min(locks)
+        )
+    return violations
+
+
+def test_module_owner_lock_sections_do_not_render_responses():
+    """Keep response rendering out of the transactions that hold Module owner locks."""
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import modules
+
+    violations = _responses_under_module_owner_locks(inspect.getsource(modules))
+    assert not violations, f"Response rendering holds a Module owner lock at lines {sorted(violations)}"
+
+
+@pytest.mark.parametrize(
+    ("outer", "inner", "found"),
+    [
+        ("connection.execute_wrapper(record)", "transaction.atomic()", set()),
+        ("transaction.atomic()", "connection.execute_wrapper(record)", {5}),
+    ],
+    ids=["render-after-the-transaction", "render-inside-the-transaction"],
+)
+def test_the_owner_lock_scan_reads_only_transaction_blocks(outer, inner, found):
+    """The control: only a transaction block holds the owner lock, so a response after it exits is safe."""
+    source = (
+        "def _install(self, request, page_device):\n"
+        f"    with {outer}:\n"
+        f"        with {inner}:\n"
+        "            scope = lock_module_write(observe_module_write(device_ids=[page_device.pk]))\n"
+        "        return _modules_action_response(request, page_device)\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == found
+
+
+def test_the_owner_lock_scan_allows_an_early_refusal_before_the_lock():
+    """The control: a response that returns before the transaction takes the owner lock holds no lock."""
+    source = (
+        "def _install(self, request, page_device):\n"
+        "    with transaction.atomic():\n"
+        "        if not page_device:\n"
+        "            return _modules_action_response(request, page_device)\n"
+        "        scope = lock_module_write(observe_module_write(device_ids=[page_device.pk]))\n"
+        "        if not scope:\n"
+        "            return _modules_action_response(request, page_device)\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == {7}
+
+
+def test_the_owner_lock_scan_finds_a_lock_in_a_response_argument():
+    """Python runs the arguments before the call, so the response renders under the lock it takes."""
+    source = (
+        "def _install(self, request, page_device):\n"
+        "    with transaction.atomic():\n"
+        "        if not page_device:\n"
+        "            return _modules_action_response(request, page_device)\n"
+        "        return _modules_action_response(request, lock_module_write(observed).devices[page_device.pk])\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == {5}
+
+
+@pytest.mark.parametrize("decorator", ["atomic_with_events()", "transaction.atomic"])
+def test_the_owner_lock_scan_finds_a_response_in_a_decorated_writer(decorator):
+    """The control: a writer that one decorator makes atomic renders under its owner lock."""
+    source = (
+        f"@{decorator}\n"
+        "def _install_branch(self, request, page_device):\n"
+        "    scope = lock_module_write(observe_module_write(device_ids=[page_device.pk]))\n"
+        "    return _modules_action_response(request, page_device)\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == {4}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4042,9 +4225,16 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
         )
         selected_index = 2
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(
+        key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, target]) if selected_member else rows)
+    )
     user = make_superuser("selected-fresh-page-user")
     fields = _rendered_fields(page, "install-selected", user=user)
+    client.force_login(user)
+    if selected_member:
+        fields[f"selection_grant_{selected_index}"] = _verified_selection_grant(
+            client, render_module_tab(page, user=user), page, target, selected_index
+        )
     changed = []
 
     def change_serial():
@@ -4060,7 +4250,7 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
             close_old_connections()
 
     def edit_before_lock(execute, sql, params, many, context):
-        if "pg_advisory_xact_lock" in sql and not changed:
+        if '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql and not changed:
             with bounded_executor(max_workers=1) as executor:
                 executor.submit(change_serial).result(timeout=5)
             changed.append(True)
@@ -4079,36 +4269,53 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
     assert response.status_code == 302
     assert not Module.objects.filter(device__in=[page, target]).exists()
     # The edit lands before the page lock, so the policy the writer loads is no longer the rendered one.
-    assert [str(message) for message in response.wsgi_request._messages] == [GrantRefusal.POLICY.message]
+    expected = (
+        "Install failed: The modules or module bays changed. Refresh Modules and try again."
+        if deleted
+        else GrantRefusal.POLICY.message
+    )
+    assert [str(message) for message in response.wsgi_request._messages] == [expected]
 
 
 def _backends_blocked_by(observer, holder_pid):
-    """Return how many backends wait for an advisory lock that *holder_pid* holds; *observer* is any other connection."""
+    """Return how many backends wait for a lock that *holder_pid* holds; *observer* is any other connection."""
     with observer.cursor() as cursor:
         cursor.execute(
-            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-            " AND %s = ANY(pg_blocking_pids(pid))",
+            "SELECT count(*) FROM pg_locks WHERE NOT granted AND %s = ANY(pg_blocking_pids(pid))",
             [holder_pid],
         )
         return cursor.fetchone()[0]
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("change", ["device-serial", "rule-added"])
-@pytest.mark.parametrize("writer", ["install", "selected", "branch"])
-def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_the_wait(client, writer, change):
-    """Another session holds the page lock; a change commits while the writer waits, so the writer refuses it."""
+@pytest.mark.parametrize(
+    "writer, lock_phase, change",
+    [
+        (writer, "owner", change)
+        for writer in ("install", "selected", "branch")
+        for change in ("device-serial", "rule-added")
+    ]
+    + [
+        (writer, "type", change)
+        for writer in ("install", "selected", "branch", "replace")
+        for change in ("rule-added", "serial-rule-added")
+    ],
+)
+def test_a_writer_waiting_for_its_write_locks_refuses_a_change_committed_during_the_wait(
+    client, writer, lock_phase, change
+):
+    """The final grant check follows both Device and type waits before any write."""
     import time
 
-    from dcim.models import Device, Module
+    from dcim.models import Module
     from django.core.cache import cache
     from django.db import close_old_connections
 
-    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
     from netbox_librenms_plugin.module_grants import GrantRefusal
+    from netbox_librenms_plugin.module_writes import template_type_lock_key
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
     from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
-    from netbox_librenms_plugin.utils import advisory_lock_key
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
     page = make_device_with_module_bays(f"lock-wait-{writer}-{change}", ["Carrier"], serial="LOCK-WAIT-PAGE")
@@ -4138,6 +4345,13 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
             "entPhysicalSerialNum": "SN-CARD",
         },
     ]
+    user = make_superuser(f"lock-wait-{writer}-{change}")
+    client.force_login(user)
+    if writer == "replace":
+        Module.objects.create(
+            device=page, module_bay=page.modulebays.get(name="Carrier"), module_type=carrier, serial="OLD-CARRIER"
+        )
+    before = tuple(Module.objects.filter(device=page).values_list("pk", "serial"))
     key = CacheMixin().get_cache_key(page, "inventory", "default")
     cache.set(key, trusted_module_inventory_payload(page, rows))
     content = render_module_tab(page)
@@ -4145,10 +4359,12 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
         action, fields = rendered_module_form(content, "install-module", 2)
     elif writer == "branch":
         action, fields = rendered_module_form(content, "install-branch", 2)
+    elif writer == "replace":
+        preview = client.get(rendered_preview_url(content, 2))
+        action, fields = rendered_module_form(preview.content.decode(), "replace-module", 2)
     else:
         action, fields = rendered_module_form(content, "install-selected")
         fields = {**fields, "select": ["2"]}
-    user = make_superuser(f"lock-wait-{writer}-{change}")
 
     def post_while_the_lock_is_held():
         close_old_connections()
@@ -4161,42 +4377,48 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
     try:
         with second_connection() as holder, second_connection() as observer, bounded_executor(1) as executor:
             with holder.cursor() as cursor:
-                cursor.execute(
-                    "SELECT pg_advisory_xact_lock(%s)",
-                    [advisory_lock_key(f"netbox-librenms-plugin:module-serial:{page.pk}")],
-                )
+                if lock_phase == "owner":
+                    cursor.execute('SELECT id FROM "dcim_device" WHERE id = %s FOR NO KEY UPDATE', [page.pk])
+                else:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", [template_type_lock_key("module_type", carrier.pk)]
+                    )
                 cursor.execute("SELECT pg_backend_pid()")
                 holder_pid = cursor.fetchone()[0]
             posted = executor.submit(post_while_the_lock_is_held)
             deadline = time.monotonic() + 5
             while not _backends_blocked_by(observer, holder_pid):
-                assert time.monotonic() < deadline, "the writer never waited for the page lock"
+                assert time.monotonic() < deadline, "the writer never waited for its write lock"
                 time.sleep(0.02)
             # The change commits while the writer waits; this connection is in autocommit.
             if change == "device-serial":
-                Device.objects.filter(pk=page.pk).update(serial="LOCK-WAIT-CHANGED")
+                with holder.cursor() as cursor:
+                    cursor.execute('UPDATE "dcim_device" SET serial = %s WHERE id = %s', ["LOCK-WAIT-CHANGED", page.pk])
+            elif change == "serial-rule-added":
+                NormalizationRule.objects.create(scope="serial", match_pattern=r"^SN-(.+)$", replacement=r"\1")
             else:
                 InventoryIgnoreRule.objects.create(
                     name="Lock wait rule", match_type="contains", pattern="no-such-entity", action="skip"
                 )
-            holder.rollback()
+            holder.commit()
             response = posted.result(timeout=10)
     finally:
         cache.delete(key)
 
     assert response.status_code == 302
     assert [str(message) for message in response.wsgi_request._messages] == [GrantRefusal.POLICY.message]
-    assert not Module.objects.filter(device=page).exists()
+    assert tuple(Module.objects.filter(device=page).values_list("pk", "serial")) == before
 
 
 @pytest.mark.django_db(transaction=True)
-def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chassis(client):
-    """A writer on one member page may install onto another member, so both pages take one serial lock."""
+def test_an_install_waits_for_its_destination_owner_held_from_another_member_page(client):
+    """A writer on one member page may install onto another member, so both writers lock the actual destination."""
     import time
     from threading import Event
 
-    from dcim.models import Device, Module
+    from dcim.models import Module
     from django.db import close_old_connections, connection, transaction
+    from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import (
         make_device_with_module_bays,
@@ -4206,14 +4428,21 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
     )
     from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
     from netbox_librenms_plugin.views.mixins import CacheMixin
-    from netbox_librenms_plugin.views.sync.modules import _lock_page_device_serials
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 
-    page = make_device_with_module_bays("chassis-lock-page", ["Slot 1"])
-    member = make_device_with_module_bays("chassis-lock-member", ["Slot 1"])
+    page = make_device_with_module_bays("chassis-lock-page", ["Slot 1"], serial="CHASSIS-LOCK-PAGE")
+    member = make_device_with_module_bays("chassis-lock-member", ["Slot 1"], serial="CHASSIS-LOCK-MEMBER")
     make_virtual_chassis("chassis-lock", page, member)
+    bay = page.modulebays.get(name="Slot 1")
     card = make_module_type("Chassis Lock Card", manufacturer=page.device_type.manufacturer)
+    # The chassis serial attributes the card to the bay of page, although the tab renders for member.
     rows = [
-        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis"},
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "chassis",
+            "entPhysicalSerialNum": page.serial,
+        },
         {
             "entPhysicalIndex": 2,
             "entPhysicalContainedIn": 1,
@@ -4223,17 +4452,21 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
             "entPhysicalSerialNum": "SN-CHASSIS-LOCK",
         },
     ]
-    key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
-    action, fields = rendered_module_form(render_module_tab(page), "install-module", 2)
+    key = CacheMixin().get_cache_key(member, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(member, stack_inventory(rows, [page, member])))
+    action, fields = rendered_module_form(render_module_tab(member), "install-module", 2)
+    assert (action, fields["selected_device_id"]) == (
+        reverse("plugins:netbox_librenms_plugin:install_module", args=[member.pk]),
+        str(page.pk),
+    )
     user = make_superuser("chassis-lock-user")
     held, release, holder = Event(), Event(), {}
 
-    def hold_the_member_page_lock():
+    def hold_the_destination_owner_lock():
         close_old_connections()
         try:
             with transaction.atomic():
-                _lock_page_device_serials(Device.objects.get(pk=member.pk))
+                lock_module_write(observe_module_write(device_ids=[page.pk]))
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT pg_backend_pid()")
                     holder["pid"] = cursor.fetchone()[0]
@@ -4242,7 +4475,7 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
         finally:
             close_old_connections()
 
-    def install_from_the_page():
+    def install_from_the_member_page():
         close_old_connections()
         try:
             client.force_login(user)
@@ -4252,15 +4485,19 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
 
     try:
         with second_connection() as observer, bounded_executor(2) as executor:
-            holding = executor.submit(hold_the_member_page_lock)
+            holding = executor.submit(hold_the_destination_owner_lock)
             assert held.wait(5)
-            posted = executor.submit(install_from_the_page)
+            posted = executor.submit(install_from_the_member_page)
             deadline = time.monotonic() + 5
             try:
                 while not _backends_blocked_by(observer, holder["pid"]):
-                    assert time.monotonic() < deadline, "the install never waited for the member page lock"
-                    assert not posted.done(), "the install finished while the member page lock was held"
+                    assert time.monotonic() < deadline, "the install never waited for the destination owner lock"
+                    assert not posted.done(), "the install finished while the destination owner lock was held"
                     time.sleep(0.02)
+                # The owner lock comes first, so the waiting install holds no lock on the destination bay yet.
+                with observer.cursor() as cursor:
+                    cursor.execute('SELECT id FROM "dcim_modulebay" WHERE id = %s FOR UPDATE NOWAIT', [bay.pk])
+                observer.rollback()
             finally:
                 release.set()
             holding.result(timeout=10)
@@ -4270,6 +4507,7 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
 
     assert response.status_code == 302
     assert list(Module.objects.filter(device=page).values_list("serial", flat=True)) == ["SN-CHASSIS-LOCK"]
+    assert not Module.objects.filter(device=member).exists()
 
 
 @pytest.mark.parametrize(

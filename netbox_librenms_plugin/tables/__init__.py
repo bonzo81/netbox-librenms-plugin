@@ -13,6 +13,7 @@ from .mappings import (
     ModuleTypeMappingTable,
     NormalizationRuleTable,
     PlatformMappingTable,
+    VCMemberNumberingRuleTable,
 )
 from .vlans import LibreNMSVLANTable
 from .VM_status import VMStatusTable
@@ -35,5 +36,6 @@ __all__ = [
     "PlatformMappingTable",
     "SiteLocationSyncTable",
     "VCInterfaceTable",
+    "VCMemberNumberingRuleTable",
     "VMStatusTable",
 ]

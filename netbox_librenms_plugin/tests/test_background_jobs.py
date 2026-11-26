@@ -502,6 +502,7 @@ class TestImportDevicesJob:
     def test_unresolved_row_is_skipped_while_a_checked_row_imports(self, librenms_server):
         from dcim.models import Device, DeviceRole
 
+        from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         infrastructure = make_device("background-unresolved-infrastructure")
@@ -538,13 +539,14 @@ class TestImportDevicesJob:
         assert job.data["success_count"] == 1
         assert job.data["failed_count"] == 1
         assert job.data["errors"][0]["device_id"] == 6403
-        assert "couldn't be read to verify them" in job.data["errors"][0]["error"]
+        assert job.data["errors"][0]["error"] == LIBRENMS_ROW_UNREADABLE
 
     def test_a_lone_row_whose_stack_read_failed_is_skipped_not_imported(self, librenms_server):
         """One row runs the same pre-check as many: an unreadable stack must not import VC-less."""
         from dcim.models import Device, DeviceRole
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE
         from netbox_librenms_plugin.jobs import ImportDevicesJob
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -588,7 +590,7 @@ class TestImportDevicesJob:
         assert not Device.objects.filter(name="background-unreadable-stack").exists()
         assert job.data["success_count"] == 0
         assert job.data["errors"][0]["device_id"] == 6421
-        assert "couldn't be read to verify them" in job.data["errors"][0]["error"]
+        assert job.data["errors"][0]["error"] == LIBRENMS_ROW_UNREADABLE
 
     def test_cross_mode_collision_blocks_the_whole_batch(self, librenms_server):
         from dcim.models import Device

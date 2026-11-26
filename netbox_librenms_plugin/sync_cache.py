@@ -31,17 +31,39 @@ _MAX_ACKNOWLEDGED_REVISIONS = 200
 
 
 # Increase when cached inventory rows change meaning; a reader treats any other payload as a miss.
-MODULE_INVENTORY_CACHE_VERSION = 4
+MODULE_INVENTORY_CACHE_VERSION = 5
 
 
-def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> dict:
+def module_snapshot_serial_context(policy, sync_device):
     """
-    Return the cached module inventory payload, stamped with the current schema version.
+    Return the serial context of the module snapshot that *sync_device* owns; every member that shares it reads it.
+
+    The owner and the master come from the Devices that *policy* loaded, so the stamp and the signed policy read
+    one observation. A chassis without a master gives the owner's own context, as ``SerialRules.for_device`` does.
+
+    Raises:
+        Device.DoesNotExist: *sync_device* is not a device of *policy*.
+
+    """
+    owner = policy.member(sync_device.pk)
+    if owner is None:
+        from dcim.models import Device
+
+        raise Device.DoesNotExist(f"Device {sync_device.pk} is not a device of the Modules policy")
+    if policy.master_id is None:
+        return policy.serial_identity_rules.for_module_target(owner)
+    return policy.chassis_serial_context()
+
+
+def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, serial_context) -> dict:
+    """
+    Return the cached module inventory payload, stamped with the current schema version and serial context.
 
     Args:
         inventory (list[dict]): The merged inventory rows.
         librenms_id (int): The LibreNMS device ID the rows came from.
         oob_librenms_id (int | None): The linked OOB controller ID, or None.
+        serial_context (SerialContext): The chassis context that the transceiver merge grouped serials under.
 
     Returns:
         dict: The payload to cache.
@@ -52,6 +74,7 @@ def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> d
         "inventory": inventory,
         "librenms_id": librenms_id,
         "oob_librenms_id": oob_librenms_id,
+        "serial_context": serial_context.fingerprint,
     }
 
 
@@ -76,6 +99,9 @@ def cached_module_inventory(payload):
         return None
     inventory = payload.get("inventory")
     if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
+        return None
+    # A render reads a None stamp as rows of the current refresh, so a cached payload must carry a real one.
+    if not isinstance(payload.get("serial_context"), str):
         return None
     return inventory
 
@@ -774,11 +800,24 @@ class SyncCacheConsistency:
         """Return whether the tab's snapshot exists in a form its reader accepts."""
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
+            from dcim.models import Device
+
+            from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+            from netbox_librenms_plugin.models import RuleConfigurationError
+
             payload = cache.get(key)
             owner = self._primary_owner(tab, server_key)
-            return cached_module_inventory(payload) is not None and module_inventory_snapshot_matches(
+            if cached_module_inventory(payload) is None or not module_inventory_snapshot_matches(
                 payload, owner, server_key, module_snapshot_host_id(owner, server_key)
-            )
+            ):
+                return False
+            try:
+                # The table policy validates every rule, so a rule that empties the table also empties the status.
+                context = module_snapshot_serial_context(load_inventory_policy(self.subject.pk), owner)
+            except (Device.DoesNotExist, RuleConfigurationError):
+                return False
+            # The table refuses every row under an Unavailable context, so the status offers no snapshot.
+            return not context.unavailable and payload.get("serial_context") == context.fingerprint
         return cache.has_key(key)
 
     def status(self, server_key, *, actor_id=None):

@@ -2,6 +2,7 @@
 
 import functools
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List
 
@@ -9,83 +10,61 @@ from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
 
 from ..import_validation_helpers import (
-    apply_cluster_to_validation,
     apply_role_to_validation,
-    clear_match_derived_action_fields,
-    recalculate_validation_status,
-    remove_validation_issue,
-    reset_cluster,
-    reset_device_role,
 )
 from ..librenms_api import LibreNMSAPI
-from ..librenms_ids import coerce_librenms_id
-from ..transactions import classify_conflict
+from ..models import RuleConfigurationError
+from ..serial_identity import (
+    SerialRules,
+    assignment_lock,
+    display,
+    fingerprint,
+    is_serial_value,
+    resolve_devices,
+)
+from ..transactions import atomic_with_events
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    normalize_serial,
-    normalize_stack_serial,
     preload_normalization_rules,
     row_identity_matches,
 )
 from .cache import (
     get_cache_index_key,
+    get_chassis_inventory_cache_key,
     get_cache_metadata_key,
     get_import_device_cache_key,
-    get_validated_device_cache_key,
+    search_metadata_is_current,
+    serial_rules_version,
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
-    _describe_existing_librenms_link,
     effective_import_device_type,
     import_single_device,
-    resolve_device_by_host_ip,
+    is_serial_unavailable_issue,
     validate_device_for_import,
 )
 from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
-    candidate_vc_serial_keys,
+    VCNumberingError,
     create_virtual_chassis_with_members,
-    devices_with_serial,
-    DeviceSerialLookup,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
-    identify_vc_master,
+    load_numbering_rules,
+    numbering_refusal_text,
     prefetch_vc_data_for_devices,
-)
-from netbox_librenms_plugin.server_mappings import (
-    AmbiguousLibreNMSIdError,
-    MappingRole,
-    find_mapping,
+    prepare_virtual_chassis,
+    prepared_master,
 )
 
 logger = logging.getLogger(__name__)
 
-# Stable fragment of the ambiguous-librenms_id blocker message. Shared by the writer
-# (the AmbiguousLibreNMSIdError handler) and the cleaner (the pre-lookup reset in
-# _refresh_existing_device) so a resolved duplicate's stale message is reliably removed
-# regardless of which librenms_id value was interpolated into it.
-_AMBIGUOUS_LIBRENMS_ID_MARKER = "matches more than one existing NetBox record"
-# Substrings of the ambiguity blockers that carry the "ambiguous_hostname_or_serial" match type,
-# used to strip a stale instance once the duplicate is resolved (mirrors the librenms_id marker
-# above). The blocker can be appended by either the refresh serial/IP fallback below ("serial or
-# management IP") or validate_device_for_import's duplicate name/serial guard ("hostname/serial"),
-# so the cleanup must recognise either wording — otherwise a hostname/serial blocker survives the
-# match_type reset and keeps the row blocked until cache expiry.
-_AMBIGUOUS_SERIAL_IP_MARKERS = (
-    "serial or management IP",
-    "hostname/serial",
-)
-# Stable fragment of the cross-model (VM + Device share the name) warning. Shared by the
-# writer (the both-models name branch in _refresh_existing_device, wording-matched to
-# validate_device_for_import's hostname branch) and the pre-lookup cleaner, so a refresh
-# neither stacks a duplicate copy on a persisting collision nor leaves a stale warning
-# behind once the collision is resolved.
-_CROSS_MODEL_HOSTNAME_MARKER = "Both a VM and Device exist with hostname"
+LIBRENMS_ROW_UNREADABLE = "LibreNMS data couldn't be read to verify the row"
+NETBOX_SERIAL_UNVERIFIED = "NetBox could not verify the serial"
 
 
 def _is_job_cancelled(job) -> bool:
@@ -127,7 +106,7 @@ def detect_collisions_for_device_ids(
     job=None,
     vm_device_ids=None,
     user=None,
-) -> tuple[list[dict], list]:
+) -> tuple[list[dict], dict[int, str]]:
     """
     Detect NetBox object collisions for a batch, and the rows that cannot be checked.
 
@@ -160,10 +139,7 @@ def detect_collisions_for_device_ids(
             the user's view scope are redacted before the result reaches a template or job log.
 
     Returns:
-        tuple[list[dict], list]: ``(collisions, unresolved_ids)``. ``collisions`` contains the
-            groups from :func:`detect_bulk_collisions`. ``unresolved_ids`` contains ids that could
-            not be validated or whose virtual chassis inventory could not be assessed, plus every
-            unscanned id after cancellation.
+        tuple: Collision groups and safe reasons keyed by each unresolved row ID.
 
     """
     use_sysname = (sync_options or {}).get("use_sysname", True)
@@ -174,19 +150,15 @@ def detect_collisions_for_device_ids(
     devices_cache = libre_devices_cache if libre_devices_cache is not None else {}
     vm_id_set = set(vm_device_ids or ())
     devices = []
-    unresolved_ids = []
+    unresolved = {}
     device_ids = list(device_ids)
-    candidate_keys = functools.cache(candidate_vc_serial_keys)
+    serial_rules = SerialRules.load()
     for idx, device_id in enumerate(device_ids, start=1):
-        # Same cancellation cadence as the import loops below (first id, then every 5th):
-        # a large batch with many cache misses is one LibreNMS call per id, so a cancelled
-        # job must not sit through the whole scan. The unscanned remainder goes to
-        # unresolved_ids — those ids were NOT collision-checked, and the caller's existing
-        # unresolved gate already fails closed on them, so nothing imports unchecked.
+        # Mark the unscanned rows unresolved so the caller can stop the batch.
         if job and (idx == 1 or idx % 5 == 0) and _is_job_cancelled(job):
             if getattr(job, "logger", None):
                 job.logger.warning(f"Collision pre-check stopped by cancellation at id {idx} of {len(device_ids)}")
-            unresolved_ids.extend(device_ids[idx - 1 :])
+            unresolved.update(dict.fromkeys(device_ids[idx - 1 :], LIBRENMS_ROW_UNREADABLE))
             break
         libre_device = devices_cache.get(device_id)
         just_fetched = False
@@ -205,12 +177,12 @@ def detect_collisions_for_device_ids(
                     job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {detail}")
                 else:
                     logger.warning("Collision pre-check couldn't fetch device %s: %s", device_id, exc)
-                unresolved_ids.append(device_id)
+                unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
                 continue
             if not success or not isinstance(libre_device, dict):
                 # Couldn't fetch device info → can't collision-check this id. Record it so the
                 # caller blocks it instead of importing it unchecked (fail closed).
-                unresolved_ids.append(device_id)
+                unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
                 continue
             just_fetched = True
         # Fail closed on a bad cached payload too: a negatively-cached lookup (an empty dict or a
@@ -218,7 +190,7 @@ def detect_collisions_for_device_ids(
         # would otherwise reach validation as a brand-new device and make the collision gate report
         # a clean scan for an id it never actually verified.
         if not row_identity_matches(libre_device, device_id):
-            unresolved_ids.append(device_id)
+            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
             continue
         if just_fetched:
             # Persist the freshly fetched row into the shared cache — but only now that its
@@ -245,6 +217,7 @@ def detect_collisions_for_device_ids(
             server_key=api.server_key,
             include_vc_detection=False,
             collision_only=True,
+            serial_rules=serial_rules,
         )
         if any(str(issue).startswith(VALIDATION_ERROR_ISSUE_PREFIX) for issue in validation.get("issues", [])):
             # validate_device_for_import() caught an exception and returned only a partial result
@@ -253,12 +226,15 @@ def detect_collisions_for_device_ids(
             # closed: record it as unresolved rather than collision-check it on incomplete data
             # (mirrors the get_device_info miss above). The prefix is a shared constant so this
             # guard can't silently drift from the producer's wording.
-            unresolved_ids.append(device_id)
+            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
             continue
-        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, candidate_keys=candidate_keys).get(
+        if _stopped_at_unavailable_serial(validation):
+            unresolved[device_id] = NETBOX_SERIAL_UNVERIFIED
+            continue
+        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, serial_rules=serial_rules).get(
             "detection_failed"
         ):
-            unresolved_ids.append(device_id)
+            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
         devices.append(
             {
                 "device_id": device_id,
@@ -269,7 +245,7 @@ def detect_collisions_for_device_ids(
     collisions = detect_bulk_collisions(devices)
     if user is not None:
         collisions = scope_bulk_collisions(collisions, user)
-    return collisions, unresolved_ids
+    return collisions, unresolved
 
 
 @dataclass
@@ -320,7 +296,7 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
 
     Args:
         collisions: Collision groups from :func:`detect_bulk_collisions`.
-        unresolved: Ids that couldn't be collision-checked (fetch/validation miss).
+        unresolved: Safe reasons keyed by the IDs that could not be checked.
         device_ids: The batch's device-import ids.
         vm_imports: The batch's VM imports mapping (``{device_id: manual_mappings}``).
 
@@ -334,13 +310,16 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
 
     skip_message = ""
     if unresolved and not collisions:
-        ids = ", ".join(str(d) for d in unresolved)
-        skip_message = (
-            f"Skipped {len(unresolved)} selected row(s) (id(s): {ids}): their LibreNMS data "
-            f"couldn't be read to verify them, so they were not imported. The remaining "
-            f"selected rows continue through normal import checks; review the final result for "
-            f"their outcome, then retry the skipped rows individually."
+        ids_by_reason = {}
+        for device_id, reason in unresolved.items():
+            ids_by_reason.setdefault(reason, []).append(str(device_id))
+        skip_message = " ".join(
+            f"Skipped {len(ids)} selected row(s) (id(s): {', '.join(ids)}): {reason}, so they were not imported."
+            for reason, ids in ids_by_reason.items()
         )
+        skip_message += " The remaining selected rows continue through normal import checks. Review the final result."
+        if LIBRENMS_ROW_UNREADABLE in ids_by_reason:
+            skip_message += " Retry rows with unreadable LibreNMS data individually."
 
     block_message = ""
     if collisions:
@@ -369,12 +348,10 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
     )
 
 
-def stack_key(vc_data, device_id) -> str:
-    """Return the key of one physical stack: its member serials, or the device when none is usable."""
-    member_serials = sorted(
-        serial for member in vc_data.get("members", []) if (serial := normalize_stack_serial(member.get("serial")))
-    )
-    return f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-stack-device-{device_id}"
+def stack_key(vc_data, device_id, context) -> str:
+    """Return the key of one physical stack: its member serial identities under *context*, or the device without one."""
+    members = fingerprint((member.get("serial") for member in vc_data.get("members", [])), context)
+    return f"librenms-stack-{members}" if members else f"librenms-stack-device-{device_id}"
 
 
 def bulk_import_devices_shared(  # noqa: C901
@@ -453,9 +430,8 @@ def bulk_import_devices_shared(  # noqa: C901
     # Preload the device_type NormalizationRule set once so the per-device hardware→device-type
     # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
     device_type_norm_rules = preload_normalization_rules("device_type")
-    serial_lookup = DeviceSerialLookup()
-    serial_key_for = serial_lookup.key_for
-    candidate_keys = functools.cache(candidate_vc_serial_keys)
+    serial_rules = SerialRules.load()
+    numbering_rules = load_numbering_rules()
 
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on first iteration and every 5th thereafter.
@@ -481,12 +457,8 @@ def bulk_import_devices_shared(  # noqa: C901
                 # Import decisions (DeviceType match, serial-conflict, hostname) must run against
                 # live LibreNMS data: bypass the short device-info read cache so a value the user
                 # just corrected in LibreNMS isn't read back stale within the cache window.
+                # The client refuses a row for another device ID, so a row here describes this one.
                 success, libre_device = api.get_device_info(device_id, use_cache=False)
-                # Same fail-closed identity rule as the collision pre-check (row_identity_matches):
-                # a payload that isn't a dict carrying the requested device_id must be neither
-                # imported nor written into the shared cache — treat it as a failed retrieval.
-                if success and not row_identity_matches(libre_device, device_id):
-                    success, libre_device = False, None
                 # Backfill the shared cache so the synchronous import's post-import row re-render
                 # (which reads the same dict via fetch_device_with_cache) doesn't issue a second
                 # LibreNMS round-trip per device on a cold cache. The background path passes a
@@ -516,9 +488,8 @@ def bulk_import_devices_shared(  # noqa: C901
                 # flags are stale or omitted.
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
-                serial_key_for=serial_key_for,
-                serial_lookup=serial_lookup,
-                candidate_keys=candidate_keys,
+                serial_rules=serial_rules,
+                numbering_rules=numbering_rules,
             )
 
             if validation.get("import_as_vm"):
@@ -569,15 +540,27 @@ def bulk_import_devices_shared(  # noqa: C901
                 else:
                     logger.error(f"Cannot import device {device_id}: {exc}")
                 continue
-            # The one master decision for this row; a stack whose master is unknown imports standalone,
-            # so it needs no chassis permission.
-            master_member = None
-            if vc_data.get("is_stack", False):
-                master_member = identify_vc_master(
-                    vc_data["members"],
-                    libre_device.get("serial"),
-                    serial_key_for(getattr(device_type, "manufacturer", None)),
+            # The one numbering and master decision for this row, for its final DeviceType and before any
+            # write; a stack whose master is unknown imports standalone, so it needs no chassis permission.
+            try:
+                vc_data = prepare_virtual_chassis(
+                    vc_data,
+                    device_type=device_type,
+                    master_name=validation.get("resolved_name"),
+                    device_serial=libre_device.get("serial"),
+                    serial_rules=serial_rules,
+                    numbering_rules=numbering_rules,
                 )
+            except (VCNumberingError, RuleConfigurationError) as exc:
+                error_msg = f"Cannot import device {device_id}: {numbering_refusal_text(exc)}"
+                failed_list.append({"device_id": device_id, "error": error_msg})
+                if job and job.logger:
+                    job.logger.error(error_msg)
+                else:
+                    logger.error(error_msg)
+                continue
+            validation["virtual_chassis"] = vc_data
+            master_member = prepared_master(vc_data) if vc_data.get("is_stack", False) else None
             creates_vc = master_member is not None
             if creates_vc:
                 has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
@@ -605,16 +588,45 @@ def bulk_import_devices_shared(  # noqa: C901
                     continue
                 apply_role_to_validation(validation, selected_role, is_vm=False)
 
-            result = import_single_device(
-                device_id,
-                server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
-                validation=validation,
-                sync_options=sync_options,
-                manual_mappings=device_mappings if device_mappings else None,
-                libre_device=libre_device,
-                user=user,
-                text_viewer=text_viewer,
-            )
+            # One key per physical stack, so only its first row creates the chassis.
+            vc_domain = stack_key(vc_data, device_id, serial_rules.for_device_type(device_type)) if creates_vc else None
+            builds_vc = vc_domain is not None and vc_domain not in processed_vc_domains
+            vc = None
+            try:
+                # A stack device and its chassis are one rollback unit: a failed chassis fails the row, and a retry imports both.
+                with atomic_with_events() if builds_vc else nullcontext():
+                    if builds_vc:
+                        # The serial write set of the whole stack, locked before any row lock.
+                        serials = [libre_device.get("serial"), *(member.get("serial") for member in vc_data["members"])]
+                        assignment_lock([display(serial) for serial in serials], model=Device, rules=serial_rules)
+                    result = import_single_device(
+                        device_id,
+                        server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
+                        validation=validation,
+                        sync_options=sync_options,
+                        manual_mappings=device_mappings if device_mappings else None,
+                        libre_device=libre_device,
+                        user=user,
+                        text_viewer=text_viewer,
+                        serial_rules=serial_rules,
+                    )
+                    if builds_vc and result["success"]:
+                        vc = create_virtual_chassis_with_members(
+                            result["device"],
+                            vc_data,
+                            libre_device,
+                            server_key=api.server_key,
+                            master_member=master_member,
+                            serial_rules=serial_rules,
+                        )
+            except Exception as vc_error:
+                error_msg = f"Cannot import stack device {device_id}: {exception_text_for(vc_error, VirtualChassis, text_viewer)}"
+                failed_list.append({"device_id": device_id, "error": error_msg})
+                if job and job.logger:
+                    job.logger.error(error_msg)
+                else:
+                    logger.error(error_msg)
+                continue
 
             if result["success"]:
                 success_list.append(
@@ -642,49 +654,14 @@ def bulk_import_devices_shared(  # noqa: C901
                     else:
                         logger.warning(warn_msg)
 
-                # Handle virtual chassis creation for stacks
-                if creates_vc:
-                    # One key per physical stack, so VC creation is triggered only once for it.
-                    vc_domain = stack_key(vc_data, device_id)
-
-                    # Only create VC if we haven't processed this stack yet.
-                    # Permission was already validated before device import.
-                    if vc_domain not in processed_vc_domains:
-                        # Add to set BEFORE attempting creation to prevent race condition
-                        processed_vc_domains.add(vc_domain)
-                        try:
-                            vc = create_virtual_chassis_with_members(
-                                result["device"],
-                                vc_data["members"],
-                                libre_device,
-                                server_key=api.server_key,
-                                master_member=master_member,
-                                serial_lookup=serial_lookup,
-                            )
-                            vc_created_count += 1
-                            log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
-                            if job and job.logger:
-                                job.logger.info(log_msg)
-                            else:
-                                logger.info(log_msg)
-                        except Exception as vc_error:
-                            # Remove from set on failure so retry is possible
-                            processed_vc_domains.discard(vc_domain)
-                            if classify_conflict(vc_error):
-                                # The device committed in its own transaction; only the chassis is missing.
-                                warn_msg = (
-                                    f"Imported device {device_id}, but another operation was changing the same "
-                                    "NetBox objects, so its virtual chassis was not created."
-                                )
-                            else:
-                                detail = exception_text_for(vc_error, VirtualChassis, text_viewer)
-                                warn_msg = f"Failed to create VC for device {device_id}: {detail}"
-                            warnings_list.append(warn_msg)
-                            if job and job.logger:
-                                job.logger.warning(warn_msg)
-                            else:
-                                logger.warning(warn_msg)
-                            # Don't fail the import; the caller shows the warning beside the success.
+                if vc is not None:
+                    processed_vc_domains.add(vc_domain)
+                    vc_created_count += 1
+                    log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
+                    if job and job.logger:
+                        job.logger.info(log_msg)
+                    else:
+                        logger.info(log_msg)
 
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})
@@ -761,579 +738,55 @@ def bulk_import_devices(
     )
 
 
-def _refresh_librenms_linkage(validation: dict, device, libre_device: dict, server_key: str) -> None:
-    """
-    Re-derive the LibreNMS-id linkage fields for a refreshed device.
-
-    Cheap and DB-only (reads the device's ``librenms_id`` custom field) — no
-    LibreNMS API call — so a cached import row picks up OOB-link / host-link
-    changes made in NetBox since the row was cached. Without this, the cache-hit
-    path keeps the stale ``existing_match_type``/badge (e.g. an OOB controller
-    linked after caching still rendered as a conflict until the cache expired).
-
-    Mirrors ``validate_device_for_import``'s linkage logic: always refreshes
-    ``existing_librenms_link``, and when the device is matched to the scanned
-    LibreNMS id it classifies the match as ``librenms_oob`` (matched via the OOB
-    sub-key) or ``librenms_id`` (matched as the host).
-
-    Args:
-        validation (dict): The import-row validation dict, mutated in place.
-        device: The refreshed NetBox device (or VM) to re-derive linkage from.
-        libre_device (dict): The scanned LibreNMS device record (may be empty).
-        server_key (str): The LibreNMS server key the row was scanned against.
-
-    Returns:
-        None
-
-    """
-    link = _describe_existing_librenms_link(device, server_key)
-    validation["existing_librenms_link"] = link
-
-    scanned_id = coerce_librenms_id((libre_device or {}).get("device_id"))
-    # _describe_existing_librenms_link already read the OOB entry from the mapping snapshot and
-    # exposes the coerced positive-int id as link["oob_id"]; reuse it instead of re-reading.
-    oob_id = link["oob_id"]
-
-    # Promote to a *current* librenms-id / OOB link first, regardless of the cached match type.
-    # A row cached as a serial/hostname conflict may since have gained the matching host/OOB
-    # librenms_id in NetBox; it should render as the link, not the stale conflict, instead of
-    # waiting for the cache to expire.
-    if scanned_id is not None and oob_id is not None and oob_id == scanned_id:
-        validation["existing_match_type"] = "librenms_oob"
-        return
-    if scanned_id is not None and link["host_id"] is not None and link["host_id"] == scanned_id:
-        validation["existing_match_type"] = "librenms_id"
-        return
-
-    # No current id/OOB link matches the scanned device. Only clear a *prior* librenms-id/OOB
-    # match here — leave serial/hostname/primary_ip match types untouched (evaluated elsewhere).
-    if validation.get("existing_match_type") in ("librenms_id", "librenms_oob"):
-        if scanned_id is None:
-            # A missing scanned id (libre_device omitted/malformed) is NOT proof the link
-            # disappeared — only drop the cached match when the DB linkage itself is gone.
-            if link["host_id"] is None and link["oob_id"] is None:
-                validation["existing_match_type"] = None
-            return
-        # scanned id present but neither the host id nor the OOB id matches it anymore.
-        validation["existing_match_type"] = None
+def _stopped_at_unavailable_serial(validation: dict) -> bool:
+    """Return whether validation stopped at an Unavailable serial lookup, before the site and type checks."""
+    return any(is_serial_unavailable_issue(issue) for issue in validation.get("issues", []))
 
 
-def _clear_existing_match_derived_fields(validation: dict) -> None:
-    """
-    Reset the fields produced from an existing match.
+def search_serial_discoveries(devices, serial_rules):
+    """Build a lazy serial lookup shared by the rows of a search."""
 
-    Clears stale serial/OOB/merge/promote actions so they don't linger after that
-    match is dropped (device deleted, or librenms/OOB link removed since caching).
-    The subsequent fresh lookup re-populates them if it re-matches.
-
-    Args:
-        validation (dict): The import-row validation dict, mutated in place.
-
-    Returns:
-        None
-
-    """
-    clear_match_derived_action_fields(validation)
-    # Migration / device-type state is also derived from the (now dropped) match;
-    # leaving it set would render a migrate/name-sync action for the old object. The fresh
-    # lookup below re-derives these only on a re-match, so reset them here (they are
-    # refresh-specific, so they stay out of the shared helper).
-    validation["librenms_id_needs_migration"] = False
-    validation["device_type_mismatch"] = False
-
-
-def _reassert_new_import_blockers(validation: dict) -> None:
-    """
-    Re-add the create-time role or VM-placement blocker for unmatched rows.
-
-    ``validate_device_for_import()`` attaches this blocker to unmatched rows. When a
-    refresh drops a cached match (or never had one) and the fresh lookup finds
-    nothing, the row is back in the "new import" path.
-    ``recalculate_validation_status()`` recomputes can_import purely from the issues
-    list, so without re-adding this blocker a row that still has no role or VM placement
-    selected could flip back to importable and then fail at import time.
-
-    Guarded by the selection state, so a row where the user completed setup stays importable.
-
-    Args:
-        validation (dict): The import-row validation dict, mutated in place.
-
-    Returns:
-        None
-
-    """
-    if validation.get("import_as_vm"):
-        placement = validation.get("vm_placement") or {}
-        if not placement.get("found"):
-            msg = "VM placement requires a matching site, selected cluster, or selected host device"
-            if msg not in validation.setdefault("issues", []):
-                validation["issues"].append(msg)
-    else:
-        role = validation.get("device_role") or {}
-        if not role.get("found") and not role.get("role"):
-            msg = "Device role must be manually selected before import"
-            if msg not in validation.setdefault("issues", []):
-                validation["issues"].append(msg)
-
-
-def _refresh_existing_device(  # noqa: C901
-    validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_lookup=None
-) -> None:
-    """
-    Refresh existing_device from DB to pick up changes made in NetBox since caching.
-
-    When existing_device is None (wasn't found at cache time), re-check if the device
-    was imported since caching by looking up librenms_id or hostname.
-
-    Args:
-        validation (dict): The cached validation state, mutated in place.
-        libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
-        server_key (str): The active LibreNMS server key.
-        serial_lookup: Read-only batch lookup, or None for current database holders.
-
-    """
-    if serial_lookup is None:
-        serial_lookup = devices_with_serial
-    existing = validation.get("existing_device")
-    if existing and hasattr(existing, "pk"):
-        try:
-            from dcim.models import Device
-            from virtualization.models import VirtualMachine
-
-            if validation.get("import_as_vm"):
-                refreshed = VirtualMachine.objects.filter(pk=existing.pk).first()
-            else:
-                refreshed = Device.objects.filter(pk=existing.pk).first()
-
-            if refreshed:
-                validation["existing_device"] = refreshed
-                # Re-derive linkage so an OOB-link/host-link change since caching
-                # is reflected in the badge (DB-only; no LibreNMS API call).
-                prior_match = validation.get("existing_match_type")
-                _refresh_librenms_linkage(validation, refreshed, libre_device, server_key)
-                if prior_match not in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") in (
-                    "librenms_id",
-                    "librenms_oob",
-                ):
-                    # _refresh_librenms_linkage just PROMOTED a row cached under a non-link match
-                    # (serial/hostname/primary_ip) to a current librenms_id/OOB link. The
-                    # serial/merge/oob/promote actions derived for that old match are now stale and
-                    # would render a destructive "Merge two NetBox devices" form (the template
-                    # checks serial_action == "merge_netbox_devices" before the match_type chain)
-                    # or a misleading "Add as OOB" badge (device_status keys that on serial_action,
-                    # independent of match_type) on a row that is actually host/OOB-linked. Drop
-                    # them; a row already cached as a link type keeps its link-derived fields.
-                    _clear_existing_match_derived_fields(validation)
-                if prior_match in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") is None:
-                    # The librenms-id/OOB link that made this the cached match is gone
-                    # (removed/repointed in NetBox since caching). Treat it like a vanished
-                    # match — clear it and recompute readiness, then fall through to the fresh
-                    # lookup below so the row is re-evaluated under current rules (it may now
-                    # match by hostname/serial/IP, or become importable as new) instead of
-                    # staying blocked until cache expiry. Mirrors the deleted-device branch.
-                    validation["existing_device"] = None
-                    validation["existing_librenms_link"] = None
-                    _clear_existing_match_derived_fields(validation)
-                    if not validation.get("import_as_vm"):
-                        reset_device_role(validation)
-                    else:
-                        # Drop stale placement objects and return to matched-site placement.
-                        reset_cluster(validation)
-                        validation["vm_placement"] = {
-                            "method": "site",
-                            "found": bool(validation.get("site", {}).get("found")),
-                            "host_device": None,
-                        }
-                    # Fail-closed: this branch drops the vanished-link match and recomputes
-                    # readiness, then falls through to the fresh lookup that would normally re-add
-                    # the create-time role/cluster blocker. But the fresh lookup early-returns when
-                    # libre_device is None (and its broad except can swallow), so re-assert here too
-                    # — otherwise the row can stay importable with no role/cluster selected.
-                    _reassert_new_import_blockers(validation)
-                    recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
-                else:
-                    if hasattr(refreshed, "role") and refreshed.role:
-                        apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
-                    recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
-                    # Re-assert non-importable state: recalculate bases can_import on
-                    # issues alone, but an existing matched device must never be import-ready.
-                    validation["can_import"] = False
-                    validation["is_ready"] = False
-                    return
-            else:
-                # Device was deleted since caching — recompute readiness to match
-                # validate_device_for_import logic.
-                validation["existing_device"] = None
-                validation["existing_match_type"] = None
-                # Nothing is linked anymore — clear the linkage so the row can't
-                # keep rendering a stale host/OOB badge.
-                validation["existing_librenms_link"] = None
-                # Drop serial/OOB/merge/promote actions that pointed at the deleted device.
-                _clear_existing_match_derived_fields(validation)
-                # Clear stale device_role so is_ready is computed from scratch.
-                # Guard: VMs don't use device_role for readiness, so preserve any
-                # user-selected role rather than silently dropping it.
-                if not validation.get("import_as_vm"):
-                    reset_device_role(validation)
-                else:
-                    # Drop stale placement objects and return to matched-site placement.
-                    reset_cluster(validation)
-                    validation["vm_placement"] = {
-                        "method": "site",
-                        "found": bool(validation.get("site", {}).get("found")),
-                        "host_device": None,
-                    }
-                # Same fail-closed reasoning as the vanished-link branch above: re-assert the
-                # create-time blocker before recompute so a deleted-match row can't stay importable
-                # if the fresh lookup early-returns (libre_device None) or its except swallows.
-                _reassert_new_import_blockers(validation)
-                recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
-        except Exception as e:
-            existing_id = getattr(existing, "pk", "unknown") if existing else "none"
-            logger.error("Failed to refresh existing device (pk=%s): %s", existing_id, e)
-            return
-
-    # Re-evaluate the match under current DB state. Reached when existing_device was None at
-    # cache time, or when a cached librenms_id/OOB link disappeared (cleared above) or its
-    # device was deleted — in every case re-check whether a matching NetBox object exists now,
-    # using the full id/name/serial/IP breadth so the row can't flip to importable and create
-    # a duplicate of a device that still exists under a different identity.
-    if not libre_device:
-        return
-    try:
-        from dcim.models import Device
-        from virtualization.models import VirtualMachine
-
-        import_as_vm = validation.get("import_as_vm", False)
-        Model = VirtualMachine if import_as_vm else Device
-        # Also check the opposite model — the LibreNMS object may have been
-        # imported as a VM even though import_as_vm=False (or vice versa).
-        CrossModel = Device if import_as_vm else VirtualMachine
-
-        # Coerce up front so malformed values (e.g. "42.0", floats, booleans) are rejected
-        # rather than truncated by int() and matched to the wrong record.
-        librenms_id = coerce_librenms_id(libre_device.get("device_id"))
-        hostname = libre_device.get("hostname", "")
-        sys_name = libre_device.get("sysName", "")
-
-        # Clear any stale ambiguous-librenms_id blocker set by a prior refresh before
-        # re-running the lookup. If the duplicate still exists, _lookup_in_model() below
-        # re-raises AmbiguousLibreNMSIdError and the except handler re-adds the blocker;
-        # if it was resolved since, the row must not stay blocked until cache expiry.
-        if validation.get("ambiguous_librenms_id"):
-            validation["ambiguous_librenms_id"] = False
-            if validation.get("existing_match_type") == "ambiguous_librenms_id":
-                validation["existing_match_type"] = None
-            for _key in ("issues", "warnings"):
-                msgs = validation.get(_key)
-                if isinstance(msgs, list):
-                    validation[_key] = [
-                        m for m in msgs if not (isinstance(m, str) and _AMBIGUOUS_LIBRENMS_ID_MARKER in m)
-                    ]
-
-        # Same for a stale serial/IP ambiguity blocker: if the duplicate was resolved since caching,
-        # the fresh fallback below would not re-flag it, but the cached issue/match_type would keep
-        # the row blocked until cache expiry. Clear it so the row is re-evaluated under current rules.
-        if validation.get("existing_match_type") == "ambiguous_hostname_or_serial":
-            validation["existing_match_type"] = None
-            for _key in ("issues", "warnings"):
-                msgs = validation.get(_key)
-                if isinstance(msgs, list):
-                    validation[_key] = [
-                        m
-                        for m in msgs
-                        if not (isinstance(m, str) and any(marker in m for marker in _AMBIGUOUS_SERIAL_IP_MARKERS))
-                    ]
-
-        # Same for the cross-model (VM + Device) name warning: the both-models branch below
-        # re-adds it while the collision persists, so stripping it here both prevents a
-        # duplicate copy per refresh and drops the stale warning once the collision is
-        # resolved. Unconditional (no match_type gate) — this warning never binds a match.
-        msgs = validation.get("warnings")
-        if isinstance(msgs, list):
-            validation["warnings"] = [m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)]
-
-        new_device = None
-        match_type = None
-        found_as_cross_model = False
-
-        def _lookup_value(m, value):
-            """
-            Return (device, ambiguous) for the single NAME *value* in model m.
-
-            NetBox device names are unique only per-site, so a name can resolve to MORE THAN ONE
-            device. Fail closed exactly like the serial/IP fallback below (and the full
-            validate_device_for_import() path): when a value matches >1 object, return
-            ``(None, True)`` so the caller blocks the row instead of binding ``.first()`` to an
-            arbitrary one.
-
-            Args:
-                m (type): The Device or VirtualMachine model to search.
-                value (str): The device name to match.
-
-            Returns:
-                tuple[object | None, bool]: The single matching object, if any, and whether the name
-                    is ambiguous.
-
-            """
-            matches = list(m.objects.filter(name__iexact=value)[:2])
-            if len(matches) > 1:
-                return None, True
-            return (matches[0] if matches else None), False
-
-        # Fail closed on a CROSS-MODEL librenms_id collision before selecting a match — i.e.
-        # the same (server_key, librenms_id) bound to BOTH a Device and a VirtualMachine. A
-        # LibreNMS device_id is unique within a server, so this never happens in a clean state;
-        # it's a NetBox-side data-integrity hazard (custom fields have no cross-model uniqueness)
-        # from a stale/duplicate binding — e.g. a thing imported as a VM then re-imported as a
-        # Device without clearing the old VM link, or a manual CF edit. validate_device_for_import()
-        # already detects and blocks exactly this (see device_operations.py "Cross-model collision"),
-        # but _lookup_in_model(Model) here returns on the first preferred-model id hit and never
-        # consults CrossModel — so without this guard the refresh re-check would silently bind to
-        # one model and disagree with the validation path that originally blocked the row. Check
-        # both models and raise the existing ambiguous-id blocker when both resolve (single-model
-        # duplicates are already raised inside find_mapping).
-        if librenms_id is not None:
-            model_id_match = find_mapping(
-                Model.objects.all(), server=server_key, identity=librenms_id, roles=(MappingRole.OWN, MappingRole.OOB)
-            )
-            cross_id_match = find_mapping(
-                CrossModel.objects.all(),
-                server=server_key,
-                identity=librenms_id,
-                roles=(MappingRole.OWN, MappingRole.OOB),
-            )
-            if model_id_match and cross_id_match:
-                raise AmbiguousLibreNMSIdError(
-                    f"LibreNMS ID {librenms_id} matches both {Model.__name__} and {CrossModel.__name__}"
-                )
-            # An exact librenms_id owner must win over any name/hostname fallback: if the id now
-            # belongs to the opposite model only, binding by name to a same-named preferred-model
-            # object would silently re-home the row to the wrong device. Prefer the id match here,
-            # before _lookup_in_model(Model) can return a name hit.
-            if model_id_match:
-                new_device, match_type = model_id_match, "librenms_id"
-            elif cross_id_match:
-                new_device, match_type = cross_id_match, "librenms_id"
-                found_as_cross_model = True
-
-        name_ambiguous = False
-        if not new_device:
-            # Compare BOTH models against the SAME name candidate before advancing to the next
-            # fallback. Two INDEPENDENT per-model searches (the old _lookup_in_model, which returned
-            # on the first hit within each model) could match a Device by one candidate (e.g.
-            # resolved_name) and an UNRELATED VM by a *different* one (e.g. raw hostname), then
-            # treat that as a cross-model collision — leaving the real preferred-name match unbound
-            # and letting a duplicate import slip through. Iterate the candidates in priority order
-            # and, per value, query both models: a same-value hit in BOTH is the genuine cross-model
-            # ambiguity (warn + leave unmatched, exactly like validate_device_for_import()'s
-            # hostname path); a single-model hit binds and wins over any lower-priority candidate.
-            # The librenms_id match above already short-circuited, so this only does the
-            # name/hostname/sysName fallbacks.
-            for value, mt in (
-                (validation.get("resolved_name"), "resolved_name"),
-                (hostname, "hostname"),
-                (sys_name, "sysname"),
-            ):
-                if not value:
-                    continue
-                model_match, model_amb = _lookup_value(Model, value)
-                cross_match, cross_amb = _lookup_value(CrossModel, value)
-                if model_amb or cross_amb:
-                    # >1 match within a single model for this value — terminal ambiguity, fail
-                    # closed below.
-                    name_ambiguous = True
-                    break
-                if model_match and cross_match:
-                    # Same value resolves in BOTH models: warn and leave unmatched (do NOT block),
-                    # exactly like the validator's cross-model hostname branch. A serial/IP match
-                    # can still bind below (a stronger identity), mirroring the validator's
-                    # fall-through. setdefault (not a plain get + isinstance guard) so the warning
-                    # is surfaced even when the caller built a minimal validation dict without
-                    # "warnings", matching the AmbiguousLibreNMSIdError handler below.
-                    validation.setdefault("warnings", []).append(
-                        f"Both a VM and Device exist with hostname '{value}' in NetBox. Cannot "
-                        "determine which to match. Please set the librenms_id custom field on the "
-                        "correct object."
-                    )
-                    break
-                if model_match:
-                    new_device, match_type = model_match, mt
-                    break
-                if cross_match:
-                    # Cross-model import that happened after the cache was built (e.g. a LibreNMS
-                    # device imported as a VM): the preferred model has no match on this value, the
-                    # opposite one does.
-                    new_device, match_type = cross_match, mt
-                    found_as_cross_model = True
-                    break
-
-        if not new_device and name_ambiguous:
-            # A hostname/sysName resolved to MORE THAN ONE NetBox device (names are unique only
-            # per-site). Binding to whichever sorts first would render the wrong device as the
-            # existing match, so fail closed exactly like the serial/IP fallback below and the
-            # full validate_device_for_import() path — block instead of picking arbitrarily. The
-            # "hostname/serial" marker keeps this in lock-step with the stale-blocker cleanup above.
-            validation.setdefault("issues", []).append(
-                "Multiple NetBox devices share this device's hostname/serial; resolve the duplicate before importing."
-            )
-            validation["existing_match_type"] = "ambiguous_hostname_or_serial"
-            validation["can_import"] = False
-            validation["is_ready"] = False
-            # Terminal: this row is blocked pending duplicate resolution. Return before the
-            # no-match `else` below re-adds create-time role/cluster blockers via
-            # _reassert_new_import_blockers — the cached row must show ONLY the
-            # duplicate-resolution blocker, not stale new-import ones.
-            return
-
-        if not new_device and not name_ambiguous:
-            # Serial- and IP-based matches: validate_device_for_import() catches these, so the
-            # refresh re-check must have the same breadth. Without them a row whose
-            # librenms_id/name link disappeared (or that never matched) can flip to importable
-            # and re-import an object that already exists in NetBox under a different name.
-            # Serial applies only to Devices. Management IP applies to Devices and VMs.
-            # The richer action heuristics stay in the full validation path; here the contract
-            # is simply to block the duplicate import and bind the current object type.
-            # This fallback fails closed on ambiguity exactly like validate_device_for_import():
-            # if the serial OR the management IP resolves to more than one distinct NetBox object,
-            # binding to whichever row sorts first would render the wrong object as the existing
-            # match, so flag the row ambiguous and block instead of picking arbitrarily.
-            ambiguous_fallback = False
-            if not import_as_vm:
-                serial = normalize_serial(libre_device.get("serial"))
-                if normalize_stack_serial(serial):
-                    serial_matches = serial_lookup(serial)
-                    if len(serial_matches) > 1:
-                        ambiguous_fallback = True
-                    elif serial_matches:
-                        new_device, match_type = serial_matches[0], "serial"
-
-            if not new_device and not ambiguous_fallback:
-                primary_ip = libre_device.get("ip")
-                if primary_ip:
-                    # Shared resolver (scans interface-assignment + oob_ip-FK across all duplicate
-                    # net_host rows, fails closed on >1 distinct device) — same helper
-                    # validate_device_for_import() uses, so the two paths can't drift.
-                    matched_object, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
-                    if ip_ambiguous:
-                        ambiguous_fallback = True
-                    elif matched_object:
-                        new_device, match_type = matched_object, "primary_ip"
-                        found_as_cross_model = isinstance(matched_object, CrossModel)
-
-            if ambiguous_fallback:
-                # Block without binding to an arbitrary device: append a blocking issue (the
-                # new_device=None `else` branch below recomputes can_import from the issues list)
-                # and mark the row ambiguous so the UI doesn't render a wrong existing match.
-                validation.setdefault("issues", []).append(
-                    "Multiple NetBox devices match this device's serial or management IP; "
-                    "resolve the duplicate before importing."
-                )
-                validation["existing_match_type"] = "ambiguous_hostname_or_serial"
-                validation["can_import"] = False
-                validation["is_ready"] = False
-                # Terminal, same as the name-ambiguous branch above: block on the serial/IP
-                # duplicate and return before the no-match `else` re-adds create-time
-                # role/cluster blockers.
-                return
-
-        if new_device:
-            # A stronger identity (serial / management IP) uniquely bound this row after the
-            # name fallback flagged a cross-model (VM + Device) hostname collision. That warning
-            # said "cannot determine which to match" — now moot, since new_device IS the match.
-            # Drop it so the resolved row doesn't keep showing a stale "ambiguous" warning.
-            msgs = validation.get("warnings")
-            if isinstance(msgs, list):
-                validation["warnings"] = [
-                    m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)
-                ]
-            validation["existing_device"] = new_device
-            validation["existing_match_type"] = match_type
-            # Re-derive linkage so a librenms_id match is correctly shown as the
-            # host vs. OOB half, and existing_librenms_link is populated for the
-            # paired badge (DB-only; no LibreNMS API call).
-            _refresh_librenms_linkage(validation, new_device, libre_device, server_key)
-            validation["can_import"] = False
-            validation["is_ready"] = False
-            # Determine actual model from the found object, not from import_as_vm flag
-            actual_is_vm = found_as_cross_model != import_as_vm  # XOR: cross flips the flag
-            validation["import_as_vm"] = actual_is_vm  # Update so future refreshes query correct model
-            # A row that was previously unmatched can carry create-time blockers for its role or
-            # VM placement that
-            # validate_device_for_import() only adds when there's no existing_device. Now that
-            # the row resolves to an existing object, none of those apply (and a cross-model
-            # match can carry the *other* model's blocker). Drop both before recalculating so a
-            # stale message doesn't linger in the UI; the row stays force-blocked as an existing
-            # match regardless. The VM path previously cleared neither.
-            remove_validation_issue(validation, "role")
-            remove_validation_issue(validation, "VM placement")
-            # A cached new-import row can also carry "No matching site found…" / "No matching
-            # device type found…" create-time blockers (device_operations.py). They don't apply
-            # to a now-resolved existing match either, so clear them too or the validation detail
-            # stays inconsistent with the resolved match.
-            remove_validation_issue(validation, "site")
-            remove_validation_issue(validation, "device type")
-            if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
-                apply_role_to_validation(validation, new_device.role, is_vm=False)
-            elif not actual_is_vm:
-                reset_device_role(validation)
-            elif hasattr(new_device, "cluster") and new_device.cluster:
-                # VM match: mirror the device-role display above — show the matched
-                # VM's actual cluster rather than leaving the cached selection stale.
-                apply_cluster_to_validation(validation, new_device.cluster)
-            else:
-                reset_cluster(validation)
-                validation["vm_placement"] = {
-                    "method": "site",
-                    "found": bool(validation.get("site", {}).get("found")),
-                    "host_device": None,
-                }
-            recalculate_validation_status(validation, is_vm=actual_is_vm)
-            # Re-assert non-importable: recalculate sets can_import from issues list,
-            # but a late-found existing match must never be import-ready.
-            validation["can_import"] = False
-            validation["is_ready"] = False
-        else:
-            # No existing match at all — the row is a genuine new import. If a cached match was
-            # just cleared above, its create-time role/placement blocker was lost; re-add it so the
-            # row can't flip to importable while still missing a required selection.
-            _reassert_new_import_blockers(validation)
-            recalculate_validation_status(validation, is_vm=import_as_vm)
-    except AmbiguousLibreNMSIdError as exc:
-        # An ambiguous librenms_id (matching multiple records) must block import rather
-        # than fall through as "not found" and stay importable.
-        logger.warning("Bulk re-check blocked — ambiguous librenms_id %r: %s", librenms_id, exc)
-        validation["can_import"] = False
-        validation["is_ready"] = False
-        validation["ambiguous_librenms_id"] = True
-        validation["existing_match_type"] = "ambiguous_librenms_id"
-        message = (
-            f"LibreNMS ID {librenms_id} {_AMBIGUOUS_LIBRENMS_ID_MARKER}; import "
-            "blocked to avoid binding to the wrong object. Resolve the duplicate librenms_id "
-            "assignment, then retry."
+    @functools.cache
+    def discover():
+        return resolve_devices(
+            (display(row.get("serial")) for row in devices if is_serial_value(row.get("serial"))),
+            rules=serial_rules,
         )
-        # Append to issues (not just warnings) — a later recalculate_validation_status()
-        # recomputes can_import from issues, so a warning alone would be silently re-enabled.
-        # Dedup so repeated refreshes don't stack the same message.
-        if message not in validation.setdefault("warnings", []):
-            validation["warnings"].append(message)
-        if message not in validation.setdefault("issues", []):
-            validation["issues"].append(message)
-    except Exception as e:
-        logger.error("Failed to check for newly imported device: %s", e)
-        # Fail closed: this recheck exists to catch duplicates that appeared after the cache
-        # was built, so a transient failure (e.g. a DB error mid-lookup) must not leave a
-        # previously-cached "importable" row importable — that would let a duplicate import
-        # slip through exactly when the duplicate check couldn't run. Matches the fail-closed
-        # behaviour of every other failure branch in this function.
-        validation["can_import"] = False
-        validation["is_ready"] = False
-        message = "Duplicate re-check failed (transient lookup error); import blocked. Refresh to retry."
-        # Append to issues (not just a warning) — a later recalculate_validation_status()
-        # recomputes can_import from the issues list, so anything weaker would be silently
-        # re-enabled. Dedup so repeated refreshes don't stack the same message.
-        if message not in validation.setdefault("issues", []):
-            validation["issues"].append(message)
+
+    return discover
+
+
+def validate_search_row(
+    api: LibreNMSAPI,
+    device: dict,
+    *,
+    vc_detection_enabled,
+    use_sysname,
+    strip_domain,
+    serial_rules,
+    numbering_rules,
+    serial_discoveries,
+) -> dict:
+    """
+    Validate one row of an import search against the current NetBox state.
+
+    A search and the completed-job page call it for every row. Only the LibreNMS-side inputs come from the cache.
+    """
+    validation = validate_device_for_import(
+        device,
+        api=api,
+        include_vc_detection=vc_detection_enabled,
+        force_vc_refresh=False,
+        server_key=api.server_key,
+        use_sysname=use_sysname,
+        strip_domain=strip_domain,
+        serial_rules=serial_rules,
+        numbering_rules=numbering_rules,
+        serial_discoveries=serial_discoveries,
+    )
+    if not vc_detection_enabled:
+        validation["virtual_chassis"] = empty_virtual_chassis_data()
+    return validation
 
 
 def _empty_return(return_cache_status: bool):
@@ -1352,13 +805,15 @@ def process_device_filters(  # noqa: C901
     return_cache_status: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    *,
+    serial_rules: SerialRules | None = None,
 ) -> List[dict] | tuple[List[dict], bool]:
     """
     Process LibreNMS device filters and return validated devices.
 
     Shared function used by both synchronous view and background job processing.
-    Fetches devices, optionally pre-warms VC cache, validates each device, and
-    caches results for HTMX row updates.
+    Fetches devices, optionally pre-warms VC cache, validates each device against the
+    current NetBox state, and caches the raw rows for the dialog and the completed-job page.
 
     Args:
         api: LibreNMS API client instance
@@ -1371,6 +826,7 @@ def process_device_filters(  # noqa: C901
         return_cache_status: When True, returns (devices, from_cache) tuple
         use_sysname: If True, prefer sysName over hostname for device name resolution
         strip_domain: If True, strip domain suffix from device name
+        serial_rules: The serial rule snapshot used to validate and cache the search.
 
     Returns:
         List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
@@ -1432,6 +888,10 @@ def process_device_filters(  # noqa: C901
         job.logger.warning("Job was stopped before VC pre-fetch")
         return _empty_return(return_cache_status)
 
+    if clear_cache and libre_devices:
+        # The DeviceType fallback reads the chassis inventory again, as the VC prefetch reads the stacks again.
+        cache.delete_many([get_chassis_inventory_cache_key(d["device_id"], api.server_key) for d in libre_devices])
+
     # Pre-warm VC cache if needed
     if vc_detection_enabled and libre_devices:
         device_ids = [d["device_id"] for d in libre_devices]
@@ -1449,10 +909,11 @@ def process_device_filters(  # noqa: C901
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
-    serial_lookup = DeviceSerialLookup()
-    serial_key_for = serial_lookup.key_for
-    batch_serial_lookup = serial_lookup.prefetch(normalize_serial(device.get("serial")) for device in libre_devices)
-    candidate_keys = functools.cache(candidate_vc_serial_keys)
+    serial_rules = serial_rules or SerialRules.load()
+    numbering_rules = load_numbering_rules()
+
+    serial_discoveries = search_serial_discoveries(libre_devices, serial_rules)
+
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
 
@@ -1470,82 +931,25 @@ def process_device_filters(  # noqa: C901
             job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
             return _empty_return(return_cache_status)
 
-        # Drop any cached validation/meta keys before recomputing
-        device.pop("_validation", None)
-
-        # Generate shared cache key for this validated device
         device_id = device["device_id"]
-        cache_key = get_validated_device_cache_key(
-            server_key=api.server_key,
-            filters=filters,
-            device_id=device_id,
-            vc_enabled=vc_detection_enabled,
-            use_sysname=use_sysname,
-            strip_domain=strip_domain,
-        )
-
-        # Check if we already have cached validation for this device
-        # (only if not forcing refresh)
-        if not clear_cache:
-            cached_device = cache.get(cache_key)
-            if cached_device:
-                # Use cached validation
-                device["_validation"] = cached_device["_validation"]
-
-                # Refresh existing_device from DB to avoid stale data
-                # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(
-                    device["_validation"],
-                    libre_device=device,
-                    server_key=api.server_key,
-                    serial_lookup=batch_serial_lookup,
-                )
-
-                # Apply exclude_existing filter if enabled
-                if exclude_existing:
-                    validation = device["_validation"]
-                    if validation["existing_device"]:
-                        continue
-
-                validated_devices.append(device)
-                continue
-
-        # Not in cache or forcing refresh - validate now
-        validation = validate_device_for_import(
+        validation = validate_search_row(
+            api,
             device,
-            api=api,
-            include_vc_detection=vc_detection_enabled,
-            force_vc_refresh=False,
-            server_key=api.server_key,
+            vc_detection_enabled=vc_detection_enabled,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
-            serial_key_for=serial_key_for,
-            serial_lookup=batch_serial_lookup,
-            candidate_keys=candidate_keys,
+            serial_rules=serial_rules,
+            serial_discoveries=serial_discoveries,
+            numbering_rules=numbering_rules,
         )
+        # The dialog and the completed-job page read this raw row, so they describe the row that the table shows.
+        cache.set(get_import_device_cache_key(device_id, api.server_key), dict(device), timeout=api.cache_timeout)
 
-        # Set VC detection metadata
-        if not vc_detection_enabled:
-            validation["virtual_chassis"] = empty_virtual_chassis_data()
-
-        # Apply exclude_existing filter if enabled
         if exclude_existing and validation["existing_device"]:
             continue
 
         device["_validation"] = validation
         validated_devices.append(device)
-
-        # Cache with TWO keys for different purposes:
-        # 1. Complex key (with filter context) - for full validated device with all metadata
-        cache.set(cache_key, device, timeout=api.cache_timeout)
-
-        # 2. Simple key (device ID only) - for quick device data lookup by role/rack updates
-        #    This avoids redundant API calls when user interacts with dropdowns
-        simple_cache_key = get_import_device_cache_key(device_id, api.server_key)
-        # Cache just the raw device data (not the full validation result)
-        # This is what get_validated_device_with_selections() expects
-        device_data_only = {k: v for k, v in device.items() if k != "_validation"}
-        cache.set(simple_cache_key, device_data_only, timeout=api.cache_timeout)
 
     # Store cache metadata (timestamp) for all filter operations
     # This enables countdown display regardless of background job vs synchronous execution
@@ -1557,7 +961,8 @@ def process_device_filters(  # noqa: C901
         # Check if metadata already exists to preserve original timestamp
         # BUT: if clear_cache was requested or data came fresh from LibreNMS, update it
         existing_metadata = cache.get(cache_metadata_key)
-        should_update = clear_cache or not from_cache
+        # Metadata of other serial rules describes stack detections that these rules no longer read.
+        should_update = clear_cache or not from_cache or not search_metadata_is_current(existing_metadata, serial_rules)
 
         if existing_metadata and not should_update:
             # Metadata exists and cache wasn't cleared, keep using it (preserves original cache time)
@@ -1573,6 +978,7 @@ def process_device_filters(  # noqa: C901
                 "use_sysname": use_sysname,
                 "strip_domain": strip_domain,
                 "device_count": len(validated_devices),
+                "serial_rules": serial_rules_version(serial_rules),
             }
             cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
 

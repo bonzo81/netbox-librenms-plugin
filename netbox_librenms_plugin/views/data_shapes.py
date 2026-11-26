@@ -9,6 +9,7 @@ near zero. Read-only: it hits LibreNMS but mutates nothing in NetBox.
 
 import json
 import secrets
+from itertools import chain
 from urllib.parse import urlencode
 
 from dcim.models import Device
@@ -16,15 +17,21 @@ from django.shortcuts import render
 from django.views import View
 
 from netbox_librenms_plugin.data_shapes import recordings_store
-from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii
+from netbox_librenms_plugin.data_shapes.anonymize import (
+    MalformedRecordingError,
+    anonymize_recording,
+    find_pii,
+    has_serial_input,
+)
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import (
     classify_novelty,
     compute_shape_signature,
-    vc_detecting_serial_key,
+    vc_detecting_context,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import candidate_vc_serial_keys, chassis_serial_key
+from netbox_librenms_plugin.models import RuleConfigurationError
+from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
@@ -90,14 +97,26 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             # WITHIN one recording (that is what keeps cross-references matching), and the
             # contributor publishes this file: with the empty default salt, a sha256 of a
             # low-entropy value like a hostname is recoverable by hashing dictionary candidates.
-            serial_key = vc_detecting_serial_key(
-                recording, (chassis_serial_key(sync_device), *candidate_vc_serial_keys())
-            )
-            anonymized = anonymize_recording(recording, salt=secrets.token_hex(16), serial_key=serial_key)
-        except RuntimeError as exc:
+            if has_serial_input(recording):
+                serial_rules = SerialRules.load()
+                serial_context = vc_detecting_context(
+                    recording, chain((serial_rules.for_device(sync_device),), serial_rules.iter_candidates())
+                )
+            else:
+                # No serial reaches a rule, so the serial rules and the chassis link cannot change the recording.
+                serial_context = plain_context()
+            if serial_context.unavailable:
+                # The reason holds no chassis identity, so every viewer of the device can see it.
+                return self._error(request, device, f"Capture failed: {serial_context.unavailable}")
+            anonymized = anonymize_recording(recording, salt=secrets.token_hex(16), serial_context=serial_context)
+        except RuleConfigurationError as exc:
+            # A broken serial rule that the capture needs: name it only to a viewer of the rule.
+            return self._error(request, device, f"Capture failed: {exc.shown_to(request.user).public_message}")
+        except (RuntimeError, MalformedRecordingError) as exc:
             # capture raises on an incomplete capture (a transport failure, or an error status on a
             # required structural route such as a stale librenms_id), and anonymization raises when
-            # a device carries more distinct addresses than the documentation ranges hold. An
+            # a device carries more distinct addresses than the documentation ranges hold, or a
+            # recorded value it cannot read, such as a malformed database ID. An
             # unhandled raise would 500 — and htmx doesn't swap non-2xx responses, so the Capture
             # button would just appear dead. Render the error panel built for this.
             return self._error(request, device, f"Capture failed: {exc}")

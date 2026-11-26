@@ -18,6 +18,7 @@ from netbox_librenms_plugin.interface_relationships import (
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, GrantRefusal, GrantRefused, read_module_grant
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -110,7 +111,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return the appropriate interface table, selecting VC variant if needed."""
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(
                 data,
@@ -129,7 +130,6 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 server_key=server_key,
                 user=self.request.user,
             )
-        table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
 
 
@@ -290,6 +290,8 @@ class SingleInterfaceVerifyView(
                 table.migrated_to_marker = bool(
                     build_migrated_context(origin_device, server_key).get("migrated_to_marker")
                 )
+                # The verify request carries the page query, so a repainted Rebind posts back to the same view.
+                table.sync_query = SyncQuery.from_request(request)
                 raw_port_id = port_data.get("port_id")
                 port_id = normalize_librenms_port_id(raw_port_id)
                 if port_id is not None:
@@ -927,5 +929,4 @@ class DeviceModuleTableView(BaseModuleTableView):
                 has_write_permission and user.has_perm("netbox_librenms_plugin.change_inventoryignorerule")
             ),
         )
-        table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
         return table

@@ -79,12 +79,15 @@ class TestModulesTabDegradesOnUnbuildableClient:
 @pytest.mark.django_db
 class TestInterfacesTabDegradesOnUnbuildableClient:
     def test_get_context_data_renders_with_none_key_not_500(self):
+        from django.contrib.auth.models import AnonymousUser
         from django.test import RequestFactory
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _make_device("degrade-if-dev")
         request = RequestFactory().get("/")
+        # Every sync request has a user; the tab builds its table from it, also to bind the filters.
+        request.user = AnonymousUser()
         view = DeviceInterfaceTableView()
         view.request = request
 

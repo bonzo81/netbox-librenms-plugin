@@ -34,10 +34,19 @@ OUT_OF_SCOPE_MERGE_MESSAGE = (
     "Ask an administrator to merge them before importing."
 )
 
+OUT_OF_SCOPE_OOB_TARGET_MESSAGE = (
+    "The NetBox device that would receive this OOB controller is outside your view scope, so no OOB action is offered."
+)
+
 _SERIAL_CONFLICT_HIDDEN = (
     "Serial conflict: incoming serial '{serial}' is already assigned to a NetBox device outside "
     "your view scope. Ask an administrator to resolve the duplicate serial."
 )
+_SERIAL_CONFLICT_AMBIGUOUS = (
+    "Serial conflict: incoming serial '{serial}' is already assigned to more than one NetBox device. "
+    "Resolve the duplicate serial first."
+)
+_SERIAL_CONFLICT_UNAVAILABLE = "Serial conflict: incoming serial '{serial}' cannot be matched. {reason}"
 _SERIAL_CONFLICT_VISIBLE = (
     "Serial conflict: incoming serial '{serial}' is already assigned to device '{name}' "
     "(ID: {pk}) in NetBox. Investigate which device should own this serial before {phase}."
@@ -129,6 +138,33 @@ def visible_object_label(obj, user) -> tuple[str, str] | None:
     return ("VM" if model_name == "virtualmachine" else "device", obj.name)
 
 
+def serial_conflict_text(conflict, serial: str, user) -> str:
+    """
+    Return the text that tells *user* why serial *serial* is not written.
+
+    Args:
+        conflict (Resolution): The Unique, Ambiguous or Unavailable outcome of an unrestricted lookup.
+        serial (str): The serial as the page shows it.
+        user (User): The viewer; only an object they may see is named.
+
+    Returns:
+        str: The refusal text.
+
+    """
+    from netbox_librenms_plugin.serial_identity import ResolutionKind, page_text
+
+    # The serial is LibreNMS text, and a UTF-8 page cannot encode an unpaired surrogate.
+    serial = page_text(serial)
+    if conflict.kind is ResolutionKind.UNAVAILABLE:
+        return f"Serial '{serial}' cannot be matched. {conflict.reason}"
+    if conflict.kind is ResolutionKind.AMBIGUOUS:
+        return f"Serial conflict: '{serial}' is already assigned to more than one device."
+    holder = conflict.object
+    if visible_object_label(holder, user) is None:
+        return f"Serial conflict: '{serial}' is already assigned to a device outside your view scope."
+    return f"Serial conflict: '{serial}' is already assigned to device '{holder.name}' (ID: {holder.pk})"
+
+
 def scope_validation_disclosures(validations, user) -> None:
     """
     Withhold identity across a batch of import rows, and block each row that loses its match.
@@ -179,6 +215,15 @@ def _referenced_objects(validation: dict):
     conflict = validation.get("serial_conflict")
     if isinstance(conflict, dict) and conflict.get("pk") is not None:
         yield "device", conflict["pk"]
+    target = _oob_target(validation)
+    if target is not None:
+        yield target._meta.model_name, target.pk
+
+
+def _oob_target(validation: dict):
+    """Return the OOB target of the row's attach offer: the Device that the offer names, or None."""
+    candidate = validation.get("oob_candidate")
+    return candidate.get("device") if isinstance(candidate, dict) else None
 
 
 def _scope_one(validation: dict, scope: ViewerScope) -> None:
@@ -192,6 +237,8 @@ def _scope_one(validation: dict, scope: ViewerScope) -> None:
         withheld.append(OUT_OF_SCOPE_MERGE_MESSAGE)
     if withheld:
         _block(validation, withheld)
+    else:
+        _scope_oob_target(validation, scope)
     # After the reset in _block, so a serial-conflict owner this viewer MAY see is still reported
     # even when the row's own match was withheld: they are different objects.
     _render_serial_conflict(validation, scope)
@@ -206,24 +253,32 @@ def _scope_existing_match(validation: dict, scope: ViewerScope) -> bool:
     # The serial conflict is a DIFFERENT object, whose visibility is decided on its own, so carry
     # it across the teardown below (which clears it along with the rest of the match state).
     conflict = validation.get("serial_conflict")
-    # The same teardown every branch that drops a match performs (``bulk_import``'s refresh
-    # branches). The role and cluster matter most here: the validator copies them OFF the matched
+    # The role and cluster matter most here: the validator copies them OFF the matched
     # object, and the modal falls back to printing validation["device_role"] exactly when
     # existing_device is absent, so leaving them would disclose the withheld object's role.
     clear_match_derived_action_fields(validation)
-    # The shared helper leaves match-type demotion and linkage to its callers. This teardown is
-    # terminal (no fresh lookup follows it, unlike bulk_import's refresh), so it demotes them here.
+    # The shared helper leaves match-type demotion and linkage to its callers. This teardown is terminal, so it demotes them here.
     validation["existing_match_type"] = None
     validation["existing_librenms_link"] = None
     validation["librenms_id_needs_migration"] = False
     validation["device_type_mismatch"] = False
     reset_device_role(validation)
     reset_cluster(validation)
-    # This teardown goes further than the refresh one, which keeps the row's mode: a VM-only
-    # Cluster row in the modal would tell the viewer that the withheld object is a VM.
+    # The row's mode goes too: a VM-only Cluster row in the modal would tell the viewer that the withheld object is a VM.
     validation["import_as_vm"] = False
     validation["serial_conflict"] = conflict
     return True
+
+
+def _scope_oob_target(validation: dict, scope: ViewerScope) -> None:
+    """Withdraw an attach offer whose OOB target the viewer may not see; the controller flag stays."""
+    target = _oob_target(validation)
+    if target is None or scope.can_see(target._meta.model_name, target.pk):
+        return
+    validation["oob_candidate"] = None
+    if validation.get("serial_action") == "oob_candidate":
+        validation["serial_action"] = None
+    _append_once(validation, "warnings", OUT_OF_SCOPE_OOB_TARGET_MESSAGE)
 
 
 def _scope_merge_candidates(validation: dict, scope: ViewerScope) -> bool:
@@ -253,9 +308,16 @@ def _render_serial_conflict(validation: dict, scope: ViewerScope) -> None:
     conflict = validation.get("serial_conflict")
     if not isinstance(conflict, dict):
         return
-    serial = conflict.get("serial") or ""
+    from netbox_librenms_plugin.serial_identity import page_text
+
+    # The serial is LibreNMS text, and a UTF-8 page cannot encode an unpaired surrogate.
+    serial = page_text(conflict.get("serial"))
     pk = conflict.get("pk")
-    if not scope.can_see("device", pk):
+    if conflict.get("unavailable"):
+        message = _SERIAL_CONFLICT_UNAVAILABLE.format(serial=serial, reason=conflict["unavailable"])
+    elif conflict.get("ambiguous"):
+        message = _SERIAL_CONFLICT_AMBIGUOUS.format(serial=serial)
+    elif not scope.can_see("device", pk):
         message = _SERIAL_CONFLICT_HIDDEN.format(serial=serial)
     else:
         message = _SERIAL_CONFLICT_VISIBLE.format(

@@ -133,6 +133,26 @@ def render_module_tab(device, *, user=None, server_key="default"):
     return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
 
 
+class _SyncTabParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.containers = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "div" and attrs.get("id") == "librenms-sync-tabs":
+            self.containers.append(attrs)
+
+
+def sync_tab_attributes(html):
+    """Return the attributes of the one rendered sync container."""
+    parser = _SyncTabParser()
+    parser.feed(str(html))
+    parser.close()
+    assert len(parser.containers) == 1
+    return parser.containers[0]
+
+
 class _TitledIconParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -180,7 +200,7 @@ class _ModuleTabParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if tag == "form":
-            self._open_forms.append({"action": attrs.get("action", ""), "fields": {}})
+            self._open_forms.append({"action": attrs.get("action", ""), "fields": {}, "selects": {}})
             self.forms.append(self._open_forms[-1])
         elif tag == "table" and attrs.get("id") == "librenms-module-table":
             self.table_attrs = attrs
@@ -220,10 +240,16 @@ class _ModuleTabParser(HTMLParser):
             self.selects.append(attrs)
         if self._open_forms and attrs.get("name"):
             self._select = {"fields": self._open_forms[-1]["fields"], "name": attrs["name"], "state": None}
+            # Each named select records whether it is enabled and which option values it enables.
+            self._select["shown"] = self._open_forms[-1]["selects"][attrs["name"]] = {
+                "enabled": "disabled" not in attrs,
+                "options": {},
+            }
 
     def _option(self, attrs):
         # A browser submits the first selected option, or the first option when none is selected.
         select = self._select
+        select["shown"]["options"][attrs.get("value", "")] = "disabled" not in attrs
         state = "selected" if "selected" in attrs else "first"
         if select["state"] is None or (state == "selected" and select["state"] == "first"):
             select["fields"][select["name"]] = attrs.get("value", "")
@@ -267,6 +293,16 @@ def rendered_preview_query(device, ent_index, *, user=None, server_key="default"
 
     url = rendered_preview_url(render_module_tab(device, user=user, server_key=server_key), ent_index)
     return dict(parse_qsl(urlsplit(url).query))
+
+
+def move_offer_fields(occupant, source, target_bay_id=None):
+    """Return the field that a Move offer signs: the *source* module, the target bay and the *occupant* tree."""
+    from netbox_librenms_plugin.serial_identity import module_subtree_serials
+    from netbox_librenms_plugin.views.base.modules_view import move_offer_token
+
+    tree = module_subtree_serials(occupant.pk) if occupant is not None else ()
+    bay_id = target_bay_id if occupant is None else occupant.module_bay_id
+    return {"move_token": str(move_offer_token(source, bay_id, tree))}
 
 
 def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
@@ -356,13 +392,16 @@ def missing_pk(model, offset=1000):
 
 def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
-    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload, module_snapshot_serial_context
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     seed_mapping(device, server_key, own=librenms_id)
     # cf is a cached_property over the applicable custom fields: drop it so the next read sees the write.
     device.__dict__.pop("cf", None)
-    return module_inventory_cache_payload(inventory, librenms_id, None)
+    # Read the chassis from the database, as the production writer does, not from cached relations.
+    serial_context = module_snapshot_serial_context(load_inventory_policy(device.pk), device)
+    return module_inventory_cache_payload(inventory, librenms_id, None, serial_context=serial_context)
 
 
 def assert_locked_before_update(captured, table):

@@ -20,6 +20,7 @@ from netbox_librenms_plugin.module_grants import (
     installed_module_target,
     sign_module_grant,
 )
+from netbox_librenms_plugin.serial_identity import page_text
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     coerce_positive_int,
@@ -35,6 +36,43 @@ TREE_PREFIX = "└─\u00a0"
 
 # Only an install keeps its visible label; carrier installs differ from each other only by that label.
 LABELLED_MODULE_ACTIONS = frozenset({"install", "install-carrier"})
+
+UNATTRIBUTED_ROW_REASON = (
+    "The plugin cannot tell which stack member reported this part, so it offers no write action. "
+    "Select the member to show its actions."
+)
+# The data-action of each control that writes the row's modules or interfaces, or an inventory rule for the row.
+MODULE_WRITE_ACTIONS = frozenset(
+    {
+        "install",
+        "install-branch",
+        "install-carrier",
+        "update-serial",
+        "update-interface",
+        "review-interface-types",
+        "replace",
+        "move",
+        "mark-built-in",
+    }
+)
+# The controls that write a bay template, a bay mapping or a carrier rule from the page device's bays or types.
+PAGE_DEVICE_WRITE_ACTIONS = frozenset(
+    {"add-bay-mapping", "map-existing-bay", "add-carrier-rule", "fix-model", "fix-device-type"}
+)
+# The controls that no row flag withholds: rules and types keyed by LibreNMS text, and the read-only VC report.
+UNGATED_ACTIONS = frozenset({"add-type-mapping", "add-module-type", "report-vc-issue"})
+# The one rule of the controls that a row flag withholds.
+ROW_FLAG_WITHHELD_ACTIONS = {
+    # The row can belong to any member, so no control may write it onto the page device.
+    "member_unattributed": MODULE_WRITE_ACTIONS | PAGE_DEVICE_WRITE_ACTIONS,
+    # Nothing links the optic to an entity or the occupant, so no control may write a module for it.
+    "unlinked_optic": MODULE_WRITE_ACTIONS,
+}
+
+
+def withheld_actions(record) -> frozenset:
+    """Return the data-action of each control that the row flags of *record* withhold."""
+    return frozenset().union(*(actions for flag, actions in ROW_FLAG_WITHHELD_ACTIONS.items() if record.get(flag)))
 
 
 def module_action_control(tag, action, css, attrs, title, icon, label):
@@ -187,7 +225,6 @@ class LibreNMSModuleTable(tables.Table):
         if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
         self.tab = "modules"
-        self.htmx_url = None
         self.prefix = "modules_"
 
     @property
@@ -320,8 +357,24 @@ class LibreNMSModuleTable(tables.Table):
         return format_html("{}", value)
 
     def render_serial(self, value, record):
-        """Render serial number."""
-        return format_html("{}", value or "-")
+        """Render the LibreNMS serial, mark a stored form that differs, and say why a serial update is not offered."""
+        value = page_text(value) or "-"
+        html = format_html("{}", value)
+        if record.get("serial_stored_form_differs"):
+            # The bay loader does not apply the viewer's Module scope, so the badge names no stored serial.
+            html = format_html(
+                '{} <span class="badge text-bg-info" title="NetBox stores another form of this serial, which names '
+                'the same hardware. Update the serial to store the LibreNMS text.">stored form differs</span>',
+                value,
+            )
+        if refusal := record.get("serial_fit_refusal"):
+            # The minimum width keeps a narrow column from wrapping the reason one word per line.
+            html = format_html(
+                '{} <span class="d-inline-block text-muted small" style="min-width: 10rem" data-serial-fit-refusal>{}</span>',
+                html,
+                refusal,
+            )
+        return html
 
     def render_description(self, value, record):
         """Render description, truncated for display."""
@@ -569,8 +622,9 @@ class LibreNMSModuleTable(tables.Table):
         else:
             status_html = format_html('<span class="badge {}">{}</span>', badge_class, display_text)
 
+        withheld = withheld_actions(record)
         # "Fix Model" badge on the parent row when its installed module type is missing bay templates.
-        if record.get("model_incomplete"):
+        if record.get("model_incomplete") and "fix-model" not in withheld:
             url = record.get("model_incomplete_url", "")
             name = record.get("model_incomplete_name", "module type")
             target_pk = record.get("model_incomplete_target_pk")
@@ -584,11 +638,12 @@ class LibreNMSModuleTable(tables.Table):
                 suggestion=suggestion,
                 fallback_url=url,
                 label="Fix Model",
+                action="fix-model",
             )
             return status_html + fix_html + possible_carrier_html + interface_type_html
 
         # "Fix Device Type" badge when the device type is missing bay templates for this component.
-        if record.get("device_type_incomplete"):
+        if record.get("device_type_incomplete") and "fix-device-type" not in withheld:
             url = record.get("device_type_incomplete_url", "")
             name = record.get("device_type_incomplete_name", "device type")
             target_pk = record.get("device_type_incomplete_target_pk")
@@ -602,13 +657,14 @@ class LibreNMSModuleTable(tables.Table):
                 suggestion=suggestion,
                 fallback_url=url,
                 label="Fix Device Type",
+                action="fix-device-type",
             )
             return status_html + fix_html + possible_carrier_html + interface_type_html
 
         return status_html + possible_carrier_html + interface_type_html
 
     def _render_fix_bay_template_badge(
-        self, *, title, target_kind, target_pk, target_label, suggestion, fallback_url, label
+        self, *, title, target_kind, target_pk, target_label, suggestion, fallback_url, label, action
     ):
         """
         Render a "Fix Model" / "Fix Device Type" badge.
@@ -632,6 +688,7 @@ class LibreNMSModuleTable(tables.Table):
             suggestion (dict): The LibreNMS-derived bay template fields.
             fallback_url (str): The URL for the linked fallback, or an empty string when it is unavailable.
             label (str): The text shown on the badge.
+            action (str): The badge's data-action, one of :data:`PAGE_DEVICE_WRITE_ACTIONS`.
 
         Returns:
             SafeString: The HTMX button, empty safe string, linked fallback, or non-interactive fallback markup.
@@ -657,12 +714,13 @@ class LibreNMSModuleTable(tables.Table):
                 }
             )
             return format_html(
-                ' <button type="button" class="badge bg-warning text-dark border-0"'
+                ' <button type="button" class="badge bg-warning text-dark border-0" data-action="{}"'
                 ' title="{}"'
                 ' hx-get="{}?{}"'
                 ' hx-target="#htmx-modal-content"'
                 ' hx-swap="innerHTML">'
                 '<i class="mdi mdi-wrench-outline"></i> {}</button>',
+                action,
                 title,
                 modal_url,
                 params,
@@ -677,14 +735,17 @@ class LibreNMSModuleTable(tables.Table):
             return mark_safe("")
         if fallback_url:
             return format_html(
-                ' <a href="{}" class="badge bg-warning text-dark" title="{}">'
+                ' <a href="{}" class="badge bg-warning text-dark" data-action="{}" title="{}">'
                 '<i class="mdi mdi-wrench-outline"></i> {}</a>',
                 fallback_url,
+                action,
                 title,
                 label,
             )
         return format_html(
-            ' <span class="badge bg-warning text-dark" title="{}"><i class="mdi mdi-wrench-outline"></i> {}</span>',
+            ' <span class="badge bg-warning text-dark" data-action="{}" title="{}">'
+            '<i class="mdi mdi-wrench-outline"></i> {}</span>',
+            action,
             title,
             label,
         )
@@ -703,13 +764,24 @@ class LibreNMSModuleTable(tables.Table):
         # A row on a member the user may not view names none of its objects, so it offers no action.
         if record.get("member_withheld"):
             return ""
-
         buttons = []
+        withheld = withheld_actions(record)
+
+        def offered(action):
+            return action not in withheld
+
+        if record.get("member_unattributed"):
+            buttons.append(
+                format_html(
+                    '<span class="d-inline-block text-muted small" style="min-width: 12rem" data-member-unattributed>{}</span>',
+                    UNATTRIBUTED_ROW_REASON,
+                )
+            )
 
         # Single install button (requires add permission). The view resolves the row by index, so a
         # row without one can only submit a form the view refuses; the carrier action below has no
         # inventory row of its own and stays indexless.
-        if self.can_add_module and record.get("can_install") and self.grant_index(record):
+        if offered("install") and self.can_add_module and record.get("can_install") and self.grant_index(record):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             inventory_binding = self.grant(
                 ACTION_INSTALL_MODULE,
@@ -757,7 +829,8 @@ class LibreNMSModuleTable(tables.Table):
 
         # Install branch button for parents with installable children (requires add)
         if (
-            self.can_add_module
+            offered("install-branch")
+            and self.can_add_module
             and record.get("has_installable_children")
             and record.get("branch_rows")
             and self.grant_index(record)
@@ -813,6 +886,7 @@ class LibreNMSModuleTable(tables.Table):
             self.can_change_module
             and record.get("can_update_serial")
             and record.get("installed_module_id")
+            and offered("update-serial")
             and self.grant_index(record)
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
@@ -859,6 +933,7 @@ class LibreNMSModuleTable(tables.Table):
             getattr(self, "can_change_interface", False)
             and record.get("can_update_interface_binding")
             and record.get("installed_module_id")
+            and offered("update-interface")
             and self.grant_index(record)
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
@@ -905,6 +980,7 @@ class LibreNMSModuleTable(tables.Table):
             getattr(self, "can_review_interface_types", False)
             and record.get("interface_type_mismatch_count")
             and record.get("installed_module_id")
+            and offered("review-interface-types")
         ):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_interface_type_preview",
@@ -941,6 +1017,7 @@ class LibreNMSModuleTable(tables.Table):
             and self.can_delete_module
             and record.get("can_replace")
             and record.get("installed_module_id")
+            and offered("replace")
             and self.grant_index(record)
         ):
             preview_url = reverse(
@@ -984,6 +1061,7 @@ class LibreNMSModuleTable(tables.Table):
             and self.can_change_module
             and self.can_delete_module
             and record.get("can_move_from")
+            and offered("move")
             and record.get("serial_conflict_module")
             and record.get("serial_conflict_visible")
             and record.get("module_bay_id")
@@ -997,13 +1075,15 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="conflict_module_id" value="{}">'
-                    '<input type="hidden" name="target_bay_id" value="{}">{}</form>',
+                    '<input type="hidden" name="target_bay_id" value="{}">'
+                    '<input type="hidden" name="move_token" value="{}">{}</form>',
                     move_url,
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     conflict_module.pk,
                     record["module_bay_id"],
+                    record.get("move_token", ""),
                     module_action_control(
                         "button",
                         "move",
@@ -1019,7 +1099,8 @@ class LibreNMSModuleTable(tables.Table):
         # "Install Carrier" buttons for No Bay rows where one or more
         # CarrierAutoInstallRule rows match. One button per (rule, empty bay)
         # candidate. Suggest-only — the user clicks to install.
-        if self.can_add_module and record.get("carrier_install_options"):
+        # The carrier form posts no inventory row, so the rule is the only gate of a flagged row.
+        if self.can_add_module and record.get("carrier_install_options") and offered("install-carrier"):
             install_url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             for opt in record["carrier_install_options"]:
                 buttons.append(
@@ -1065,6 +1146,7 @@ class LibreNMSModuleTable(tables.Table):
             and record.get("holder_hint_present")
             and not record.get("carrier_install_options")
             and getattr(self, "can_add_carrier_rule", False)
+            and offered("add-carrier-rule")
         ):
             base_url = reverse("plugins:netbox_librenms_plugin:carrierautoinstallrule_add")
             return_url = getattr(self, "return_url", "") or ""
@@ -1108,6 +1190,7 @@ class LibreNMSModuleTable(tables.Table):
             record.get("status") == "No Bay"
             and record.get("model_suggestion")
             and getattr(self, "can_add_module_bay_mapping", False)
+            and offered("add-bay-mapping")
         ):
             sug = record["model_suggestion"]
             base_url = reverse("plugins:netbox_librenms_plugin:modulebaymapping_add")
@@ -1148,6 +1231,7 @@ class LibreNMSModuleTable(tables.Table):
             and record.get("item_class") != "port"
             and record.get("mapping_source_name")
             and getattr(self, "can_map_existing_bay", False)
+            and offered("map-existing-bay")
         ):
             mapping_url = reverse(
                 "plugins:netbox_librenms_plugin:add_bay_template",
@@ -1244,7 +1328,7 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        if built_in_control := self._built_in_control(record):
+        if offered("mark-built-in") and (built_in_control := self._built_in_control(record)):
             buttons.append(built_in_control)
 
         # Report-VC-normalization-issue button: appears only on installed-module rows when
@@ -1418,9 +1502,11 @@ class VCModuleTable(LibreNMSModuleTable):
             else ""
         )
 
-        options = render_vc_member_options(self._vc_members, selected_device_id)
+        # A row that no member reported names no member, so a pick of any member, the page device too, runs the verify.
+        shown_member_id = None if record.get("member_unattributed") else selected_device_id
+        options = render_vc_member_options(self._vc_members, shown_member_id)
         # A row on a member the user may not view names no member.
-        if not any(str(member.pk) == str(selected_device_id) for member in self._vc_members):
+        if not any(str(member.pk) == str(shown_member_id) for member in self._vc_members):
             options = format_html('<option value="" selected>Select a member</option>{}', options)
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" '

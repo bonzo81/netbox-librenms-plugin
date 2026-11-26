@@ -100,8 +100,8 @@ remove the guard, rather than fabricating the state with a mock.
   `netbox_librenms_plugin.import_utils.process_device_filters`), not the consuming module.
 - Patch `cache` where imported: `netbox_librenms_plugin.views.imports.list.cache`, not
   `django.core.cache.cache`.
-- Cache key tests must derive the key from `get_validated_device_cache_key` in `import_utils.py`;
-  never hardcode a key format like `job_123_device_1`.
+- Cache key tests must derive the key from the helpers in `import_utils/cache.py` (for example
+  `get_import_device_cache_key`); never hardcode a key format like `job_123_device_1`.
 
 ## Test File Naming
 

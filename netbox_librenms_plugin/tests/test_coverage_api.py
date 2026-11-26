@@ -1323,22 +1323,26 @@ class TestGetDeviceInfoResponseFormats:
     """get_device_info handles unusual real response shapes."""
 
     def test_null_devices_returns_false(self, settings, librenms_server):
-        """A null devices field returns an absent result."""
+        """A null devices field says nothing about the device, so the result is unavailable, not absent."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
         librenms_server.register("/api/v0/devices/1", {"devices": None}, method="GET")
 
         success, result = api_for(settings, librenms_server.url).get_device_info(1)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
 
     def test_empty_devices_list_returns_false(self, settings, librenms_server):
-        """An empty devices list returns an absent result."""
+        """An empty devices list on a 200 confirms nothing: a 404 is the only absent answer."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
         librenms_server.register("/api/v0/devices/1", {"devices": []}, method="GET")
 
         success, result = api_for(settings, librenms_server.url).get_device_info(1)
 
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
 
     def test_non_200_returns_false(self, settings, librenms_server):
         """A 404 response returns an absent result."""

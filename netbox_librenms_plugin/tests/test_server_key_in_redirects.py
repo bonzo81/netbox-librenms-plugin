@@ -54,6 +54,7 @@ def test_ip_redirect_url_propagates_server_key():
     device = make_device("redir-ip")
     view = object.__new__(SyncIPAddressesView)
     view._post_server_key = "prod"  # the POST-resolved server the user acted on
+    view.request = RequestFactory().post("/")
 
     url = view.get_ip_tab_url(device)
 

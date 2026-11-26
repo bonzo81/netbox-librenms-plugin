@@ -26,6 +26,7 @@ from netbox_librenms_plugin.filters import (
     PlatformMappingFilterSet,
     PortStackLagPatternFilterSet,
     SerialSensorTypePatternFilterSet,
+    VCMemberNumberingRuleFilterSet,
 )
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 from netbox_librenms_plugin.models import (
@@ -41,6 +42,7 @@ from netbox_librenms_plugin.models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
 
 from .serializers import (
@@ -58,6 +60,7 @@ from .serializers import (
     PortStackLagPatternSerializer,
     SerialSensorTypePatternSerializer,
     SyncJobStatusSerializer,
+    VCMemberNumberingRuleSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,6 +180,16 @@ class CarrierAutoInstallRuleViewSet(NetBoxModelViewSet):
 
     queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
     serializer_class = CarrierAutoInstallRuleSerializer
+
+
+class VCMemberNumberingRuleViewSet(NetBoxModelViewSet):
+    """API viewset for VCMemberNumberingRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = VCMemberNumberingRuleFilterSet
+
+    queryset = VCMemberNumberingRule.objects.select_related("manufacturer")
+    serializer_class = VCMemberNumberingRuleSerializer
 
 
 class PortStackLagPatternViewSet(NetBoxModelViewSet):

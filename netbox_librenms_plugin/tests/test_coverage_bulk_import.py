@@ -7,9 +7,8 @@ from netbox_librenms_plugin.tests.conftest import (
     delete_keeping_pk,
     make_device,
     make_superuser,
-    make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 
 
 class TestStackKey:
@@ -17,19 +16,23 @@ class TestStackKey:
 
     def test_member_serials_key_the_stack(self):
         from netbox_librenms_plugin.import_utils.bulk_import import stack_key
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         members = [{"serial": "FOC2"}, {"serial": "FOC1"}]
+        context = plain_context()
 
-        assert (
-            stack_key({"members": members}, 7) == stack_key({"members": members[::-1]}, 8) == "librenms-stack-FOC1,FOC2"
-        )
+        assert stack_key({"members": members}, 7, context) == stack_key({"members": members[::-1]}, 8, context)
+        assert stack_key({"members": members}, 7, context) != stack_key({"members": members[:1]}, 7, context)
+        other = [{"serial": "FOC3"}, {"serial": "FOC4"}]
+        assert stack_key({"members": members}, 7, context) != stack_key({"members": other}, 7, context)
 
     def test_stacks_without_member_serials_get_distinct_keys(self):
         """A shared key would let the first such stack suppress chassis creation for every other one."""
         from netbox_librenms_plugin.import_utils.bulk_import import stack_key
+        from netbox_librenms_plugin.serial_identity import plain_context
 
-        first = stack_key({"members": [{"serial": "-"}]}, 7)
-        second = stack_key({"members": [{"serial": "-"}]}, 8)
+        first = stack_key({"members": [{"serial": "-"}]}, 7, plain_context())
+        second = stack_key({"members": [{"serial": "-"}]}, 8, plain_context())
 
         assert first != second
 
@@ -72,46 +75,11 @@ def _register_device(live_librenms, row):
     live_librenms.server.inventory_response(device_id, [])
 
 
-def _validation(existing=None, *, import_as_vm=False):
-    return {
-        "resolved_name": getattr(existing, "name", "new-device"),
-        "existing_device": existing,
-        "existing_match_type": "hostname" if existing else None,
-        "existing_librenms_link": None,
-        "import_as_vm": import_as_vm,
-        "is_ready": existing is None,
-        "can_import": existing is None,
-        "status": "active",
-        "issues": [],
-        "serial_action": None,
-        "oob_candidate": None,
-        "merge_candidates": [],
-        "promote_to_host_candidate": None,
-        "librenms_id_needs_migration": False,
-        "device_type_mismatch": False,
-        "site": {"found": True},
-        "device_type": {"found": True},
-        "device_role": {"found": True, "role": getattr(existing, "role", None), "available_roles": []},
-        "platform": {"found": False, "platform": None},
-        "cluster": {
-            "found": bool(getattr(existing, "cluster_id", None)),
-            "cluster": getattr(existing, "cluster", None),
-            "available_clusters": [],
-        },
-        "vm_placement": {
-            "method": "cluster" if getattr(existing, "cluster_id", None) else "site",
-            "found": True,
-            "host_device": None,
-        },
-        "virtual_chassis": {"is_stack": False, "members": []},
-    }
-
-
 class TestBulkPrecheckDecision:
     def test_clean_batch_keeps_every_device_and_vm(self):
         from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
 
-        outcome = classify_bulk_precheck([], [], [1, 2], {3: {"cluster_id": 9}})
+        outcome = classify_bulk_precheck([], {}, [1, 2], {3: {"cluster_id": 9}})
 
         assert outcome.blocked is False
         assert outcome.importable_device_ids == [1, 2]
@@ -120,18 +88,34 @@ class TestBulkPrecheckDecision:
         assert outcome.block_message == ""
 
     def test_unresolved_rows_are_skipped_without_blocking_the_rest(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            NETBOX_SERIAL_UNVERIFIED,
+            classify_bulk_precheck,
+        )
 
-        outcome = classify_bulk_precheck([], [2, 4], [1, 2, 3], {4: {}, 5: {}})
+        unresolved = {2: LIBRENMS_ROW_UNREADABLE, 4: NETBOX_SERIAL_UNVERIFIED}
+        outcome = classify_bulk_precheck([], unresolved, [1, 2, 3], {4: {}, 5: {}})
 
         assert outcome.blocked is False
         assert outcome.skipped_ids == [2, 4]
         assert outcome.importable_device_ids == [1, 3]
         assert outcome.importable_vm_imports == {5: {}}
-        assert "id(s): 2, 4" in outcome.skip_message
+        assert f"(id(s): 2): {LIBRENMS_ROW_UNREADABLE}," in outcome.skip_message
+        assert f"(id(s): 4): {NETBOX_SERIAL_UNVERIFIED}," in outcome.skip_message
+        assert "Retry rows with unreadable LibreNMS data individually." in outcome.skip_message
+
+    def test_only_unverified_serial_rows_get_no_retry_hint(self):
+        from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_SERIAL_UNVERIFIED, classify_bulk_precheck
+
+        outcome = classify_bulk_precheck([], {4: NETBOX_SERIAL_UNVERIFIED}, [1, 3], {})
+
+        assert outcome.skipped_ids == [4]
+        assert f"(id(s): 4): {NETBOX_SERIAL_UNVERIFIED}," in outcome.skip_message
+        assert "Retry rows" not in outcome.skip_message
 
     def test_collision_blocks_the_whole_batch_and_names_visible_targets(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck
+        from netbox_librenms_plugin.import_utils.bulk_import import LIBRENMS_ROW_UNREADABLE, classify_bulk_precheck
 
         collisions = [
             {
@@ -141,7 +125,7 @@ class TestBulkPrecheckDecision:
             }
         ]
 
-        outcome = classify_bulk_precheck(collisions, [3], [1, 2, 3], {})
+        outcome = classify_bulk_precheck(collisions, {3: LIBRENMS_ROW_UNREADABLE}, [1, 2, 3], {})
 
         assert outcome.blocked is True
         assert outcome.importable_device_ids == [1, 2]
@@ -153,7 +137,7 @@ class TestBulkPrecheckDecision:
 
         outcome = classify_bulk_precheck(
             [{"nb_device_pk": None, "target_visible": False, "librenms_devices": []}],
-            [],
+            {},
             [1],
             {},
         )
@@ -180,7 +164,7 @@ class TestCollisionDetection:
             libre_devices_cache=shared_cache,
         )
 
-        assert unresolved == []
+        assert unresolved == {}
         assert len(collisions) == 1
         assert collisions[0]["nb_device_pk"] == target.pk
         assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {41, 42}
@@ -207,18 +191,42 @@ class TestCollisionDetection:
         collisions, unresolved = detect_collisions_for_device_ids([51, 52], live_librenms.api)
 
         assert collisions == []
-        assert unresolved == []
+        assert unresolved == {}
+
+    def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(self, live_librenms):
+        """The legacy ID names the Device, so another maker's broken rule must not drop the row from the grouping."""
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
+
+        target = make_device("collision-legacy-target", serial="LEGACY-COLLIDE", librenms_cf=53)
+        _broken_serial_rule("collision-legacy")
+        legacy = _libre_device(53, "collision-legacy-other-name", serial="LEGACY-COLLIDE")
+        by_name = _libre_device(54, target.name)
+        _register_device(live_librenms, legacy)
+        _register_device(live_librenms, by_name)
+
+        collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
+
+        assert unresolved == {}
+        assert [collision["nb_device_pk"] for collision in collisions] == [target.pk]
+        assert {row["device_id"] for row in collisions[0]["librenms_rows"]} == {53, 54}
 
     def test_missing_live_device_is_unresolved(self, live_librenms):
-        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            detect_collisions_for_device_ids,
+        )
 
         collisions, unresolved = detect_collisions_for_device_ids([404], live_librenms.api)
 
         assert collisions == []
-        assert unresolved == [404]
+        assert unresolved == {404: LIBRENMS_ROW_UNREADABLE}
 
     def test_mis_keyed_cached_row_fails_closed_without_http(self, live_librenms):
-        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            detect_collisions_for_device_ids,
+        )
 
         collisions, unresolved = detect_collisions_for_device_ids(
             [61],
@@ -227,11 +235,14 @@ class TestCollisionDetection:
         )
 
         assert collisions == []
-        assert unresolved == [61]
+        assert unresolved == {61: LIBRENMS_ROW_UNREADABLE}
         assert live_librenms.server.requests == []
 
     def test_fetched_identity_mismatch_is_not_written_to_shared_cache(self, live_librenms):
-        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.import_utils.bulk_import import (
+            LIBRENMS_ROW_UNREADABLE,
+            detect_collisions_for_device_ids,
+        )
 
         live_librenms.server.register(
             "/api/v0/devices/71",
@@ -246,7 +257,7 @@ class TestCollisionDetection:
         )
 
         assert collisions == []
-        assert unresolved == [71]
+        assert unresolved == {71: LIBRENMS_ROW_UNREADABLE}
         assert shared_cache == {}
 
 
@@ -299,6 +310,45 @@ class TestBulkImportIntegration:
         assert imported.serial == "TEST-SERIAL-81"
         assert stored_mapping_for_test(imported)["default"] == 81
 
+    @pytest.mark.parametrize(
+        "serial", [True, ["SECOND-CARD"], "ABC\x00DEF", "ABC\ud800DEF"], ids=["boolean", "list", "nul", "surrogate"]
+    )
+    def test_the_create_stores_no_serial_that_is_not_text_or_a_number(self, live_librenms, serial):
+        """The manual mappings let the create run on its own; it checks the LibreNMS value, not the text of it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
+        from netbox_librenms_plugin.serial_identity import stored_form_refusal
+
+        prerequisites = self._prerequisites()
+        row = _libre_device(
+            86,
+            "bulk-malformed-serial",
+            hardware=prerequisites["hardware"],
+            location=prerequisites["location"],
+            serial=serial,
+        )
+        _register_device(live_librenms, row)
+
+        result = bulk_import_devices(
+            [86],
+            server_key="default",
+            manual_mappings_per_device={
+                86: {
+                    "site_id": prerequisites["site_id"],
+                    "device_type_id": prerequisites["device_type_id"],
+                    "device_role_id": prerequisites["device_role_id"],
+                }
+            },
+            libre_devices_cache={86: row},
+            user=make_superuser("bulk-malformed-serial-user"),
+        )
+
+        assert result["success"] == []
+        (failure,) = result["failed"]
+        assert stored_form_refusal(serial, Device) in failure["error"]
+        assert not Device.objects.filter(name="bulk-malformed-serial").exists()
+
     def test_a_later_import_row_sees_the_serial_created_earlier_in_its_batch(self, live_librenms):
         from dcim.models import Device
 
@@ -342,8 +392,9 @@ class TestBulkImportIntegration:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, DeviceSerialLookup
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
@@ -392,7 +443,7 @@ class TestBulkImportIntegration:
             return result, serial_reads
 
         with CaptureQueriesContext(connection) as key_queries:
-            DeviceSerialLookup().key_for(DeviceType.objects.get(pk=prerequisites["device_type_id"]).manufacturer)
+            SerialRules.load().candidates()
         one_key_read_count = len([q for q in key_queries if table in q["sql"] and "'serial'" in q["sql"]])
         assert one_key_read_count > 0
 
@@ -400,7 +451,7 @@ class TestBulkImportIntegration:
         assert len(first["failed"]) == 3
         assert all("dcim.add_virtualchassis" in row["error"] for row in first["failed"])
         assert len(reads) == one_key_read_count
-        rule.replacement = r"changed-\1"
+        rule.match_pattern = r"^SN:\s+(.+)$"
         rule.save()
 
         second, reads = run_batch()
@@ -447,149 +498,7 @@ class TestBulkImportIntegration:
         assert live_librenms.server.requests[0]["path"] == "/api/v0/devices/91"
 
 
-class TestRefreshLibreNMSLinkage:
-    def test_host_mapping_promotes_a_stale_hostname_match(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-host-link")
-        seed_stored_mapping(device, {"default": {"id": 101}}, save=True)
-        validation = _validation(device)
-
-        _refresh_librenms_linkage(validation, device, {"device_id": 101}, "default")
-
-        assert validation["existing_match_type"] == "librenms_id"
-        assert validation["existing_librenms_link"]["host_id"] == 101
-
-    def test_oob_mapping_is_classified_separately(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-oob-link")
-        seed_stored_mapping(device, {"default": {"id": 101, "oob": {"id": 102, "type": "controller"}}}, save=True)
-        validation = _validation(device)
-
-        _refresh_librenms_linkage(validation, device, {"device_id": 102}, "default")
-
-        assert validation["existing_match_type"] == "librenms_oob"
-        assert validation["existing_librenms_link"]["oob_id"] == 102
-
-    def test_repointed_mapping_neutralizes_a_stale_id_match(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-repointed-link")
-        seed_mapping(device, "default", own=103)
-        validation = _validation(device)
-        validation["existing_match_type"] = "librenms_id"
-
-        _refresh_librenms_linkage(validation, device, {"device_id": 104}, "default")
-
-        assert validation["existing_match_type"] is None
-
-    def test_missing_scanned_id_preserves_a_live_mapping(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
-
-        device = make_device("refresh-missing-scan-id")
-        seed_mapping(device, "default", own=105)
-        validation = _validation(device)
-        validation["existing_match_type"] = "librenms_id"
-
-        _refresh_librenms_linkage(validation, device, {}, "default")
-
-        assert validation["existing_match_type"] == "librenms_id"
-
-
-class TestRefreshExistingDevice:
-    def test_real_device_is_reloaded_and_stays_non_importable(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        device = make_device("refresh-existing")
-        validation = _validation(device)
-        device.serial = "UPDATED-SERIAL"
-        device.save(update_fields=["serial"])
-
-        _refresh_existing_device(validation, _libre_device(111, device.name), "default")
-
-        assert validation["existing_device"].serial == "UPDATED-SERIAL"
-        assert validation["can_import"] is False
-        assert validation["is_ready"] is False
-        assert validation["device_role"]["role"] == device.role
-
-    def test_deleted_device_clears_match_actions_and_reasserts_role_blocker(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        device = make_device("refresh-deleted")
-        validation = _validation(device)
-        validation.update(
-            {
-                "serial_action": "merge_netbox_devices",
-                "oob_candidate": device,
-                "merge_candidates": [device],
-                "promote_to_host": {"existing_device": device},
-            }
-        )
-        delete_keeping_pk(device)
-
-        _refresh_existing_device(validation, None, "default")
-
-        assert validation["existing_device"] is None
-        assert validation["existing_match_type"] is None
-        assert validation["serial_action"] is None
-        assert validation["merge_candidates"] is None
-        assert "promote_to_host" not in validation
-        assert validation["device_role"]["role"] is None
-        assert "Device role must be manually selected before import" in validation["issues"]
-        assert validation["can_import"] is False
-
-    def test_deleted_vm_clears_cluster_and_uses_matched_site_placement(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        vm = make_vm("refresh-deleted-vm")
-        validation = _validation(vm, import_as_vm=True)
-        delete_keeping_pk(vm)
-
-        _refresh_existing_device(validation, None, "default")
-
-        assert validation["existing_device"] is None
-        assert validation["cluster"]["cluster"] is None
-        assert validation["vm_placement"] == {"method": "site", "found": True, "host_device": None}
-        assert validation["issues"] == []
-        assert validation["can_import"] is True
-
-    def test_newly_imported_device_is_found_by_current_librenms_id(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
-
-        device = make_device("refresh-newly-imported")
-        seed_mapping(device, "default", own=121)
-        validation = _validation()
-
-        _refresh_existing_device(validation, _libre_device(121, "different-name"), "default")
-
-        assert validation["existing_device"] == device
-        assert validation["existing_match_type"] == "librenms_id"
-        assert validation["can_import"] is False
-
-
-class TestRefreshStateHelpers:
-    def test_clear_match_fields_removes_every_derived_action(self):
-        from netbox_librenms_plugin.import_utils.bulk_import import _clear_existing_match_derived_fields
-
-        validation = {
-            "serial_action": "merge_netbox_devices",
-            "oob_candidate": object(),
-            "merge_candidates": [object()],
-            "promote_to_host": object(),
-            "librenms_id_needs_migration": True,
-            "device_type_mismatch": True,
-        }
-
-        _clear_existing_match_derived_fields(validation)
-
-        assert validation["serial_action"] is None
-        assert validation["oob_candidate"] is None
-        assert validation["merge_candidates"] is None
-        assert "promote_to_host" not in validation
-        assert validation["librenms_id_needs_migration"] is False
-        assert validation["device_type_mismatch"] is False
-
+class TestValidationResetHelpers:
     def test_role_and_cluster_resets_preserve_available_choices(self):
         from netbox_librenms_plugin.import_validation_helpers import reset_cluster, reset_device_role
 
@@ -612,27 +521,6 @@ class TestRefreshStateHelpers:
             "available_clusters": ["cluster"],
         }
 
-    @pytest.mark.parametrize(
-        ("import_as_vm", "selection_key", "message"),
-        [
-            (False, "device_role", "Device role must be manually selected before import"),
-            (True, "vm_placement", "VM placement requires a matching site, selected cluster, or selected host device"),
-        ],
-    )
-    def test_new_import_blocker_matches_the_import_mode(self, import_as_vm, selection_key, message):
-        from netbox_librenms_plugin.import_utils.bulk_import import _reassert_new_import_blockers
-
-        validation = {
-            "import_as_vm": import_as_vm,
-            "issues": [],
-            selection_key: {"found": False},
-        }
-
-        _reassert_new_import_blockers(validation)
-        _reassert_new_import_blockers(validation)
-
-        assert validation["issues"] == [message]
-
 
 class TestProcessDeviceFilters:
     @pytest.mark.parametrize("unmatched_count", [2, 8])
@@ -643,6 +531,8 @@ class TestProcessDeviceFilters:
         from collections import Counter
 
         from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
         from netbox_librenms_plugin.models import NormalizationRule
@@ -674,13 +564,23 @@ class TestProcessDeviceFilters:
 
         monkeypatch.setattr(Device, "from_db", classmethod(count_candidate_loads))
 
-        validated = process_device_filters(
-            live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
-        )
+        with CaptureQueriesContext(connection) as captured:
+            validated = process_device_filters(
+                live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
+            )
 
+        # A serial predicate in the WHERE clause is a candidate read: the batch LIKE ANY form and an exact lookup.
+        candidate_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if query["sql"].startswith("SELECT")
+            and '"dcim_device"."serial"' in query["sql"].partition(" FROM ")[2].partition(" WHERE ")[2]
+        ]
+        # The rewritten holder stores another form under another name, so its Update & Link offer runs the write lookup.
+        assert len(candidate_queries) == (2 if rewrite else 1)
         assert all(row["_validation"]["existing_device"] is None for row in validated[:-1])
         assert validated[-1]["_validation"]["existing_device"].pk == holder.pk
-        assert sum(visits.values()) <= len(candidates), dict(visits)
+        assert all(count <= 1 for count in visits.values()), dict(visits)
         if not rewrite:
             assert not visits
         visits.clear()
@@ -690,7 +590,7 @@ class TestProcessDeviceFilters:
         )
 
         assert len(cached) == len(validated)
-        assert sum(visits.values()) <= len(candidates), dict(visits)
+        assert all(count <= 1 for count in visits.values()), dict(visits)
         if not rewrite:
             assert not visits
 
@@ -756,14 +656,10 @@ class TestProcessDeviceFilters:
             "Multiple NetBox devices share serial" in warning for warning in validated["_validation"]["warnings"]
         )
 
-    def test_live_list_is_validated_cached_and_reused(self, live_librenms, monkeypatch):
-        from dcim.models import Device
-
+    def test_live_list_is_cached_and_validated_again(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
-        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
 
-        NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1")
-        unrelated = make_device("filter-cached-unrelated", serial="UNRELATED-CACHED")
         live_librenms.api.cache_timeout = 300
         existing = make_device("filter-existing")
         seed_mapping(existing, "default", own=131)
@@ -785,17 +681,12 @@ class TestProcessDeviceFilters:
             show_disabled=True,
             return_cache_status=True,
         )
+        key = get_import_device_cache_key(row["device_id"], live_librenms.api.server_key)
+        assert cache.get(key) == row
         request_count = len(live_librenms.server.requests)
-        visits = []
-        from_db = Device.from_db
+        existing.name = "filter-existing-renamed"
+        existing.save(update_fields=["name"])
 
-        def count_candidate_loads(cls, db, field_names, values, **kwargs):
-            device = from_db(db, field_names, values, **kwargs)
-            if device.pk == unrelated.pk:
-                visits.append(device.pk)
-            return device
-
-        monkeypatch.setattr(Device, "from_db", classmethod(count_candidate_loads))
         second, second_from_cache = process_device_filters(
             live_librenms.api,
             filters,
@@ -808,9 +699,11 @@ class TestProcessDeviceFilters:
         assert first_from_cache is False
         assert second_from_cache is True
         assert first[0]["_validation"]["existing_device"] == existing
+        assert first[0]["_validation"]["name_matches"] is True
         assert second[0]["_validation"]["existing_device"] == existing
+        assert second[0]["_validation"]["name_matches"] is False
+        assert second[0]["_validation"]["suggested_name"] == row["sysName"]
         assert len(live_librenms.server.requests) == request_count
-        assert not visits
 
     def test_disabled_rows_are_removed_before_validation(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
@@ -969,8 +862,404 @@ def test_bulk_confirmation_reuses_serial_rules_and_refreshes_them_next_request(c
     entries, batch_reads = confirm(list(rows))
     assert all(entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)
     assert batch_reads == one_key_reads > 0
-    rule.replacement = r"changed-\1"
+    rule.match_pattern = r"^SN:\s+(.+)$"
     rule.save()
     entries, batch_reads = confirm(list(rows))
     assert all(not entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)
     assert batch_reads == one_key_reads
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("fits", [True, False])
+def test_the_bulk_confirmation_blocks_a_new_device_whose_serial_does_not_fit(client, live_librenms, fits):
+    """The import stores the LibreNMS serial, and the field holds 50 characters."""
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 291 if fits else 292
+    row = _libre_device(
+        device_id,
+        f"confirm-fit-{fits}",
+        serial="N" * (50 if fits else 51),
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _register_device(live_librenms, row)
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-fit-user-{fits}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (reason in entry["validation"]["issues"]) is (not fits)
+    assert (escape(reason) in response.content.decode()) is (not fits)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("fits", [True, False])
+def test_the_bulk_confirmation_blocks_a_stack_whose_member_serial_does_not_fit(client, live_librenms, fits):
+    """The import creates each stack member with its LibreNMS serial, and the field holds 50 characters."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 293 if fits else 294
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-fit-{fits}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], "N" * (50 if fits else 51)))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-fit-user-{fits}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    assert entry["validation"]["virtual_chassis"]["master_identified"]
+    reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (reason in entry["validation"]["issues"]) is (not fits)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("unnamed_device", [False, True])
+def test_the_bulk_confirmation_names_a_member_of_a_stack_without_numbers_by_its_serial(
+    client, live_librenms, unnamed_device
+):
+    """No DeviceType matches, so the members have no position; the dialog shows the serial of each member."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    # A member without a name can not collide with an unrelated Device that has no name.
+    if unnamed_device:
+        make_device(None, serial="UNRELATED-UNNAMED")
+    device_id = 391
+    member_serial = "N" * 51
+    row = _libre_device(
+        device_id,
+        "confirm-stack-unnumbered",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware="Unmatched stack hardware",
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser("confirm-stack-unnumbered-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    vc = entry["validation"]["virtual_chassis"]
+    assert vc["numbering_available"] is False
+    assert [member["position"] for member in vc["members"]] == [None, None]
+    refusal = "The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert f"Stack member with serial '{member_serial}': {refusal}" in entry["validation"]["issues"]
+    assert f"SN {member_serial}" in response.content.decode()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("member_serial", "refused"), [("12", True), ("SN-UNNUMBERED-B", False)])
+def test_the_bulk_confirmation_names_an_unnamed_member_of_a_stack_without_numbers_by_its_serial(
+    client, live_librenms, member_serial, refused
+):
+    """A ``-{serial}`` pattern gives serial 12 no name; the issue names the member by its serial, not its position."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+    settings_row.vc_member_name_pattern = "-{serial}"
+    settings_row.save()
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 392 if refused else 393
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-unnumbered-unnamed-{refused}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware="Unmatched stack hardware",
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-unnumbered-unnamed-user-{refused}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    assert entry["validation"]["virtual_chassis"]["numbering_available"] is False
+    issue = (
+        f"Stack member with serial '{member_serial}': its serial '{member_serial}' has no identity, "
+        "so the member name pattern '-{serial}' gives it no name."
+    )
+    assert (issue in entry["validation"]["issues"]) is refused
+    assert not any(issue.startswith("Stack member None") for issue in entry["validation"]["issues"])
+
+
+@pytest.mark.parametrize("numbered", [True, False], ids=["numbered", "unnumbered"])
+def test_the_bulk_confirmation_renders_a_member_serial_with_an_unpaired_surrogate(client, live_librenms, numbered):
+    """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
+    from dcim.models import Device
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.serial_identity import stored_form_refusal
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 396 if numbered else 397
+    member_serial = "ABC\ud800DEF"
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-surrogate-{numbered}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"] if numbered else "Unmatched stack hardware",
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-surrogate-user-{numbered}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    label = "Stack member 2" if numbered else "Stack member with serial 'ABC\ufffdDEF'"
+    assert f"{label}: {stored_form_refusal(member_serial, Device)}" in entry["validation"]["issues"]
+    content = response.content.decode()
+    assert "SN ABC\ufffdDEF" in content
+    assert escape(label) in content
+
+
+@pytest.mark.django_db
+def test_the_bulk_confirmation_shows_a_numeric_zero_member_serial(client, live_librenms):
+    """LibreNMS sends a one-digit member serial as the JSON number 0; the import stores "0", so the dialog shows it."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 394
+    row = _libre_device(
+        device_id,
+        "confirm-stack-zero",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], 0))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser("confirm-stack-zero-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    assert '<span class="text-muted">SN 0</span>' in response.content.decode()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("held", [True, False])
+def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_creates(client, live_librenms, held):
+    """A member serial that keys to an existing Device is skipped at import, so its length blocks nothing."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack, _seeded_serial_rule
+
+    _seeded_serial_rule()
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    if held:
+        make_device("confirm-stack-holder", serial="N" * 47)
+    device_id = 295 if held else 296
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-held-{held}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], f"S/N {'N' * 47}"))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-held-user-{held}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    assert entry["validation"]["virtual_chassis"]["master_identified"]
+    reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
+    assert (reason in entry["validation"]["issues"]) is (not held)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("unavailable", [True, False])
+def test_the_bulk_confirmation_blocks_a_stack_member_whose_serial_lookup_is_unavailable(
+    client, live_librenms, unavailable
+):
+    """The member writer refuses a member serial that a broken chassis master link hides; validation says so."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    member_serial = f"STRAY-MEMBER-{unavailable}"
+    if unavailable:
+        _stray_chassis_member("confirm-stray", member_serial)
+    device_id = 297 if unavailable else 298
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-stray-{unavailable}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-stray-user-{unavailable}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    assert entry["validation"]["virtual_chassis"]["master_identified"]
+    # The text of the member writer's refusal.
+    issue = f"Stack member 2: Cannot check VC member serial '{member_serial}': {UNAVAILABLE_MASTER_LINK}"
+    assert (issue in entry["validation"]["issues"]) is unavailable
+
+
+@pytest.mark.django_db
+def test_a_selected_role_keeps_a_stack_member_issue_whose_serial_names_a_role(client, live_librenms):
+    """The role selection removes the role issue only, not every issue whose text contains "role"."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    _stray_chassis_member("confirm-role-stray", "ROLE-123")
+    device_id = 299
+    row = _libre_device(
+        device_id,
+        "confirm-stack-role",
+        serial="STACK-MASTER-299",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], "ROLE-123"))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser("confirm-stack-role-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {
+            "server_key": "default",
+            "select": [str(device_id)],
+            f"role_{device_id}": str(prerequisites["device_role_id"]),
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    assert entry["role"] is not None
+    issue = f"Stack member 2: Cannot check VC member serial 'ROLE-123': {UNAVAILABLE_MASTER_LINK}"
+    assert entry["validation"]["issues"] == [issue]
+    assert entry["validation"]["can_import"] is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("numbered", [True, False], ids=["numbered", "unnumbered"])
+def test_the_bulk_confirmation_quotes_an_unnamed_member_serial_with_an_unpaired_surrogate(
+    client, live_librenms, numbered
+):
+    """A serial without an identity gives no ``{serial}`` name; the refusal quotes it with a replacement character."""
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+    settings_row.vc_member_name_pattern = "-{serial}"
+    settings_row.save()
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    device_id = 394 if numbered else 395
+    row = _libre_device(
+        device_id,
+        f"confirm-stack-unnamed-{numbered}",
+        serial=f"STACK-MASTER-{device_id}",
+        hardware=prerequisites["hardware"] if numbered else "Unmatched stack hardware",
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], "A\ud800"))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser(f"confirm-stack-unnamed-user-{numbered}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+        {"server_key": "default", "select": [str(device_id)]},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    (entry,) = response.context["devices"]
+    reason = "its serial 'A�' has no identity, so the member name pattern '-{serial}' gives it no name."
+    label = "Stack member 2" if numbered else "Stack member with serial 'A�'"
+    assert f"{label}: {reason}" in entry["validation"]["issues"]
+    assert escape(f"{label}: {reason}") in response.content.decode()

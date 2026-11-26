@@ -1,6 +1,7 @@
-"""Browser-level checks for the module tab: the mismatch modal and two racing row actions."""
+"""Browser-level checks for the module tab, its mismatch modal and the VC serials dialog."""
 
-from test_sync_cache_browser import _add_page_scripts
+import pytest
+from test_sync_cache_browser import NETBOX_TABLE_CSS, _add_page_scripts
 
 
 PREVIEW_URL = "https://plugin.example.com/devices/1/module-mismatch-preview/"
@@ -190,13 +191,12 @@ def test_a_second_row_action_is_dropped_while_the_first_is_in_flight(page):
     assert page.locator("#module-sync-content #swapped").inner_text() == "A"
 
 
-def test_mismatch_action_disables_competing_modal_submissions(page):
-    """Every mutation button must show that the shared request scope is busy."""
+def _mismatch_modal(**context):
+    """Render the mismatch modal template with a hand-made context in the shape the preview view builds."""
     from pathlib import Path
     from types import SimpleNamespace
 
     from django.template import Context, Engine, Library
-    from playwright.sync_api import expect
 
     engine = Engine()
     engine.template_libraries["helpers"] = Library()
@@ -206,23 +206,35 @@ def test_mismatch_action_disables_competing_modal_submissions(page):
     def url(name, **kwargs):
         return SERIAL_URL if name.endswith(":update_module_serial") else REPLACE_URL
 
+    # The plugin package needs NetBox, so the serial text filter is a stub.
+    @urls.filter(name="page_text")
+    def page_text(value):
+        return "" if value is None else str(value)
+
     engine.template_builtins.append(urls)
+    engine.template_libraries["librenms_serial"] = Library()
     template = Path(__file__).parents[2] / "templates/netbox_librenms_plugin/htmx/module_mismatch_modal.html"
-    fragment = engine.from_string(template.read_text()).render(
-        Context(
-            {
-                "installed_module": SimpleNamespace(pk=55, module_type=SimpleNamespace(model="Test Card")),
-                "serial_mismatch": True,
-                "type_mismatch": False,
-                "librenms_serial": "TEST-SERIAL",
-                "server_key": "production",
-                "device_pk": 1,
-                "ent_index": 200,
-                "csrf_token": "test-token",
-            },
-            use_l10n=False,
-        )
-    )
+    base = {
+        "installed_module": SimpleNamespace(pk=55, module_type=SimpleNamespace(model="Test Card")),
+        "serial_mismatch": True,
+        "type_mismatch": False,
+        "librenms_serial": "TEST-SERIAL",
+        "server_key": "production",
+        "device_pk": 1,
+        "ent_index": 200,
+        "csrf_token": "test-token",
+        # The view offers Replace only when the delete scope covers both removal trees.
+        "replace_in_delete_scope": True,
+        "replace_removal": {"count": 1, "names": ["Test Card"], "hidden": 0},
+    }
+    return engine.from_string(template.read_text()).render(Context({**base, **context}, use_l10n=False))
+
+
+def test_mismatch_action_disables_competing_modal_submissions(page):
+    """Every mutation button must show that the shared request scope is busy."""
+    from playwright.sync_api import expect
+
+    fragment = _mismatch_modal()
     page.set_content(_module_page_html(REPLACE_BUTTON))
     page.route(f"{PREVIEW_URL}?*", lambda route: route.fulfill(body=fragment))
     pending = []
@@ -239,3 +251,131 @@ def test_mismatch_action_disables_competing_modal_submissions(page):
     expect(page.locator("#serial-updated")).to_be_visible()
     expect(buttons.first).to_be_enabled()
     expect(buttons.last).to_be_enabled()
+
+
+def test_an_unbroken_long_serial_stays_inside_the_mismatch_modal_on_a_narrow_screen(page):
+    """A 51-character serial has no break point, so the serial cells must wrap it inside the dialog."""
+    serials = ["A" * 51, "B" * 51]
+    fragment = _mismatch_modal(installed_serial=serials[0], librenms_serial=serials[1])
+    page.set_viewport_size({"width": 400, "height": 800})
+    page.set_content(
+        f"<style>{NETBOX_TABLE_CSS} .modal-dialog {{ margin: 0 16px; }}</style>"
+        f'<div class="modal-dialog"><div class="modal-content">{fragment}</div></div>'
+    )
+
+    state = page.evaluate(
+        """() => {
+            const dialog = document.querySelector('.modal-dialog').getBoundingClientRect();
+            const body = document.querySelector('.modal-body');
+            const row = Array.from(document.querySelectorAll('.modal-body tr'))
+                .find((tr) => tr.cells[0].textContent.trim() === 'Serial');
+            return {
+                scrollWidth: body.scrollWidth,
+                clientWidth: body.clientWidth,
+                dialogRight: dialog.right,
+                cellTexts: Array.from(row.cells).slice(1).map((cell) => cell.textContent.trim()),
+                cellOverflows: Array.from(row.cells).slice(1).map((cell) => cell.scrollWidth - cell.clientWidth),
+                cellRights: Array.from(row.cells).slice(1).map((cell) => cell.getBoundingClientRect().right),
+            };
+        }"""
+    )
+
+    assert state["cellTexts"] == serials, state
+    # A cell that clips its text with overflow: hidden stays inside the dialog, so check the text itself.
+    assert all(overflow <= 0 for overflow in state["cellOverflows"]), state
+    assert state["scrollWidth"] <= state["clientWidth"] + 1, state
+    assert all(right <= state["dialogRight"] + 1 for right in state["cellRights"]), state
+
+
+def _vc_serials_modal(items):
+    """Render the VC serials dialog of librenms_sync_base.html with a hand-made context in the view's shape."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from django.template import Context, Engine, Library
+
+    templates = Path(__file__).parents[2] / "templates"
+    engine = Engine(dirs=[str(templates)])
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name, **kwargs):
+        return "https://plugin.example.com/devices/1/assign-vc-serial/"
+
+    # The plugin package needs NetBox, so the serial text filter is a stub.
+    @urls.filter(name="page_text")
+    def page_text(value):
+        return "" if value is None else str(value)
+
+    engine.template_builtins.append(urls)
+    source = (templates / "netbox_librenms_plugin/librenms_sync_base.html").read_text()
+    # The dialog is the body of one {% if %} block, so the slice holds balanced tags.
+    start = source.index("<!-- VC Member Serials Modal -->")
+    dialog = source[start : source.index("{% endif %}", source.index("</table>", start))]
+    members = [SimpleNamespace(pk=pk, name=f"core-stack-building-a-m{pk}") for pk in (1, 2)]
+    context = {
+        "object": SimpleNamespace(pk=1),
+        "vc_inventory_serials": items,
+        "vc_serial_members": members,
+        "csrf_token": "test-token",
+    }
+    return engine.from_string(dialog).render(Context(context, use_l10n=False))
+
+
+# NetBox replaces each select with a Tom Select control, which keeps the selected name on one line.
+TOM_SELECT_STAND_IN = """() => {
+    for (const select of document.querySelectorAll('#vc-serials-form select')) {
+        const control = document.createElement('div');
+        control.className = 'ts-control';
+        control.textContent = select.selectedOptions[0].textContent.trim();
+        select.hidden = true;
+        select.after(control);
+    }
+}"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_a_long_vc_member_serial_wraps_in_a_table_without_a_scroll_wrapper(page, width):
+    """A scroll wrapper clips the member dropdown, so the 50-character serial must wrap in its cell instead."""
+    from types import SimpleNamespace
+
+    serial = "N" * 50
+    items = [
+        {"model": "EX4400-24X-S", "serial": serial, "librenms_serial": serial, "assigned_member": None},
+        {
+            "model": "EX4400-48MP",
+            "serial": "SHORT-B",
+            "librenms_serial": "SHORT-B",
+            "assigned_member": None,
+            "selected_member": SimpleNamespace(pk=1),
+        },
+    ]
+    page.set_viewport_size({"width": width, "height": 800})
+    page.set_content(
+        f"<style>{NETBOX_TABLE_CSS} .modal-dialog {{ margin: 0 16px; max-width: 1140px; }}"
+        " .ts-control { overflow: hidden; white-space: nowrap; padding: .25rem 1.75rem .25rem .5rem; }</style>"
+        f"{_vc_serials_modal(items)}"
+    )
+    page.evaluate(TOM_SELECT_STAND_IN)
+
+    state = page.evaluate(
+        """() => {
+            const table = document.querySelector('#vc-serials-form table');
+            const body = table.closest('.modal-body');
+            const cell = table.tBodies[0].rows[0].cells[1];
+            return {
+                wrapper: Boolean(table.closest('.table-responsive')),
+                controls: Array.from(table.querySelectorAll('.ts-control')).map((control) => control.textContent),
+                text: cell.textContent.trim(),
+                overflow: cell.scrollWidth - cell.clientWidth,
+                bodyOverflow: body.scrollWidth - body.clientWidth,
+            };
+        }"""
+    )
+
+    assert state["wrapper"] is False, state
+    assert state["controls"] == ["Select member...", "core-stack-building-a-m1"], state
+    assert state["text"] == serial, state
+    assert state["overflow"] <= 0, state
+    # A member column that keeps the selected name on one line must not push the table out of the dialog.
+    assert state["bodyOverflow"] <= 1, state

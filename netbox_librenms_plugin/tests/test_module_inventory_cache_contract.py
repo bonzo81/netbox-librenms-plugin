@@ -40,16 +40,82 @@ class TestSeedInventoryMatchesTheReaderContract:
         """Without a matching id the reader returns None, so every seeded assertion would be vacuous."""
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory, module_snapshot_serial_context
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         view, device = self._view_and_device("seed-inventory-contract", 7)
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
         key = seed_inventory(view, device, inventory, librenms_id=7)
 
         try:
-            assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) == inventory
+            snapshot = _get_cached_module_snapshot(device, "default", view.get_cache_key)
+            # A module action refuses a snapshot whose stamp is not the context of the loaded policy.
+            stamp = module_snapshot_serial_context(load_inventory_policy(device.pk), device).fingerprint
+            assert (cached_module_inventory(snapshot), snapshot["serial_context"]) == (inventory, stamp)
         finally:
             cache.delete(key)
+
+    @staticmethod
+    def _new_master_with_a_stale_chassis(prefix):
+        """Return a third member whose loaded chassis still names the old master, and the new master's rule maker."""
+        from dcim.models import Manufacturer, VirtualChassis
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_virtual_chassis
+
+        plain_maker = Manufacturer.objects.create(name=f"{prefix} plain maker", slug=f"{prefix}-plain-maker")
+        rule_maker = Manufacturer.objects.create(name=f"{prefix} rule maker", slug=f"{prefix}-rule-maker")
+        owner_maker = Manufacturer.objects.create(name=f"{prefix} owner maker", slug=f"{prefix}-owner-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=rule_maker
+        )
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^Y(.+)$", replacement=r"\1", manufacturer=owner_maker
+        )
+        old_master = make_device_with_module_bays(f"{prefix}-old-master", [], manufacturer=plain_maker)
+        new_master = make_device_with_module_bays(f"{prefix}-new-master", [], manufacturer=rule_maker)
+        # The snapshot owner is a third member, so the stamp of its own maker differs from the new master's.
+        device = make_device_with_module_bays(f"{prefix}-owner", [], manufacturer=owner_maker)
+        chassis = make_virtual_chassis(f"{prefix}-chassis", old_master, new_master, device)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=old_master)
+        device.virtual_chassis = VirtualChassis.objects.get(pk=chassis.pk)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=new_master)
+        return device, rule_maker
+
+    def test_the_stamp_reads_the_current_master_not_a_cached_chassis(self):
+        """A master set with QuerySet.update() leaves the loaded chassis stale; the stamp must follow the database."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        device, rule_maker = self._new_master_with_a_stale_chassis("seed-stamp")
+        request = make_request("post", {"server_key": "default"})
+        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+
+        key = seed_inventory(view, device, [], librenms_id=7)
+        try:
+            stamp = module_snapshot_serial_context(load_inventory_policy(device.pk), device)
+            assert stamp.manufacturer_id == rule_maker.pk
+            assert cache.get(key)["serial_context"] == stamp.fingerprint
+        finally:
+            cache.delete(key)
+
+    def test_the_trusted_payload_stamp_reads_the_current_master_not_a_cached_chassis(self):
+        """The trusted payload helper must stamp the rules of the master that the database holds."""
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context
+        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
+        device, rule_maker = self._new_master_with_a_stale_chassis("trusted-stamp")
+
+        payload = trusted_module_inventory_payload(device, [], librenms_id=8)
+
+        stamp = module_snapshot_serial_context(load_inventory_policy(device.pk), device)
+        assert stamp.manufacturer_id == rule_maker.pk
+        assert payload["serial_context"] == stamp.fingerprint
 
     def test_the_trusted_payload_helper_leaves_cf_recomputable(self):
         """Assigning custom_field_data to cf would alias raw JSON into the cached property."""
@@ -101,19 +167,28 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         ],
     )
     def test_the_reader_follows_the_table_fingerprint(self, cached_oob, link, readable):
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         view, device = TestSeedInventoryMatchesTheReaderContract._view_and_device(f"oob-reader-{link}", 7)
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
         cache.set(
             view.get_cache_key(device, "inventory", server_key="default"),
-            module_inventory_cache_payload(inventory, 7, cached_oob),
+            module_inventory_cache_payload(
+                inventory, 7, cached_oob, serial_context=SerialRules.load().for_device(device)
+            ),
         )
         self._link(device, link)
 
-        assert (_get_cached_inventory_for_device(device, "default", view.get_cache_key) == inventory) is readable
+        snapshot = _get_cached_module_snapshot(device, "default", view.get_cache_key)
+        # A writer tests the snapshot itself for None, so a rejected one must not read as an empty payload.
+        if readable:
+            assert cached_module_inventory(snapshot) == inventory
+        else:
+            assert snapshot is None
 
     def test_install_selected_refuses_a_snapshot_built_before_an_oob_link(self):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
@@ -363,6 +438,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
     def test_a_written_mapping_still_returns_the_payload(self):
         """Positive control: the guard must not reject the ordinary path."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
@@ -370,10 +446,13 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)
+        assert payload == module_inventory_cache_payload(
+            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
+        )
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
         """The helper must verify a write against current custom field data."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
@@ -382,4 +461,6 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)
+        assert payload == module_inventory_cache_payload(
+            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
+        )

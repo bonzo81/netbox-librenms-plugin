@@ -235,9 +235,9 @@ class TestTheVlanVerdict:
     """The VLAN part of the row state follows the assignment a sync would write."""
 
     def _vlan_context(self, row):
-        from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+        from netbox_librenms_plugin.interface_diff import vlan_row_context
 
-        return LibreNMSInterfaceTable._vlan_row_context(row)
+        return vlan_row_context(row)
 
     def _verdict(self, row):
         return _state(row, vlan_context=self._vlan_context(row)).verdict("vlans")
@@ -378,8 +378,8 @@ def _render_tab(device, rows, *, migrated=False):
     """Render the real interface sync tab around a table built from *rows*."""
     from django.template.loader import render_to_string
     from django.test import RequestFactory
-    from django_tables2 import RequestConfig
 
+    from netbox_librenms_plugin.sync_filters import parse_sync_filters
     from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
@@ -387,11 +387,12 @@ def _render_tab(device, rows, *, migrated=False):
     request.user = make_superuser("row-diff-render")
     table = LibreNMSInterfaceTable(rows, device=device, server_key=SERVER_KEY)
     table.migrated_to_marker = migrated
-    RequestConfig(request).configure(table)
+    table.configure(request)
     context = {
         "interface_sync": {
             "object": device,
             "table": table,
+            "filters": parse_sync_filters(request.GET, table.filter_spec()),
             "server_key": SERVER_KEY,
             "netbox_only_interfaces": [],
             "virtual_chassis_members": [],
@@ -430,8 +431,9 @@ class TestTheButtonFollowsTheRowState:
 
         html = _render_tab(device, [_row(differs)])
 
+        # The filter form is a separate GET form before the sync form, so the sync form's own end counts.
         form_start = html.index('<form method="post"')
-        assert form_start < html.index('name="sync_one"') < html.index("</form>")
+        assert form_start < html.index('name="sync_one"') < html.index("</form>", form_start)
 
     def test_a_migrated_donor_renders_no_button(self):
         """Migrated mode drops the form, so a submit button there would do nothing."""
