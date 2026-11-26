@@ -37,11 +37,14 @@ The cache includes both LibreNMS device data AND NetBox reference data used in t
 - Device lists matching your search filters
 - Device details (hostname, sysName, location, hardware, etc.)
 - Virtual chassis detection results
+- Chassis inventory used to match a device type when the hardware string matches none
 
 **From NetBox:**
 - Available device roles (for the role dropdown in each row)
 - Available VM clusters (for cluster placement)
 - Available racks for each site (filtered by the device's matched site)
+
+Every search matches each row against NetBox again. A device that you add, rename, link or delete in NetBox shows in the next search without a cache clear.
 
 This means if you add a new role, create a new rack, or add a new cluster in NetBox, those changes won't appear in the import table dropdowns until you clear the cache or wait for it to expire (the configured cache timeout). Host Device choices use NetBox's live selector instead of this cached reference data.
 

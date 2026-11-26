@@ -121,6 +121,21 @@ Alternatively, share your ideas for the plugin over in [discussions](https://git
 
 ## Installing
 
+### Database Requirement
+
+The plugin needs the PostgreSQL extension `pg_trgm`. PostgreSQL ships it as a contrib module, and some distributions put the contrib modules in a separate package, for example `postgresql-contrib`. Install the package that provides `pg_trgm` on the database server before you run the migrations. Without it, `CREATE EXTENSION` fails, also for a superuser. The plugin migrations create the extension with `CREATE EXTENSION IF NOT EXISTS pg_trgm`. `pg_trgm` is a trusted extension, so the NetBox database user needs only the `CREATE` privilege on the NetBox database. If the NetBox database user does not have this privilege, connect to the NetBox database (not the `postgres` database) as a user that has it, or as a superuser, and run this command before you run the migrations:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+```
+
+`CREATE EXTENSION` installs the extension in the first schema of the `search_path` of the user that runs it. Migration 0030 uses the trigram operator class in that schema, so the NetBox database user needs the `USAGE` privilege on it. Install the extension in a schema that the NetBox database user can use, for example `public`. If `pg_trgm` is already installed in a schema that the NetBox database user cannot use, grant the privilege, and then run the migrations again:
+
+```sql
+GRANT USAGE ON SCHEMA <extension schema> TO <netbox database user>;
+```
+
+The plugin uses trigram indexes on the Device and Module serials to find a serial in its other forms, for example `S/N ABC` and `ABC`.
 
 ### Standard Installation
 

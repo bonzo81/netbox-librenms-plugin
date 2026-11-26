@@ -51,10 +51,13 @@ def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"
     """
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload, module_snapshot_serial_context
 
     key = view.get_cache_key(device, "inventory", server_key=server_key)
-    payload = module_inventory_cache_payload(inventory, librenms_id, None)
+    # Read the chassis from the database, as the production writer does, not from cached relations.
+    serial_context = module_snapshot_serial_context(load_inventory_policy(device.pk), device)
+    payload = module_inventory_cache_payload(inventory, librenms_id, None, serial_context=serial_context)
     cache.set(key, payload, timeout=300)
     return key
 

@@ -1,6 +1,6 @@
 """Views backing the LibreNMS sync tabs on Device and VM detail pages."""
 
-from .cache_status import SyncCacheFragmentView, SyncCacheStatusView
+from .cache_status import NetBoxOnlyInterfacesView, SyncCacheFragmentView, SyncCacheStatusView, SyncTabFilterView
 from .devices import (
     DeviceCableTableView,
     DeviceInterfaceTableView,

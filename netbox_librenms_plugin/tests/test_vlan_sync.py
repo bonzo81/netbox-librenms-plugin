@@ -127,6 +127,7 @@ class TestVlanSyncContentTemplateMigratedMode:
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
+        from netbox_librenms_plugin.sync_filters import parse_sync_filters
         from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
         from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -135,12 +136,14 @@ class TestVlanSyncContentTemplateMigratedMode:
         request.user = AnonymousUser()
         table = LibreNMSVLANTable([{"vlan_id": 10, "name": "v10", "type": "tagged", "state": "active"}])
         RequestConfig(request).configure(table)
+        filters = parse_sync_filters(request.GET, table.filter_spec())
         return render_to_string(
             "netbox_librenms_plugin/_vlan_sync_content.html",
             {
                 "vlan_sync": {
                     "object": device,
                     "vlan_table": table,
+                    "filters": filters,
                     "server_key": server_key,
                     "error_message": None,
                     "cache_expiry": None,
@@ -153,7 +156,7 @@ class TestVlanSyncContentTemplateMigratedMode:
     def test_migrated_mode_removes_sync_form(self):
         html = self._render(migrated={"server_key": "prod", "device_id": 1, "at": "now"}, server_key="prod")
 
-        assert "<form" not in html
+        assert '<form method="post"' not in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
         assert 'value="prod"' in html
@@ -162,7 +165,7 @@ class TestVlanSyncContentTemplateMigratedMode:
     def test_live_mode_renders_sync_form(self):
         html = self._render(migrated=False)
 
-        assert "<form" in html
+        assert '<form method="post"' in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="action"' in html
         assert 'name="server_key"' in html

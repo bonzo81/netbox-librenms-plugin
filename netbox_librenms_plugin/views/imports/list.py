@@ -113,11 +113,13 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             user: User who requested the result page
 
         Returns:
-            List[dict]: Validated devices from job cache, or [] if cache expired
+            List[dict]: The job's rows, validated again, or [] if their cache expired
 
         """
         from core.models import Job
 
+        # True once a raw row of the job is read, so a job whose rows all match NetBox now is not expired.
+        self._job_rows_read = False
         try:
             job = Job.objects.get(pk=job_id, user=user)
         except Job.DoesNotExist:
@@ -128,12 +130,14 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             logger.warning(f"Job {job_id} status is {job.status}, not completed")
             return []
 
-        # Load cached devices from job using shared cache keys
-        from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.bulk_import import search_serial_discoveries, validate_search_row
+        from netbox_librenms_plugin.import_utils.virtual_chassis import load_numbering_rules
+        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.utils import row_identity_matches
 
         job_data = job.data or {}
         device_ids = job_data.get("device_ids", [])
-        filters = job_data.get("filters", {})
         parsed_server = parse_configured_server_key(job_data)
         resolved_server_key = (
             self.rebind_api_for_server(parsed_server.server_key) if parsed_server.server_key is not None else None
@@ -152,6 +156,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         vc_enabled = job_data.get("vc_detection_enabled", False)
         use_sysname = job_data.get("use_sysname", True)
         strip_domain = job_data.get("strip_domain", False)
+        exclude_existing = job_data.get("exclude_existing", False)
 
         # Extract cache metadata for frontend warnings
         self._cache_timestamp = job_data.get("cached_at")
@@ -163,24 +168,37 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             logger.warning(f"Job {job_id} missing device_ids")
             return []
 
-        # Fetch devices from cache using shared keys
-        validated_devices = []
+        # The job cached the raw LibreNMS rows; each row is validated again as a search validates it.
+        devices = []
         for device_id in device_ids:
-            cache_key = get_validated_device_cache_key(
-                server_key=server_key,
-                filters=filters,
-                device_id=device_id,
-                vc_enabled=vc_enabled,
+            device = cache.get(get_import_device_cache_key(device_id, server_key))
+            if not row_identity_matches(device, device_id):
+                logger.warning(f"Device {device_id} from job {job_id} not in cache (may have expired)")
+                continue
+            devices.append(device)
+
+        self._job_rows_read = bool(devices)
+        validated_devices = []
+        serial_rules = SerialRules.load()
+        numbering_rules = load_numbering_rules()
+        serial_discoveries = search_serial_discoveries(devices, serial_rules)
+        for device in devices:
+            validation = validate_search_row(
+                self._librenms_api,
+                device,
+                vc_detection_enabled=vc_enabled,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
+                serial_rules=serial_rules,
+                numbering_rules=numbering_rules,
+                serial_discoveries=serial_discoveries,
             )
-            device = cache.get(cache_key)
-            if device:
-                validated_devices.append(device)
-            else:
-                logger.warning(f"Device {device_id} from job {job_id} not in cache (may have expired)")
+            if exclude_existing and validation["existing_device"]:
+                continue
+            device["_validation"] = validation
+            validated_devices.append(device)
 
-        if not validated_devices and device_ids:
+        if not self._job_rows_read:
             logger.error(f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache.")
         else:
             # Mirror the job's naming settings so toggle state matches the cached results
@@ -255,7 +273,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 job_id = int(job_id)
                 logger.info(f"Loading results from job {job_id}")
                 validated_devices = self._load_job_results(job_id, request.user)
-                if validated_devices:
+                if self._job_rows_read:
                     self._import_data = validated_devices
                     self._job_results_loaded = True
                     # Job results are cached data, so mark as from_cache
@@ -308,6 +326,11 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         self._filters_submitted = filters_submitted
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        # The cache check, the synchronous search and the cached-search links read one serial rule version.
+        serial_rules = self._serial_rules = SerialRules.load()
+
         # Check if this should be processed as a background job
         # Skip if we're loading results from a completed job (job_id in URL)
         # IMPORTANT: Only process if form is valid (filter requirement enforced)
@@ -333,11 +356,13 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 get_cache_metadata_key,
                 get_device_count_for_filters,
             )
+            from netbox_librenms_plugin.import_utils.cache import search_metadata_is_current
 
-            # Check if validated results already exist for this naming-mode
+            # Check if a search already exists for this naming-mode
             # namespace.  The metadata key encodes server, filters, vc_enabled,
             # use_sysname and strip_domain, so a naming-preference change
             # correctly shows the cache as cold and triggers the background path.
+            # A serial rule edit changes the keys of the cached stack detection, so it also shows the cache as cold.
             validated_cached = False
             if not self._cache_cleared:
                 try:
@@ -348,7 +373,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                         use_sysname=self._use_sysname,
                         strip_domain=self._strip_domain,
                     )
-                    validated_cached = cache.get(metadata_key) is not None
+                    validated_cached = search_metadata_is_current(cache.get(metadata_key), serial_rules)
                 except Exception as e:
                     logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
@@ -416,7 +441,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         filter_warning = self._filter_warning
 
-        cached_searches = get_active_cached_searches_for_servers(LibreNMSAPI.get_available_servers())
+        cached_searches = get_active_cached_searches_for_servers(LibreNMSAPI.get_available_servers(), serial_rules)
 
         server_key = self._active_server_key
         import_columns = resolve_import_context_columns(request)
@@ -530,6 +555,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 return_cache_status=True,
                 use_sysname=self._use_sysname,
                 strip_domain=self._strip_domain,
+                serial_rules=self._serial_rules,
             )
         except LibreNMSUnreachable as exc:
             # Show the reason instead of an empty table, which reads as "nothing matched".
@@ -541,30 +567,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         # Retrieve cache metadata (timestamp) for countdown display
         # This works for both new caches and existing caches
         if validated_devices:
-            from netbox_librenms_plugin.import_utils import get_cache_metadata_key
-
-            cache_metadata_key = get_cache_metadata_key(
-                server_key=self.librenms_api.server_key,
-                filters=libre_filters,
-                vc_enabled=vc_detection_enabled,
-                use_sysname=self._use_sysname,
-                strip_domain=self._strip_domain,
-            )
-            cache_metadata = cache.get(cache_metadata_key)
-            if cache_metadata:
-                self._cache_timestamp = cache_metadata.get("cached_at")
-                self._cache_timeout = cache_metadata.get("cache_timeout", 300)
-                self._cache_metadata_missing = False
-                logger.info(
-                    f"Retrieved cache metadata: timestamp={self._cache_timestamp}, "
-                    f"timeout={self._cache_timeout}, from_cache={from_cache}"
-                )
-            else:
-                self._cache_metadata_missing = True
-                logger.warning(
-                    f"Cache metadata not found for key: {cache_metadata_key}, from_cache={from_cache}. "
-                    f"This may indicate cache key mismatch or metadata expiration."
-                )
+            self._read_cache_metadata(libre_filters, vc_detection_enabled, from_cache)
 
         # Mark each device's validation with VC detection flag for downstream views
         for device in validated_devices:
@@ -572,3 +575,34 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 device["_validation"]["_vc_detection_enabled"] = vc_detection_enabled
 
         return validated_devices
+
+    def _read_cache_metadata(self, libre_filters, vc_detection_enabled, from_cache):
+        """Set the countdown fields from the search metadata that the serial rule snapshot of this request wrote."""
+        from netbox_librenms_plugin.import_utils import get_cache_metadata_key
+        from netbox_librenms_plugin.import_utils.cache import search_metadata_is_current
+
+        cache_metadata_key = get_cache_metadata_key(
+            server_key=self.librenms_api.server_key,
+            filters=libre_filters,
+            vc_enabled=vc_detection_enabled,
+            use_sysname=self._use_sysname,
+            strip_domain=self._strip_domain,
+        )
+        cache_metadata = cache.get(cache_metadata_key)
+        if search_metadata_is_current(cache_metadata, self._serial_rules):
+            self._cache_timestamp = cache_metadata.get("cached_at")
+            self._cache_timeout = cache_metadata.get("cache_timeout", 300)
+            self._cache_metadata_missing = False
+            logger.info(
+                f"Retrieved cache metadata: timestamp={self._cache_timestamp}, "
+                f"timeout={self._cache_timeout}, from_cache={from_cache}"
+            )
+        elif cache_metadata:
+            # A search under other serial rules wrote the key, so its time does not describe these rows.
+            logger.info(f"Cache metadata for key {cache_metadata_key} belongs to other serial rules")
+        else:
+            self._cache_metadata_missing = True
+            logger.warning(
+                f"Cache metadata not found for key: {cache_metadata_key}, from_cache={from_cache}. "
+                f"This may indicate cache key mismatch or metadata expiration."
+            )

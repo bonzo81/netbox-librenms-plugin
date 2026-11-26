@@ -30,7 +30,7 @@ When a searched LibreNMS device looks like an OOB controller (by its OS/hardware
 ![OOB Detected validation panel, showing the OOB attach effect and the Add-as-OOB action](../img/oob/oob-detected-validation.png)
 
 !!! tip "Not seeing the panel?"
-    The panel only appears when **both** conditions hold: the incoming LibreNMS device's `os`/`hardware` (or hostname) matches an OOB pattern (`idrac`, `ilo`, `ipmi`, `bmc`, `drac`, `cimc`), **and** it matches an existing NetBox device by unique **serial** or by **management IP**. If the incoming hostname already matches a NetBox device name it takes the plain hostname-match path instead, and if the device is already linked to LibreNMS no OOB action is offered. (Device identifiers are blurred in these screenshots.)
+    The panel appears when the incoming LibreNMS device matches an existing NetBox device by unique **serial**, by **management IP** or by **hostname**, and one of these shows that it is an OOB controller: its `os`/`hardware` names an OOB type (`idrac`, `ilo`, `ipmi`, `bmc`, `drac`, `cimc`), one of its names other than the device's own name contains such a token, or its address is the matched device's OOB IP. A serial match can also offer the OOB role as a choice when the device is linked to another LibreNMS ID. If the incoming device is already linked to LibreNMS as the device itself, no OOB action is offered. (Device identifiers are blurred in these screenshots.)
 
 ### Add as OOB
 

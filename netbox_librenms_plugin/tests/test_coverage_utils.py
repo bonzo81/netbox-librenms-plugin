@@ -39,8 +39,8 @@ class TestSerialScopeNormalization:
     """
     Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
 
-    The rewrite is a NormalizationRule rather than compiled-in, so an operator can see why a
-    stored serial differs from the raw inventory and add the next vendor without a release.
+    The extraction is a NormalizationRule rather than compiled-in, so an operator can see why two
+    serials name the same hardware and add the next vendor without a release.
     """
 
     def test_the_migration_seeds_the_juniper_rule(self):
@@ -59,30 +59,33 @@ class TestSerialScopeNormalization:
             ("SN12345", "SN12345"),
             ("S/NABC", "S/NABC"),
             (12345, "12345"),
-            (0, "0"),
+            # A key needs three letters or digits in a row.
+            (0, ""),
             ("", ""),
             (None, ""),
         ],
     )
     def test_the_seeded_rule_strips_only_the_marker(self, raw, expected):
-        from netbox_librenms_plugin.utils import normalize_inventory_serial
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
-        assert normalize_inventory_serial(raw) == expected
+        assert naming_token(raw, SerialRules.load().context(None)) == expected
 
-    def test_normalize_serial_itself_no_longer_strips(self):
-        """The transformation lives in the rule, so there is one place to look."""
-        from netbox_librenms_plugin.utils import normalize_serial
+    def test_the_stored_form_keeps_the_marker(self):
+        """The transformation lives in the rule and applies at comparison, so the stored text keeps the marker."""
+        from dcim.models import Device
 
-        assert normalize_serial("S/N BCFB9793") == "S/N BCFB9793"
+        from netbox_librenms_plugin.serial_identity import stored_form
 
-    def test_disabling_the_rule_stops_the_rewrite(self):
-        """Proves the stored serial follows the rule rather than compiled-in behaviour."""
+        assert stored_form("S/N BCFB9793", Device) == "S/N BCFB9793"
+
+    def test_disabling_the_rule_stops_the_extraction(self):
+        """Proves the key follows the rule rather than compiled-in behaviour."""
         from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.utils import normalize_inventory_serial
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
         NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
 
-        assert normalize_inventory_serial("S/N BCFB9793") == "S/N BCFB9793"
+        assert naming_token("S/N BCFB9793", SerialRules.load().context(None)) == "S/N BCFB9793"
 
 
 class TestConvertSpeedToKbps:

@@ -23,9 +23,11 @@ and roll it back.
 """
 
 import logging
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import cache
 
+from core.events import OBJECT_DELETED
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, connections, transaction
 from django.db.models import UniqueConstraint
@@ -47,6 +49,8 @@ _active_recorder = ContextVar("librenms_conflict_recorder", default=None)
 _VERSIONED_SAVE = "_librenms_versioned_save"
 # The annotation that carries the row version of a read.
 _ROW_VERSION = "_librenms_row_version"
+# The own event queues of the event-aware blocks that are open now, outermost first.
+_open_queues = ContextVar("librenms_open_event_queues", default=())
 
 
 class TransactionConflict(Exception):
@@ -198,6 +202,31 @@ def run_transaction(work):
             attempt += 1
 
 
+class _EventQueue(dict):
+    """Track queued events whose payloads may need to be frozen."""
+
+    def __init__(self):
+        super().__init__()
+        self._pending = set()
+
+    def __setitem__(self, key, event):
+        super().__setitem__(key, event)
+        self._pending.add(key)
+
+    def __getitem__(self, key):
+        event = super().__getitem__(key)
+        # NetBox retrieves an existing event before updating it in place.
+        self._pending.add(key)
+        return event
+
+    def freeze(self):
+        for key in tuple(self._pending):
+            event = self.get(key)
+            if event is not None and "data" not in event:
+                _ = event["data"]
+            self._pending.discard(key)
+
+
 def _run_attempt(work, connection):
     """Run one attempt in a durable atomic block, with its own NetBox event queue."""
     committed = False
@@ -208,12 +237,17 @@ def _run_attempt(work, connection):
 
     recorder = _ConflictRecorder()
     recorder_token = _active_recorder.set(recorder)
-    queue_token = events_queue.set({})
+    open_queues = _open_queues.get()
+    attempt_queue = _EventQueue()
+    open_token = _open_queues.set((*open_queues, attempt_queue))
+    queue_token = events_queue.set(attempt_queue)
     try:
         # durable: Django refuses an enclosing atomic block, except a test case's own block.
         with transaction.atomic(durable=True):
             transaction.on_commit(mark_committed)
             with connection.execute_wrapper(recorder):
+                for queue in open_queues:
+                    queue.freeze()
                 try:
                     result = work()
                 except TransactionManagementError:
@@ -235,6 +269,7 @@ def _run_attempt(work, connection):
                     )
                 # Checks deferred foreign keys now, so their lock conflicts pass the recorder too.
                 connection.check_constraints()
+                attempt_queue.freeze()
         return result
     except Exception as exc:
         if committed:
@@ -244,21 +279,93 @@ def _run_attempt(work, connection):
         _active_recorder.reset(recorder_token)
         attempt_events = events_queue.get()
         events_queue.reset(queue_token)
+        _open_queues.reset(open_token)
         if committed:
             _keep_events(attempt_events)
 
 
-def _keep_events(attempt_events):
-    """Add a committed attempt's events to the enclosing queue; an event for the same object gets its own key."""
-    if not attempt_events:
+@contextmanager
+def atomic_with_events():
+    """
+    Run the block in ``transaction.atomic()``, and keep its NetBox events only when its writes stay.
+
+    A save queues its event in a Python dict, which a rollback does not undo. The block collects its
+    events in a queue of its own. They join the enclosing queue when the block commits (outermost) or
+    releases its savepoint. They are dropped on any exception, a failed commit included, and when a
+    caught error left the block marked for rollback. A commit callback that fails after the commit
+    does not drop them, as in ``run_transaction``. Pending events are serialized before nested work
+    and before they leave the open blocks.
+    """
+    connection = transaction.get_connection()
+    outermost = not connection.in_atomic_block
+    committed = released = False
+
+    def mark_committed():
+        nonlocal committed
+        committed = True
+
+    open_queues = _open_queues.get()
+    if not connection.needs_rollback:
+        for queue in open_queues:
+            queue.freeze()
+    leaves_open_blocks = not any(queue is events_queue.get() for queue in open_queues)
+    block_queue = _EventQueue()
+    tokens = events_queue.set(block_queue), _open_queues.set((*open_queues, block_queue))
+    try:
+        with transaction.atomic():
+            if outermost:
+                # Registered first, so it runs before any callback that the block registers.
+                transaction.on_commit(mark_committed)
+            yield
+            released = not outermost and not transaction.get_rollback()
+            if leaves_open_blocks and not transaction.get_rollback():
+                block_queue.freeze()
+    except BaseException:
+        _close_event_queue(tokens, keep=committed)
+        raise
+    _close_event_queue(tokens, keep=committed or released)
+
+
+def _close_event_queue(tokens, *, keep):
+    queue_token, open_token = tokens
+    block_events = events_queue.get()
+    events_queue.reset(queue_token)
+    _open_queues.reset(open_token)
+    if keep:
+        _keep_events(block_events)
+
+
+@contextmanager
+def row_savepoint():
+    """Run one row's writes in a savepoint whose NetBox events are kept only when the block succeeds."""
+    with atomic_with_events():
+        yield
+
+
+def _keep_events(block_events):
+    """
+    Add the events of a block that committed to the enclosing queue, one event per object as NetBox queues them.
+
+    For an object that the enclosing queue already holds, the newer event replaces the older one. It keeps the
+    prechange snapshot of the older event, and the older event type unless it is a delete. When both events list
+    their ObjectChange ids (NetBox 4.7.5 and later), it keeps the older ids, then the newer ids in save order.
+    When NetBox serializes the payload from a separate source (EventContext), it keeps the older public object.
+    """
+    if not block_events:
         return
     queue = events_queue.get()
-    for key, event in attempt_events.items():
-        kept_key, number = key, 1
-        while kept_key in queue:
-            number += 1
-            kept_key = f"{key}#{number}"
-        queue[kept_key] = event
+    for key, event in block_events.items():
+        if (older := queue.get(key)) is not None:
+            event["snapshots"]["prechange"] = older["snapshots"]["prechange"]
+            if event["event_type"] != OBJECT_DELETED:
+                event["event_type"] = older["event_type"]
+            if "object_change_ids" in older and "object_change_ids" in event:
+                kept = list(older["object_change_ids"])
+                event["object_change_ids"] = kept + [i for i in event["object_change_ids"] if i not in kept]
+            if hasattr(older, "refresh_serialization_source"):
+                # The newer event keeps its own payload source; NetBox keeps the older public object.
+                event["object"] = older["object"]
+        queue[key] = event
 
 
 def _row_version_sql(table):
@@ -315,7 +422,7 @@ def update_existing_row(queryset, apply):
         ValidationError: The changed row is not valid.
 
     """
-    with transaction.atomic():
+    with atomic_with_events():
         row = lock_and_snapshot(queryset)
         result = apply(row)
         if result is False:

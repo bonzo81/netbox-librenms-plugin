@@ -1,0 +1,7 @@
+{% comment %}
+The tab links carry the page query outside the filtered tab.
+SyncTabFilterView appends them to the content. HTMX replaces them by id.
+{% endcomment %}
+<ul id="librenmsSync" hx-swap-oob="innerHTML">
+{% include "netbox_librenms_plugin/inc/_sync_tab_nav.html" %}
+</ul>

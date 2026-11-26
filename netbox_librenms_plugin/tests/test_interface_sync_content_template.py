@@ -31,6 +31,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
+        from netbox_librenms_plugin.sync_filters import parse_sync_filters
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.utils import interface_sync_options_menu
@@ -43,6 +44,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         interface_sync = {
             "object": device,
             "table": table,
+            "filters": parse_sync_filters(request.GET, table.filter_spec()),
             "server_key": server_key,
             # Caller-controlled: an item makes the NetBox-only modal (and its trigger link, whose
             # title we assert) render. Kept empty by default so form-presence tests aren't perturbed
@@ -61,21 +63,25 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "migrated_to_winner": winner,
             "has_write_permission": has_write,
         }
-        return render_to_string("netbox_librenms_plugin/_interface_sync_content.html", ctx, request=request)
+        # The NetBox-only dialog loads its rows when it opens, so the tab is shown with them loaded.
+        return render_to_string(
+            "netbox_librenms_plugin/_interface_sync_content.html", ctx, request=request
+        ) + render_to_string("netbox_librenms_plugin/inc/_netbox_only_interfaces.html", ctx, request=request)
 
     def test_migrated_mode_drops_form_but_keeps_csrf(self):
         html = self._render(
             migrated={"server_key": "prod", "device_id": 1, "at": "now"},
             server_key="prod",
         )
-        # The live POST form must be gone in migrated mode (a donor must not POST a sync).
-        assert "<form" not in html
+        # The live POST form must be gone in migrated mode (a donor must not POST a sync). The
+        # filter form is a GET form, so it cannot submit a sync.
+        assert '<form method="post"' not in html
         # ...but the CSRF token must remain so JS-driven verify-interface / LAG-sync POSTs authenticate.
         assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
 
     def test_normal_mode_emits_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None)
-        assert "<form" in html
+        assert '<form method="post"' in html
         assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
 
@@ -305,12 +311,9 @@ class TestInterfaceSyncContentTemplateMigratedMode:
 
 @pytest.mark.django_db
 class TestInterfaceSyncRefreshButtonServerKey:
-    """The outer _interface_sync.html Refresh button must not POST a blank server_key on initial load."""
+    """The refresh form carries the page server on initial load."""
 
     def test_refresh_button_falls_back_to_context_server_key_not_blank(self):
-        # On initial page load window.location.search has no server_key, so the Refresh button's
-        # hx-vals must fall back to the active server from context (librenms_server_info.server_key)
-        # rather than '' — a blank key would POST to the default/wrong LibreNMS server.
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
         from django.test import RequestFactory
@@ -322,10 +325,14 @@ class TestInterfaceSyncRefreshButtonServerKey:
         request.user = AnonymousUser()  # NetBox context processors read request.user
         html = render_to_string(
             "netbox_librenms_plugin/_interface_sync.html",
-            {"object": device, "has_librenms_id": True, "librenms_server_info": {"server_key": "prod"}},
+            {
+                "object": device,
+                "interface_sync": {"object": device},
+                "has_librenms_id": True,
+                "librenms_server_info": {"server_key": "prod"},
+            },
             request=request,
         )
 
-        # The URL-empty fallback now resolves to the active server, not a blank string.
-        assert "get('server_key') || 'prod'" in html
-        assert "get('server_key') || ''" not in html
+        assert 'name="server_key" value="prod"' in html
+        assert 'name="server_key" value=""' not in html

@@ -1,6 +1,8 @@
 """Who holds a host row's reported name, how the tab reports it, and the stale-binding Rebind action."""
 
 import re
+from html import unescape
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from dcim.models import Cable, Device, Interface
@@ -199,7 +201,10 @@ class TestTheTabReportsTheHolder:
             "plugins:netbox_librenms_plugin:rebind_interface_port",
             kwargs={"object_type": "device", "object_id": device.pk},
         )
-        assert f'formaction="{rebind_url}?interface_name_field=ifName"' in row
+        formaction = urlsplit(unescape(re.search(r'formaction="([^"]*)"', row).group(1)))
+        # The Rebind posts back with the page query, so the tab returns with the same filters and page.
+        assert formaction.path == rebind_url
+        assert parse_qs(formaction.query) == {"server_key": [SERVER_KEY], "interface_name_field": ["ifName"]}
         assert "data-confirm=" in row
         assert 'name="sync_one"' not in row
 

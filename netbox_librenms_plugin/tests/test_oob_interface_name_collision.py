@@ -568,8 +568,9 @@ def test_verify_preserves_the_full_table_name_and_action_metadata(client, settin
     context = view.get_context_data(request, device, "ifName", server_key=SERVER_KEY)
     record = next(row for row in context["table"].data if row["port_id"] == 8502)
     expected = context["table"].format_interface_data(record, device)
+    # The browser sends the verify request with the page query, as the table render had it.
     response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_interface"),
+        reverse("plugins:netbox_librenms_plugin:verify_interface") + f"?server_key={SERVER_KEY}",
         {"device_id": device.pk, "port_id": 8502, "server_key": SERVER_KEY, "interface_name_field": "ifName"},
         content_type="application/json",
     )

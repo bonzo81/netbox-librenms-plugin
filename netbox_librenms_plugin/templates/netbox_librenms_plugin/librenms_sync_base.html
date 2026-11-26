@@ -1,6 +1,7 @@
 {% extends 'generic/object.html' %}
 {% load buttons %}
 {% load helpers %}
+{% load librenms_serial %}
 {% load plugins %}
 {% load static %}
 {% load i18n %}
@@ -386,18 +387,26 @@
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">
                                 Serial
-                                {% if object.serial and not serial_matches %}
-                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
+                                {% if serial_unavailable %}
+                                <span class="text-warning ms-1" title="{{ serial_unavailable }}" data-serial-unavailable>
+                                    <i class="mdi mdi-help-circle-outline"></i>
+                                </span>
+                                <span class="text-muted small">{{ serial_unavailable }}</span>
+                                {% elif object.serial and serial_admitted and not serial_matches %}
+                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial|page_text }}' does not match NetBox serial '{{ object.serial }}'" data-serial-mismatch>
                                     <i class="mdi mdi-alert"></i>
                                 </span>
                                 {% endif %}
                             </th>
                             <td>
-                                {{ librenms_device_serial }}
+                                {{ librenms_device_serial|page_text }}
                                 {% if serial_matches %}
                                 <span class="text-success ms-1" title="Serial matches NetBox">
                                     <i class="mdi mdi-check-circle"></i>
                                 </span>
+                                {% if serial_stored_form_differs %}
+                                <span class="badge text-bg-info ms-1"{% if not object.virtual_chassis %} title="NetBox stores '{{ object.serial }}', which names the same hardware. Sync to store the LibreNMS text."{% endif %}>stored form differs</span>
+                                {% endif %}
                                 {% endif %}
                             </td>
                         </tr>
@@ -539,6 +548,8 @@
                                         <span class="text-success" title="Synced with LibreNMS">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
+                                        {% elif member_name_refusal %}
+                                        <span class="text-muted small" data-member-name-refusal>{{ member_name_refusal }}</span>
                                         {% endif %}
                                     </div>
                                 </div>
@@ -614,16 +625,30 @@
                                                     title="View VC member serials from inventory">
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
+                                        {% elif vc_inventory_unavailable %}
+                                            <span class="text-warning small" data-vc-inventory-error>
+                                                Could not read the LibreNMS inventory.
+                                            </span>
+                                        {% elif object.virtual_chassis and serial_unavailable %}
+                                            <span class="text-warning small" data-vc-serial-context-unavailable>
+                                                {{ serial_unavailable }}
+                                            </span>
+                                        {% elif object.virtual_chassis %}
+                                            <span class="text-muted small" data-vc-serial-unavailable>
+                                                LibreNMS inventory did not identify the virtual chassis members.
+                                            </span>
                                         {% else %}
-                                            {% if librenms_device_serial != "-" %}
-                                                {% if not serial_matches %}
+                                            {% if serial_admitted and not serial_unavailable %}
+                                                {% if serial_fit_refusal and not serial_matches or serial_fit_refusal and serial_stored_form_differs %}
+                                                <span class="text-muted small" data-serial-fit-refusal>{{ serial_fit_refusal }}</span>
+                                                {% elif not serial_matches or serial_stored_form_differs %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">
                                                     {% csrf_token %}
                                                     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                     <button type="submit" class="btn btn-sm btn-outline-primary"
-                                                            title="Sync serial from LibreNMS: {{ librenms_device_serial }}">
+                                                            title="Sync serial from LibreNMS: {{ librenms_device_serial|page_text }}">
                                                         <i class="mdi mdi-sync"></i> Sync to NetBox
                                                     </button>
                                                 </form>
@@ -638,7 +663,7 @@
                                 </div>
                             </td>
                             <td>
-                                {{ librenms_device_serial }}
+                                {{ librenms_device_serial|page_text|default:"-" }}
                             </td>
                         </tr>
 
@@ -801,29 +826,7 @@ that may well be correct.
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
-        <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces interface_name_field=interface_name_field only %}
-        </li>
-        {% if cable_sync %}
-        <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables interface_name_field=interface_name_field only %}
-        </li>
-        {% endif %}
-        <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses interface_name_field=interface_name_field only %}
-        </li>
-        {% with model_name=object|meta:"model_name" %}
-        {% if model_name == "device" %}
-        <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans interface_name_field=interface_name_field only %}
-        </li>
-        {% endif %}
-        {% endwith %}
-        {% if module_sync and object|meta:"model_name" == "device" %}
-        <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules interface_name_field=interface_name_field only %}
-        </li>
-        {% endif %}
+        {% include 'netbox_librenms_plugin/inc/_sync_tab_nav.html' %}
     </ul>
     {% include 'netbox_librenms_plugin/inc/_interface_name_field_selector.html' %}
 </div>
@@ -1172,21 +1175,21 @@ that may well be correct.
                     {% csrf_token %}
                     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                     <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
-                    <table class="table table-striped">
+                    <table class="table table-striped" style="table-layout: fixed;">
                         <thead>
                             <tr>
-                                <th style="width: 25%;">Hardware Model</th>
-                                <th style="width: 20%;">Serial Number</th>
-                                <th style="width: 20%;">Currently Assigned</th>
-                                <th style="width: 35%;">Assign To</th>
+                                <th class="text-wrap" style="width: 25%;">Hardware Model</th>
+                                <th class="text-wrap" style="width: 20%;">Serial Number</th>
+                                <th class="text-wrap" style="width: 20%;">Currently Assigned</th>
+                                <th class="text-wrap" style="width: 35%;">Assign To</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for item in vc_inventory_serials %}
                             <tr>
-                                <td>{{ item.model }}</td>
-                                <td><code>{{ item.serial }}</code></td>
-                                <td>
+                                <td class="text-break">{{ item.model }}</td>
+                                <td class="text-break"><code>{{ item.serial|page_text }}</code></td>
+                                <td class="text-break">
                                     {% if item.assigned_member %}
                                         <a href="{{ item.assigned_member.get_absolute_url }}" target="_blank">
                                             {{ item.assigned_member }}
@@ -1194,20 +1197,31 @@ that may well be correct.
                                         <span class="text-success ms-1" title="Already assigned">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
+                                    {% elif item.assigned_hidden %}
+                                        <span class="text-muted">A member you cannot view</span>
                                     {% else %}
                                         <span class="text-muted">-</span>
                                     {% endif %}
                                 </td>
                                 <td>
-                                    <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
+                                    <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial|page_text }}">
+                                    {% if item.fit_refusal %}
+                                    {# The writer reads rows until the first missing member field, so the row posts an empty one. #}
+                                    <input type="hidden" name="member_id_{{ forloop.counter }}" value="">
+                                    <span class="text-muted small" data-serial-fit-refusal>{{ item.fit_refusal }}</span>
+                                    {% else %}
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
-                                        {% for member in object.virtual_chassis.members.all %}
-                                        <option value="{{ member.pk }}" {% if item.assigned_member and item.assigned_member.pk == member.pk %}selected{% endif %}>
+                                        {% for member in vc_serial_members %}
+                                        <option value="{{ member.pk }}" {% if item.selected_member and item.selected_member.pk == member.pk %}selected{% endif %}>
                                             {{ member.name }}
                                         </option>
                                         {% endfor %}
                                     </select>
+                                    {% endif %}
+                                    {% if item.shared_holder %}
+                                        <div class="text-muted small mt-1">Another row matches this member too. Select the member on one row only.</div>
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}

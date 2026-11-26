@@ -8,6 +8,7 @@ come from real ``InterfaceTypeMapping`` rows and the real owner platform.
 import json
 import re
 from html import unescape
+from urllib.parse import parse_qs
 
 import pytest
 from dcim.models import Interface, Platform
@@ -66,6 +67,16 @@ def _seed(owner, ports, relationships=None):
     cache_owner = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
     payload = {"ports": ports, "port_stack_relationships": relationships or {}}
     cache.set(SyncInterfacesView().get_cache_key(cache_owner, "ports", SERVER_KEY), payload, timeout=300)
+
+
+def _netbox_only(client, owner):
+    """Return the NetBox-only rows that the interfaces tab dialog loads when it opens."""
+    url = reverse(
+        "plugins:netbox_librenms_plugin:netbox_only_interfaces", kwargs={"object_type": "device", "pk": owner.pk}
+    )
+    response = client.get(url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
+    assert response.status_code == 200
+    return response.content.decode()
 
 
 def _tab(client, owner, object_type="device", **params):
@@ -209,8 +220,10 @@ class TestIgnoredRowsInTheTab:
         assert "interfaces_show_ignored" not in re.search(r'<ul class="pagination.*?</ul>', hidden, re.S).group(0)
         assert "Showing 1-10 of 42" in shown
         assert "12 ignored" in shown
-        page_links = re.findall(r'href="(\?tab=interfaces[^"]*)" class="page-link"', shown)
-        assert page_links and all("&interfaces_show_ignored=1" in link for link in page_links)
+        page_links = [parse_qs(link[1:]) for link in re.findall(r'href="(\?[^"]*)" class="page-link"', shown)]
+        assert page_links and all(
+            link["tab"] == ["interfaces"] and link["interfaces_show_ignored"] == ["1"] for link in page_links
+        )
         toggle = re.search(r'<a href="([^"]*)"\s+class="[^"]*"\s+id="interfaces-show-ignored-toggle"', shown).group(1)
         # Turning the toggle off starts again at page 1.
         assert "interfaces_page" not in toggle and "interfaces_show_ignored" not in toggle
@@ -229,7 +242,7 @@ class TestIgnoredRowsInTheTab:
         html = _tab(superuser_client, device)
 
         assert "1 NetBox only interfaces" in html
-        assert "stale0" in html
+        assert "stale0" in _netbox_only(superuser_client, device)
         assert sorted(_rows(html)) == [100]
 
     def test_a_virtual_machine_reads_its_own_platform(self, superuser_client):

@@ -351,6 +351,8 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
 @pytest.mark.django_db
 def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, settings):
     """A snapshot from an older inventory writer is one the Modules tab rejects, so status must not call it ready."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     _configure_servers(settings)
     device = make_device("cache-status-module-version", librenms_cf={"primary": {"id": 6406}})
     key = _cache_key("inventory", device, "primary")
@@ -362,7 +364,11 @@ def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, s
     )
 
     stale = client.get(url, {"server_key": "primary"})
-    cache.set(key, module_inventory_cache_payload([], 6406, None), timeout=300)
+    cache.set(
+        key,
+        module_inventory_cache_payload([], 6406, None, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     current = client.get(url, {"server_key": "primary"})
 
     assert stale.status_code == current.status_code == 200
@@ -373,10 +379,148 @@ def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, s
 
 
 @pytest.mark.django_db
+def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_is_broken(client, settings):
+    """A broken serial rule makes the Modules snapshot unreadable, and the other tab states still answer."""
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-broken-rule", librenms_cf={"primary": {"id": 6409}})
+    cache.set(
+        _cache_key("inventory", device, "primary"),
+        module_inventory_cache_payload([], 6409, None, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
+    _seed_snapshot("ports", device, "primary")
+    rule = NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=device.device_type.manufacturer,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    client.force_login(make_superuser("cache-status-module-broken-rule-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    response = client.get(url, {"server_key": "primary"})
+
+    assert response.status_code == 200
+    tabs = response.json()["tabs"]
+    assert set(tabs) == {tab.value for tab in SyncCacheConsistency(device).applicable_tabs()}
+    assert tabs["modules"]["snapshot_available"] is False
+    assert (tabs["interfaces"]["state"], tabs["interfaces"]["snapshot_available"]) == ("ready", True)
+
+
+@pytest.mark.django_db
+def test_module_cache_status_refuses_a_current_snapshot_under_a_broken_serial_rule(client, settings):
+    """The stamp signs the current host, OOB, schema and rule rows, so only the rule check refuses the snapshot."""
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialContext, SerialRules
+
+    def chain_context(manufacturer_id):
+        # The chain that SerialRules.context builds, without its rule check.
+        rows = sorted(NormalizationRule.objects.filter(scope="serial"), key=lambda rule: (rule.priority, rule.pk))
+        own = [rule for rule in rows if rule.manufacturer_id == manufacturer_id]
+        return SerialContext(manufacturer_id, (*own, *(rule for rule in rows if rule.manufacturer_id is None)))
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-current-broken-rule", librenms_cf={"primary": {"id": 6413}})
+    manufacturer_id = device.device_type.manufacturer_id
+    _seed_snapshot("ports", device, "primary")
+    rule = NormalizationRule.objects.create(
+        scope="serial", manufacturer_id=manufacturer_id, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    assert chain_context(manufacturer_id).fingerprint == SerialRules.load().for_device(device).fingerprint
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    cache.set(
+        _cache_key("inventory", device, "primary"),
+        module_inventory_cache_payload([], 6413, None, serial_context=chain_context(manufacturer_id)),
+        timeout=300,
+    )
+    client.force_login(make_superuser("cache-status-module-current-broken-rule-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    response = client.get(url, {"server_key": "primary"})
+
+    assert response.status_code == 200
+    tabs = response.json()["tabs"]
+    assert tabs["modules"]["snapshot_available"] is False
+    assert (tabs["interfaces"]["state"], tabs["interfaces"]["snapshot_available"]) == ("ready", True)
+
+
+@pytest.mark.django_db
+def test_module_cache_status_offers_no_snapshot_under_an_unavailable_chassis_context(client, settings):
+    """The Modules tab shows no rows when the chassis master is outside the chassis, so status must not call it ready."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-stray", librenms_cf={"primary": {"id": 6411}})
+    chassis = make_virtual_chassis("cache-status-module-stray-vc", device)
+    outsider = make_device("cache-status-module-stray-master")
+    other = VirtualChassis.objects.create(name="cache-status-module-stray-other")
+    # NetBox refuses this link in clean(), so only a write that skips it stores it.
+    Device.objects.filter(pk=outsider.pk).update(virtual_chassis=other, vc_position=1)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
+    device.refresh_from_db()
+    owner = SyncCacheConsistency(device)._primary_owner(SyncTab.MODULES, "primary")
+    context = module_snapshot_serial_context(load_inventory_policy(device.pk), owner)
+    payload = module_inventory_cache_payload([], 6411, None, serial_context=context)
+    cache.set(_cache_key("inventory", device, "primary"), payload, timeout=300)
+    client.force_login(make_superuser("cache-status-module-stray-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    response = client.get(url, {"server_key": "primary"})
+
+    assert owner.pk == device.pk and context.unavailable
+    assert response.status_code == 200
+    assert response.json()["tabs"]["modules"]["snapshot_available"] is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stamp", ["current", None, 7])
+def test_the_cached_module_table_renders_no_table_for_a_snapshot_without_a_serial_context_stamp(settings, stamp):
+    """Only rows of the current refresh go without a stamp; a cached payload with a null one offers no action."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    _configure_servers(settings)
+    device = make_device(f"cache-module-stamp-{stamp}", librenms_cf={"primary": {"id": 6412}})
+    payload = module_inventory_cache_payload([], 6412, None, serial_context=SerialRules.load().for_device(device))
+    if stamp != "current":
+        payload["serial_context"] = stamp
+    cache.set(_cache_key("inventory", device, "primary"), payload, timeout=300)
+    request = make_request("get", {"tab": "modules", "server_key": "primary"}, user=make_superuser(f"stamp-{stamp}"))
+    view = DeviceModuleTableView()
+    view.setup(request, pk=device.pk)
+    # The module actions re-render the tab through this cache-only read.
+    view.cache_only = True
+
+    context = view.get_context_data(request, device, server_key="primary")
+
+    assert (context["table"] is not None) is (stamp == "current")
+
+
+@pytest.mark.django_db
 def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab(client, settings):
     """A snapshot merged from another OOB controller is one the Modules tab rejects, so status must not call it ready."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-    from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+    from netbox_librenms_plugin.sync_cache import cached_module_inventory
+    from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
     _configure_servers(settings)
     device = make_device("cache-status-module-oob", librenms_cf={"primary": {"id": 6407, "oob": {"id": 6408}}})
@@ -393,12 +537,20 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
 
     get_cache_key = DeviceModuleTableView().get_cache_key
 
-    cache.set(key, module_inventory_cache_payload([], 6407, 6408), timeout=300)
+    cache.set(
+        key,
+        module_inventory_cache_payload([], 6407, 6408, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     current = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
-    current_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
-    cache.set(key, module_inventory_cache_payload([], 6407, 6499), timeout=300)
+    current_rows = cached_module_inventory(_get_cached_module_snapshot(device, "primary", get_cache_key))
+    cache.set(
+        key,
+        module_inventory_cache_payload([], 6407, 6499, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     stale = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
-    stale_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
+    stale_rows = cached_module_inventory(_get_cached_module_snapshot(device, "primary", get_cache_key))
     fragment = client.get(fragment_url, {"server_key": "primary"})
 
     assert (current["state"], current["snapshot_available"], current_rows) == ("ready", True, [])
@@ -411,6 +563,7 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
 @pytest.mark.parametrize("remap", ["save", "concurrent_row_write"])
 def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(client, settings, remap):
     """A snapshot of the old host id is one the Modules tab discards, so status must not call it ready."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row
 
     _configure_servers(settings)
@@ -431,7 +584,11 @@ def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(
         rendered = fragment.status_code == 200 and fragment.context["module_sync"]["table"] is not None
         return status["snapshot_available"], rendered
 
-    cache.set(_cache_key("inventory", device, "primary"), module_inventory_cache_payload([], 6407, None), timeout=300)
+    cache.set(
+        _cache_key("inventory", device, "primary"),
+        module_inventory_cache_payload([], 6407, None, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     before = status_and_fragment()
     if remap == "save":
         seed_mapping(device, "primary", own=6410)
@@ -446,6 +603,8 @@ def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(
 @pytest.mark.django_db
 def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, settings, primary_librenms):
     """An OOB-mapped module fragment must not discover a missing host identity."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     _configure_servers(settings)
     device = make_device(
         "cache-only-module",
@@ -453,7 +612,7 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     )
     cache.set(
         _cache_key("inventory", device, "primary"),
-        module_inventory_cache_payload([], 9999, 6405),
+        module_inventory_cache_payload([], 9999, 6405, serial_context=SerialRules.load().for_device(device)),
         timeout=300,
     )
     client.force_login(make_superuser("cache-only-module-user"))
@@ -1309,6 +1468,8 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
     """Submitting the existing serial must not publish a cache mutation."""
     from django.contrib.messages import get_messages
 
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     _configure_servers(settings)
     device = make_device("cache-module-unchanged", librenms_cf={"primary": {"id": 641}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
@@ -1318,7 +1479,10 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
     inventory_payload = module_inventory_cache_payload(
-        [_module_row(8102, bay, module_type, "UNCHANGED-SERIAL")], 641, None
+        [_module_row(8102, bay, module_type, "UNCHANGED-SERIAL")],
+        641,
+        None,
+        serial_context=SerialRules.load().for_device(device),
     )
     _seed_snapshot("inventory", device, "primary", inventory_payload)
     _seed_snapshot("ports", device, "primary")
@@ -1347,6 +1511,8 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
     django_capture_on_commit_callbacks,
 ):
     """A module writer must resolve its active namespace before it mutates."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     _configure_servers(settings)
     device = make_device("cache-module-missing-server", librenms_cf={"primary": {"id": 642}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
@@ -1355,7 +1521,9 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         model="Cache Scoped Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
-    inventory_payload = module_inventory_cache_payload([_module_row(8103, bay, module_type, "NEW")], 642, None)
+    inventory_payload = module_inventory_cache_payload(
+        [_module_row(8103, bay, module_type, "NEW")], 642, None, serial_context=SerialRules.load().for_device(device)
+    )
     _seed_snapshot(
         "inventory",
         device,

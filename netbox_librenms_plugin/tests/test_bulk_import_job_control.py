@@ -200,7 +200,7 @@ class TestCollisionScanCancellation:
         )
 
         assert collisions == []
-        assert unresolved == [201, 202, 203]
+        assert list(unresolved) == [201, 202, 203]
         assert live_librenms.server.requests == []
 
     def test_a_mid_scan_stop_marks_every_unscanned_id_unresolved(self, live_librenms, rq_job):
@@ -219,7 +219,7 @@ class TestCollisionScanCancellation:
         )
 
         assert collisions == []
-        assert unresolved == device_ids[4:]
+        assert list(unresolved) == device_ids[4:]
         # Four scanned rows, each costing a device lookup plus the stack-identity inventory read.
         # The remaining three ids are never requested, which is what proves the scan stopped.
         assert len(live_librenms.server.requests) == 8
@@ -251,7 +251,7 @@ class TestCollisionScanFetchFailure:
         )
 
         assert collisions == []
-        assert unresolved == [301]
+        assert list(unresolved) == [301]
 
     def test_a_cache_backend_failure_mid_lookup_marks_the_row_unresolved(self, live_librenms, caplog):
         """get_device_info writes its result to Redis; a real Redis outage raises out of the client."""
@@ -267,7 +267,7 @@ class TestCollisionScanFetchFailure:
             collisions, unresolved = detect_collisions_for_device_ids([302], live_librenms.api, libre_devices_cache={})
 
         assert collisions == []
-        assert unresolved == [302]
+        assert list(unresolved) == [302]
         assert any(
             "Collision pre-check couldn't fetch device 302" in message
             for message in _messages_from(caplog, _MODULE_LOGGER)
@@ -288,7 +288,7 @@ class TestCollisionScanFetchFailure:
                 [303], live_librenms.api, libre_devices_cache={}, job=job
             )
 
-        assert unresolved == [303]
+        assert list(unresolved) == [303]
         assert any(
             "Collision pre-check couldn't fetch device 303" in message
             for message in _messages_from(caplog, "collision-scan-job")
@@ -508,14 +508,14 @@ class TestStackImportPermission:
             device_id,
             f"stack-noperm-{device_id}",
             hardware=prerequisites["hardware"],
-            serial="SN-NP-A",
+            serial="SN-NP-A01",
             location=prerequisites["location"],
         )
         _register_stack(
             live_librenms,
             device_id,
             row,
-            [_chassis(100, "SN-NP-A", position=1), _chassis(200, "SN-NP-B", position=2)],
+            [_chassis(100, "SN-NP-A01", position=1), _chassis(200, "SN-NP-B01", position=2)],
         )
         user = make_user_with_perms(
             f"stack-noperm-user-{device_id}",
@@ -598,7 +598,7 @@ class TestStackImportCreatesTheVirtualChassis:
     def test_member_serials_key_the_chassis_and_the_members_are_created(self, live_librenms, caplog):
         from dcim.models import Device, VirtualChassis
 
-        members = [_chassis(100, "SN-VC-A", position=1), _chassis(200, "SN-VC-B", position=2)]
+        members = [_chassis(100, "SN-VC-A01", position=1), _chassis(200, "SN-VC-B01", position=2)]
 
         with caplog.at_level("INFO", logger=_MODULE_LOGGER):
             result = self._import(live_librenms, {411: members}, tag="stack-ok")
@@ -609,7 +609,7 @@ class TestStackImportCreatesTheVirtualChassis:
         chassis = VirtualChassis.objects.get(domain="librenms-default-411")
         members_in_netbox = Device.objects.filter(virtual_chassis=chassis)
         # The imported device is member A, so only member B is created beside it.
-        assert sorted(members_in_netbox.values_list("serial", flat=True)) == ["SN-VC-A", "SN-VC-B"]
+        assert sorted(members_in_netbox.values_list("serial", flat=True)) == ["SN-VC-A01", "SN-VC-B01"]
 
     def test_one_serial_set_under_two_different_member_labels_creates_one_chassis(self, live_librenms):
         """The dedup key is the member SERIAL set, not the member names, models or positions."""
@@ -643,6 +643,68 @@ class TestStackImportCreatesTheVirtualChassis:
         assert result["virtual_chassis_created"] == 0
         assert len(result["warnings"]) == 2
         assert not VirtualChassis.objects.filter(domain__startswith="librenms-default-43").exists()
+
+    @pytest.mark.parametrize(
+        ("member_serials", "refused_positions"),
+        [(("12", "34"), [2, 3]), (("", "SN-SHORT-C"), [2]), (("SN-SHORT-B", "SN-SHORT-C"), [])],
+        ids=["short-serials", "blank-serial", "identity-serials"],
+    )
+    def test_a_member_serial_that_gives_no_name_under_a_serial_pattern_refuses_the_stack(
+        self, live_librenms, member_serials, refused_positions
+    ):
+        """A serial without an identity gives no ``{serial}`` name, so the preview and the import refuse the stack."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+        settings_row.vc_member_name_pattern = "-{serial}"
+        settings_row.save()
+        prerequisites = _prerequisites("stack-short")
+        members = [
+            _chassis(100, "MASTER123", position=1),
+            _chassis(200, member_serials[0], position=2),
+            _chassis(300, member_serials[1], position=3),
+        ]
+        row = _libre_device(
+            461,
+            "stack-short-461",
+            hardware=prerequisites["hardware"],
+            serial="MASTER123",
+            location=prerequisites["location"],
+        )
+        _register_stack(live_librenms, 461, row, members)
+        preview = validate_device_for_import(row, api=live_librenms.api, server_key="default", force_vc_refresh=True)
+
+        result = bulk_import_devices_shared(
+            [461],
+            server_key="default",
+            manual_mappings_per_device={461: prerequisites},
+            libre_devices_cache={461: row},
+            user=make_superuser("stack-short-user"),
+        )
+
+        # The preview needs a role picked before import in every case; the member issues are the stack's own.
+        assert [issue.partition(":")[0] for issue in preview["issues"] if issue.startswith("Stack member ")] == [
+            f"Stack member {position}" for position in refused_positions
+        ]
+        previewed = {member["position"]: member["suggested_name"] for member in preview["virtual_chassis"]["members"]}
+        # The preview suggests no name for a member that the pattern gives none.
+        assert [position for position, name in previewed.items() if not name] == refused_positions
+        if refused_positions:
+            assert [entry["device_id"] for entry in result["failed"]] == [461]
+            assert all(f"Stack member {position}" in result["failed"][0]["error"] for position in refused_positions)
+            assert not Device.objects.filter(name__startswith="stack-short-461").exists()
+            assert not VirtualChassis.objects.filter(domain="librenms-default-461").exists()
+            return
+        assert result["failed"] == []
+        assert result["virtual_chassis_created"] == 1
+        chassis = VirtualChassis.objects.get(domain="librenms-default-461")
+        created = dict(Device.objects.filter(virtual_chassis=chassis).values_list("vc_position", "name"))
+        assert sorted(created) == [1, 2, 3]
+        assert previewed == created
 
     def test_the_job_logger_reports_the_created_chassis(self, live_librenms, rq_job, caplog):
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("stack-create-job"))

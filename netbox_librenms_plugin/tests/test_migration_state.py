@@ -1,6 +1,7 @@
 """Guard against model/migration state drift for the plugin's own models."""
 
 import importlib
+import uuid
 
 import pytest
 
@@ -170,7 +171,7 @@ def test_reverse_inventory_seed_preserves_operator_rules(operator_edited):
     if operator_edited:
         inventory_rule.description = "Operator-owned inventory rule"
         inventory_rule.save()
-        serial_rule.replacement = r"serial-\1"
+        serial_rule.description = "Operator-owned serial rule"
         serial_rule.save()
     before_inventory = InventoryIgnoreRule.objects.filter(pk=inventory_rule.pk).values().get()
     before_serial = NormalizationRule.objects.filter(pk=serial_rule.pk).values().get()
@@ -379,3 +380,255 @@ def test_interface_rules_validate_legacy_output_before_schema_changes(librenms_t
     finally:
         with connection.schema_editor() as editor:
             editor.delete_model(model)
+
+
+_TRGM_MIGRATION = "netbox_librenms_plugin.migrations.0030_serial_trigram_indexes"
+
+
+def _trigram_index_schemas():
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT index_class.relname, index_class.relnamespace::regnamespace::text,
+                   operator_class.opcnamespace::regnamespace::text, index_state.indisvalid
+            FROM pg_index AS index_state
+            JOIN pg_class AS index_class ON index_class.oid = index_state.indexrelid
+            JOIN pg_opclass AS operator_class ON operator_class.oid = index_state.indclass[0]
+            WHERE index_class.relname IN ('nblp_dcim_device_serial_trgm_idx', 'nblp_dcim_module_serial_trgm_idx')
+              AND pg_table_is_visible(index_class.oid)
+            ORDER BY index_class.relname
+            """
+        )
+        return cursor.fetchall()
+
+
+def _trigram_index_oids():
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT relname, oid FROM pg_class"
+            " WHERE relname IN ('nblp_dcim_device_serial_trgm_idx', 'nblp_dcim_module_serial_trgm_idx')"
+            " AND pg_table_is_visible(oid)"
+            " ORDER BY relname"
+        )
+        return cursor.fetchall()
+
+
+def _probe_schema_name():
+    """Return a schema name that no other run uses, so the cleanup drops only the schema of this test."""
+    return f"nblp_probe_{uuid.uuid4().hex}"
+
+
+def _run_index_step(step):
+    from django.db import connection
+
+    with connection.schema_editor(atomic=False) as editor:
+        getattr(importlib.import_module(_TRGM_MIGRATION), step)(None, editor)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_trigram_migration_finds_its_indexes_in_the_schema_of_their_table():
+    """A search path whose first schema exists makes current_schema() differ from the schema of the tables."""
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm'")
+        (extension_schema,) = cursor.fetchone()
+    schema = _probe_schema_name()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"CREATE SCHEMA {schema}")
+            cursor.execute(f"SET search_path = {schema}, public")
+        _run_index_step("ensure_serial_trigram_indexes")
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("RESET search_path")
+            cursor.execute(f"DROP SCHEMA IF EXISTS {schema}")
+
+    assert _trigram_index_schemas() == [
+        ("nblp_dcim_device_serial_trgm_idx", "public", extension_schema, True),
+        ("nblp_dcim_module_serial_trgm_idx", "public", extension_schema, True),
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("schema_suffix", ["ops", '"ops%'], ids=["plain", "quoted"])
+def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extension(schema_suffix):
+    """pg_trgm installed in a schema outside the search path still gives the indexes their operator class."""
+    from django.db import OperationalError, connection
+    from psycopg import sql
+    from psycopg.errors import LockNotAvailable
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_has_role(extowner, 'MEMBER'), pg_get_userbyid(extowner), extnamespace::regnamespace::text"
+            " FROM pg_extension WHERE extname = 'pg_trgm'"
+        )
+        can_move, owner, home = cursor.fetchone()
+    if not can_move:
+        pytest.fail(f"Only the owner of pg_trgm can move it: run the tests as {owner!r} or as a superuser")
+    extension_schema = f"{_probe_schema_name()}_trgm{schema_suffix}"
+    table_schema = f"{_probe_schema_name()}_tables{schema_suffix}"
+    extension = sql.Identifier(extension_schema)
+    tables = sql.Identifier(table_schema)
+    indexes = importlib.import_module(_TRGM_MIGRATION)._TRIGRAM_INDEXES
+    moved = False
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(extension))
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(tables))
+            cursor.execute(sql.SQL("ALTER EXTENSION pg_trgm SET SCHEMA {}").format(extension))
+            moved = True
+            cursor.execute(sql.SQL("SET search_path = {}").format(tables))
+            cursor.execute("SELECT quote_ident(%s), quote_ident(%s)", [table_schema, extension_schema])
+            table_name, extension_name = cursor.fetchone()
+            for _, table in indexes:
+                cursor.execute(sql.SQL("CREATE TABLE {} (serial varchar(50))").format(sql.Identifier(table)))
+
+        name, table = indexes[0]
+        with second_connection() as other, other.cursor() as writer, connection.cursor() as cursor:
+            writer.execute(
+                sql.SQL("INSERT INTO {} (serial) VALUES ('ABC123')").format(sql.Identifier(table_schema, table))
+            )
+            cursor.execute("SET lock_timeout = '1s'")
+            try:
+                with pytest.raises(OperationalError) as caught:
+                    cursor.execute(
+                        sql.SQL("CREATE INDEX CONCURRENTLY {} ON {} USING gin ((btrim(serial, {})) {})").format(
+                            sql.Identifier(name),
+                            sql.Identifier(table),
+                            sql.Literal(" \t\n\r\v\f"),
+                            sql.Identifier(extension_schema, "gin_trgm_ops"),
+                        )
+                    )
+                assert isinstance(caught.value.__cause__, LockNotAvailable)
+            finally:
+                cursor.execute("RESET lock_timeout")
+        assert _trigram_index_schemas() == [(name, table_name, extension_name, False)]
+        invalid_oids = _trigram_index_oids()
+
+        _run_index_step("ensure_serial_trigram_indexes")
+        built, built_oids = _trigram_index_schemas(), _trigram_index_oids()
+        assert built_oids[0] != invalid_oids[0]
+        _run_index_step("ensure_serial_trigram_indexes")
+        assert _trigram_index_oids() == built_oids
+        _run_index_step("drop_serial_trigram_indexes")
+        assert _trigram_index_schemas() == []
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("RESET search_path")
+            if moved:
+                cursor.execute(f"ALTER EXTENSION pg_trgm SET SCHEMA {home}")
+            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(tables))
+            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {}").format(extension))
+
+    assert built == [(name, table_name, extension_name, True) for name, _ in indexes]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_trigram_migration_requires_the_serial_columns_collation():
+    from django.db import connection
+    from psycopg import sql
+
+    schema = sql.Identifier(_probe_schema_name())
+    indexes = importlib.import_module(_TRGM_MIGRATION)._TRIGRAM_INDEXES
+    name, table = map(sql.Identifier, indexes[0])
+    try:
+        with connection.cursor() as cursor:
+            # nspname is the raw name; regnamespace::text quotes it.
+            cursor.execute(
+                "SELECT nspname FROM pg_extension JOIN pg_namespace ON pg_namespace.oid = extnamespace"
+                " WHERE extname = 'pg_trgm'"
+            )
+            (extension_schema,) = cursor.fetchone()
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(schema))
+            cursor.execute(sql.SQL("SET search_path = {}").format(schema))
+            for _, table_name in indexes:
+                cursor.execute(
+                    sql.SQL('CREATE TABLE {} (serial varchar(50) COLLATE "POSIX")').format(sql.Identifier(table_name))
+                )
+            create = sql.SQL("CREATE INDEX {} ON {} USING gin ((btrim(serial, {})) COLLATE {} {})")
+            opclass = sql.Identifier(extension_schema, "gin_trgm_ops")
+            trim = sql.Literal(" \t\n\r\v\f")
+            cursor.execute(create.format(name, table, trim, sql.Identifier("C"), opclass))
+
+        with pytest.raises(RuntimeError, match="incompatible definition"):
+            _run_index_step("ensure_serial_trigram_indexes")
+
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP INDEX {}").format(name))
+            cursor.execute(create.format(name, table, trim, sql.Identifier("POSIX"), opclass))
+        (staged,) = _trigram_index_oids()
+
+        _run_index_step("ensure_serial_trigram_indexes")
+
+        assert staged in _trigram_index_oids()
+        assert len(_trigram_index_oids()) == len(indexes)
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("RESET search_path")
+            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(schema))
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_trigram_migration_reverse_does_not_block_new_reads_behind_an_open_read():
+    """A plain DROP INDEX queues for ACCESS EXCLUSIVE behind an open read, and a new read waits behind it."""
+    import threading
+    import time
+
+    from dcim.models import Device
+    from django.db import connection, transaction
+
+    from netbox_librenms_plugin.tests.conftest import run_in_threads
+
+    reading, release = threading.Event(), threading.Event()
+
+    def open_read():
+        try:
+            with transaction.atomic():
+                Device.objects.exists()
+                reading.set()
+                assert release.wait(30)
+        finally:
+            connection.close()
+
+    def reverse():
+        assert reading.wait(30)
+        try:
+            _run_index_step("drop_serial_trigram_indexes")
+        finally:
+            connection.close()
+
+    def new_read():
+        try:
+            assert reading.wait(30)
+            deadline = time.monotonic() + 30
+            with connection.cursor() as cursor:
+                while True:
+                    cursor.execute(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND wait_event_type = 'Lock' AND query LIKE 'DROP INDEX%'"
+                    )
+                    if cursor.fetchone()[0]:
+                        break
+                    assert time.monotonic() < deadline, "the reverse did not start to wait"
+                    time.sleep(0.05)
+            with transaction.atomic(), connection.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '2s'")
+                cursor.execute("SELECT count(*) FROM dcim_device")
+                return cursor.fetchone()[0]
+        finally:
+            release.set()
+            connection.close()
+
+    try:
+        _reader, _reverse, count = run_in_threads(open_read, reverse, new_read, barriers=(), timeout=60)
+        assert count == Device.objects.count()
+        assert _trigram_index_schemas() == []
+    finally:
+        _run_index_step("ensure_serial_trigram_indexes")

@@ -24,6 +24,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     make_view,
     message_texts,
+    move_offer_fields,
     post as view_post,
     rendered_modal_form,
     rendered_preview_query,
@@ -106,18 +107,17 @@ class TestModuleMismatchPreviewView:
         inventory = [_row(100, bay, librenms_model or module_type.model, serial)]
         return device, installed, request, view, inventory
 
-    def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
+    def test_the_preview_shows_the_librenms_serial_and_no_mismatch_for_a_legacy_stored_form(self):
         """
-        Juniper reports "S/N NS123"; the install path stores "NS123" through the serial rules.
+        Juniper reports "S/N NS123"; an older release stored the rule output "NS123".
 
-        Rendering the raw value beside the stored one reads as a mismatch against a module that
-        already agrees with its own inventory row.
+        The serial rules name one part with both texts, so the preview is no serial mismatch.
         """
         from dcim.models import Module
 
         device, installed, request, view, inventory = self._setup("marker", installed_serial="OLD", serial="S/N NS123")
         cache_key = _cache_preview(view, device, inventory, request)
-        # Another writer stores the clean serial after the page renders, so the module agrees with its row.
+        # The legacy stored form lands after the page renders, so the module agrees with its row.
         Module.objects.filter(pk=installed.pk).update(serial="NS123")
         try:
             response = view_get(view, request, pk=device.pk)
@@ -126,10 +126,69 @@ class TestModuleMismatchPreviewView:
 
         html = response.content.decode()
         assert response.status_code == 200
-        assert "S/N NS123" not in html
-        assert "NS123" in html
+        assert "S/N NS123" in html
         # The reported symptom: the row read as a serial mismatch against itself.
         assert "Only the serial differs" not in html
+
+    @pytest.mark.parametrize(("held", "offered"), [("S/N ABC123", False), ("OTHER123", True)])
+    def test_the_preview_offers_no_serial_write_beside_a_legacy_row(self, held, offered):
+        """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123"; both writers refuse beside it."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device, installed, request, view, inventory = self._setup(f"legacy-{offered}", serial="S/N S/N ABC123")
+        _module(device, make_module_bay(device, f"Preview Sibling {offered}"), installed.module_type, held)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        actions = [form["action"] for form in module_tab_forms(response.content.decode()).forms]
+        assert any("update-module-serial" in action for action in actions) is offered
+        assert any("replace-module" in action for action in actions) is offered
+
+    @pytest.mark.parametrize(("serial", "fits"), [("N" * 50, True), ("N" * 51, False)])
+    def test_the_preview_offers_no_serial_write_for_a_serial_that_does_not_fit(self, serial, fits):
+        """The serial field holds 50 characters, and both the serial update and Replace store the LibreNMS text."""
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+        device, _installed, request, view, inventory = self._setup(f"fit-{fits}", serial=serial)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert serial in html
+        actions = [form["action"] for form in module_tab_forms(html).forms]
+        assert any("update-module-serial" in action for action in actions) is fits
+        assert any("replace-module" in action for action in actions) is fits
+        reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
+        assert (escape(reason) in html) is (not fits)
+
+    def test_the_preview_of_a_type_mismatch_shows_a_serial_with_an_unpaired_surrogate(self):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
+        reported_type = make_module_type("SURROGATE-REPORTED-TYPE")
+        device, _installed, request, view, inventory = self._setup(
+            "surrogate", librenms_model=reported_type.model, serial="ABC\ud800DEF"
+        )
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        assert "ABC\ufffdDEF" in response.content.decode()
 
     def test_the_recognised_type_icon_is_named(self):
         device, installed, request, view, inventory = self._setup("named-icon")
@@ -268,6 +327,49 @@ class TestModuleMismatchPreviewView:
         assert str(conflict.device) in html
         assert "CONFLICT-SERIAL" in html
 
+    def test_a_conflict_on_a_device_the_viewer_cannot_see_is_not_named(self):
+        """A viewer of the Module who cannot view its Device gets the hidden-conflict text, not the Device and bay."""
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device, installed, _request, _view_unused, inventory = self._setup("hidden-device", serial="HIDDEN-SERIAL")
+        other_device = make_device("preview-hidden-device-owner")
+        _module(
+            other_device,
+            make_module_bay(other_device, "Hidden Owner Bay"),
+            make_module_type("HIDDEN-T"),
+            "HIDDEN-SERIAL",
+        )
+        user = make_user_with_perms(
+            "preview-hidden-device",
+            [
+                ("view", Module),
+                ("add", Module),
+                ("change", Module),
+                ("delete", Module),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+            ],
+        )
+        user = grant(user, "view", Device, constraints={"name": device.name})
+        request = make_request(
+            "get", {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"}, user=user
+        )
+        view = _view(ModuleMismatchPreviewView, request)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert other_device.name not in html
+        assert "Hidden Owner Bay" not in html
+        assert 'name="conflict_module_id"' not in html
+
 
 class TestReplaceModuleView:
     def _setup(self, tag, *, new_serial="NEW-SERIAL", item_extra=None):
@@ -292,8 +394,8 @@ class TestReplaceModuleView:
         request = make_request("post", fields, user=user)
         return request, _view(ReplaceModuleView, request), cache_key
 
-    def test_the_replacement_stores_the_serial_without_the_vendor_marker(self):
-        """The stored serial must match what the install path writes for the same inventory row."""
+    def test_the_replacement_stores_the_librenms_text(self):
+        """The replacement stores what the install path writes for the same inventory row: the LibreNMS text."""
         Module, device, _old_type, _new_type, bay, _installed, inventory = self._setup("marker", new_serial="S/N NS123")
         request, view, cache_key = self._post(device, inventory)
         try:
@@ -302,7 +404,7 @@ class TestReplaceModuleView:
             cache.delete(cache_key)
 
         assert response.status_code == 302
-        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+        assert Module.objects.get(device=device, module_bay=bay).serial == "S/N NS123"
 
     def test_a_database_error_in_the_bind_keeps_the_replacement(self):
         """The bind's own savepoint takes a real PostgreSQL error; the replacement still commits."""
@@ -327,9 +429,10 @@ class TestReplaceModuleView:
         assert interface.module_id is None
         assert any("interface binding was skipped: unexpected error" in text for text in message_texts(request))
 
-    def test_a_rule_that_leaves_padding_still_stores_a_clean_serial(self):
-        """A serial rule is operator-written, so it can drop a prefix and leave the space behind."""
+    def test_a_rule_that_leaves_padding_still_keys_the_stored_serial(self):
+        """A serial rule is operator-written, so it can drop a prefix and leave the space behind; the key is trimmed."""
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import resolve_module
 
         NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
         NormalizationRule.objects.create(
@@ -345,7 +448,9 @@ class TestReplaceModuleView:
         finally:
             cache.delete(cache_key)
 
-        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+        stored = Module.objects.get(device=device, module_bay=bay)
+        assert stored.serial == "S/N NS123"
+        assert resolve_module("NS123").object == stored
 
     def test_an_oob_row_named_with_the_grant_of_a_host_row_cannot_replace_the_module(self):
         """A crafted POST naming an OOB row's index deleted the real module; the grant now names the host row only."""
@@ -447,8 +552,40 @@ class TestReplaceModuleView:
         assert replacement.serial == "SHARED-NEW-SERIAL"
         assert any("Removed REPLACE-CONFLICT-OWNER-TYPE" in text for text in message_texts(request, "info"))
 
+    @pytest.mark.parametrize(("held", "refused"), [("S/N ABC123", True), ("OTHER123", False)])
+    def test_replacement_refuses_a_sibling_that_stores_the_rule_output(self, held, refused):
+        """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123", which keys again."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        Module, device, old_type, new_type, bay, installed, inventory = self._setup(
+            f"legacy-{refused}", new_serial="S/N S/N ABC123"
+        )
+        sibling = _module(device, make_module_bay(device, f"Replace Sibling {refused}"), old_type, "PRE-RENDER-SN")
+        request, view, cache_key = self._post(device, inventory)
+        # The dialog offers no Replace beside the legacy row, so its serial lands after the render.
+        Module.objects.filter(pk=sibling.pk).update(serial=held)
+        try:
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        replacement = Module.objects.get(device=device, module_bay=bay)
+        if refused:
+            assert message_texts(request, "error") == [
+                "Serial 'S/N S/N ABC123' is already installed on this device. Nothing was replaced."
+            ]
+            assert replacement.pk == installed.pk
+        else:
+            assert (replacement.module_type, replacement.serial) == (new_type, "S/N S/N ABC123")
+        sibling.refresh_from_db()
+        assert sibling.serial == held
+
     def test_interface_scope_is_checked_before_the_old_module_is_deleted(self):
-        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant
 
@@ -463,6 +600,7 @@ class TestReplaceModuleView:
             "replace-adoption-scope",
             [
                 ("view", Device),
+                ("view", ModuleBay),
                 ("view", ModuleType),
                 ("view", Module),
                 ("add", Module),
@@ -539,6 +677,7 @@ class TestMoveModuleView:
                 "module_id": str(occupant.pk),
                 "selected_device_id": str(target_device.pk),
                 "server_key": "default",
+                **move_offer_fields(occupant, moving),
             },
         )
 
@@ -629,6 +768,101 @@ class TestMoveModuleView:
         assert message_texts(response.wsgi_request) == [TRY_AGAIN_MESSAGE]
         moving.refresh_from_db()
         assert moving.device == source_device
+
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    @pytest.mark.parametrize("holder", ["destination-module", "moved-child", "moved-pair"])
+    def test_a_move_refuses_a_subtree_serial_that_the_destination_rules_give_a_held_identity(self, client, holder):
+        """The destination's maker keys the moved child "XABC" to "ABC", which a destination module or a moved child stores."""
+        from dcim.models import Device, DeviceType, Manufacturer, ModuleBay
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import RELOCATION_HELD
+
+        tag = f"move-identity-{holder}"
+        source_device, target_device = make_device(f"{tag}-source"), make_device(f"{tag}-target")
+        target_maker = Manufacturer.objects.create(name=f"Move identity {holder}", slug=f"{tag}-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=target_maker
+        )
+        target_type = DeviceType.objects.create(
+            manufacturer=target_maker, model=f"Move identity {holder}", slug=f"{tag}-type"
+        )
+        Device.objects.filter(pk=target_device.pk).update(device_type=target_type)
+        target_device.refresh_from_db()
+        module_type = make_module_type(f"{tag}-card".upper())
+        parent = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "ROOT123")
+        # A moved pair already shares "ABC" on the source; the destination may still not hold it twice.
+        children = {"moved-child": ["XABC", "ABC"], "moved-pair": ["ABC", "ABC"]}.get(holder, ["XABC"])
+        for number, serial in enumerate(children, start=1):
+            bay = ModuleBay.objects.create(device=source_device, module=parent, name=f"Sub {number}")
+            _module(source_device, bay, module_type, serial)
+        if holder == "destination-module":
+            _module(target_device, make_module_bay(target_device, "Held Bay"), module_type, "ABC")
+        target_bay = make_module_bay(target_device, "Target Bay")
+        fields = {
+            "conflict_module_id": str(parent.pk),
+            "target_bay_id": str(target_bay.pk),
+            "selected_device_id": str(target_device.pk),
+        }
+        occupant = None
+        if holder == "destination-module":
+            # The move deletes the named occupant first, so the refusal must roll the delete back.
+            occupant = _module(target_device, target_bay, make_module_type(f"{tag}-occupant".upper()), "OCCUPANT123")
+            fields.update(module_id=str(occupant.pk), **move_offer_fields(occupant, parent))
+        client.force_login(make_superuser(f"{tag}-user"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}), fields
+        )
+
+        assert response.status_code == 302
+        # Another refusal also redirects and keeps the parent, so the refusal must be the identity conflict.
+        assert message_texts(response.wsgi_request) == [f"Move failed: {RELOCATION_HELD}"]
+        parent.refresh_from_db()
+        assert parent.device == source_device
+        if occupant is not None:
+            occupant.refresh_from_db()
+            assert occupant.module_bay == target_bay
+
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    @pytest.mark.parametrize(("held", "refused"), [("S/N ABC123", True), ("OTHER123", False)])
+    def test_a_move_refuses_a_destination_row_that_stores_the_rule_output(self, client, held, refused):
+        """An earlier release stored "S/N S/N ABC123" as its rule output "S/N ABC123", which keys again."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import RELOCATION_HELD
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        tag = f"move-legacy-{refused}"
+        source_device, target_device = make_device(f"{tag}-source"), make_device(f"{tag}-target")
+        module_type = make_module_type(f"{tag}-card".upper())
+        moving = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "S/N S/N ABC123")
+        holder = _module(target_device, make_module_bay(target_device, "Held Bay"), module_type, held)
+        target_bay = make_module_bay(target_device, "Target Bay")
+        client.force_login(make_superuser(f"{tag}-user"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}),
+            {
+                "conflict_module_id": str(moving.pk),
+                "target_bay_id": str(target_bay.pk),
+                "selected_device_id": str(target_device.pk),
+            },
+        )
+
+        assert response.status_code == 302
+        moving.refresh_from_db()
+        if refused:
+            assert message_texts(response.wsgi_request) == [f"Move failed: {RELOCATION_HELD}"]
+            assert moving.device == source_device
+        else:
+            assert (moving.device, moving.module_bay) == (target_device, target_bay)
+        holder.refresh_from_db()
+        assert holder.serial == held
 
     def test_real_permission_gate_rejects_a_user_without_change_scope(self):
         from dcim.models import Device

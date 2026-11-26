@@ -27,7 +27,7 @@ from netbox_librenms_plugin.data_shapes.recordings_store import (
     recording_meta,
 )
 from netbox_librenms_plugin.import_utils.virtual_chassis import extract_vc_stack, select_vc_parent_index
-from netbox_librenms_plugin.utils import normalize_stack_serial
+from netbox_librenms_plugin.serial_identity import plain_context
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -142,26 +142,44 @@ def _vc_rows(recording):
     return root_items, child_items
 
 
-def vc_detecting_serial_key(recording, serial_keys):
+def vc_detecting_context(recording, contexts):
     """
-    Return the first of *serial_keys* under which a raw capture holds a stack, or the first key.
+    Return the first of the serial *contexts* under which a raw capture holds a stack, or the first context.
 
-    Detection accepts a stack that any candidate key explains, so a capture must anonymize serials
-    with that key for the recording to keep the stack.
+    An Unavailable first context is returned at once: the device's own context decides whether a capture can run.
+
+    Detection accepts a stack that any candidate context explains, so a capture must anonymize serials
+    under that context for the recording to keep the stack. Only a Junos FPC stack depends on a context,
+    so *contexts* is read after its first item only when the rows describe FPC members to compare.
     """
     root_items, child_items = _vc_rows(recording)
     rows = [*root_items, *child_items]
-    return next((key for key in serial_keys if extract_vc_stack(rows, (key,)).members), serial_keys[0])
+    remaining = iter(contexts)
+    first = next(remaining, None)
+    if first is None:
+        raise ValueError("Stack detection requires at least one serial context.")
+    if first.unavailable:
+        return first
+    read = [first]
+
+    def candidates():
+        yield first
+        for context in remaining:
+            read.append(context)
+            yield context
+
+    # extract_vc_stack stops reading candidates at the first context that explains the FPC serials.
+    return read[-1] if extract_vc_stack(rows, candidates()).members else first
 
 
-def compute_shape_signature(recording, *, serial_key=normalize_stack_serial):
+def compute_shape_signature(recording, *, serial_context=None):
     """
     Compute the testing-relevant fingerprint of a recording.
 
     Args:
         recording (dict): A recording (raw or anonymized — the signature only reads structural
             fields that anonymization preserves).
-        serial_key: The production serial key for a raw capture. Offline recordings compare stored serials.
+        serial_context: The production serial context for a raw capture. None compares stored serials without rules.
 
     Returns:
         dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base,member_shape},
@@ -186,7 +204,7 @@ def compute_shape_signature(recording, *, serial_key=normalize_stack_serial):
     elif any(i.get("entPhysicalClass") == "chassis" for i in root_items):
         root_class = "chassis"
     # Live callers supply their serial key. Anonymized recordings already preserve that equality.
-    stack = extract_vc_stack([*root_items, *child_items], (serial_key,))
+    stack = extract_vc_stack([*root_items, *child_items], (serial_context or plain_context(),))
     members = stack.members
     vc = {
         "present": bool(members),

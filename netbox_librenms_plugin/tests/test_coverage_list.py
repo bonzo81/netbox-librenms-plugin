@@ -9,7 +9,7 @@ from django.http import QueryDict
 from django.test import RequestFactory
 from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import make_superuser
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -221,12 +221,12 @@ class TestCompletedJobResults:
     ):
         from core.models import Job
 
-        from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
         user = _create_user(django_user_model, "completed-job")
         filters = {"hostname": "edge"}
-        cached_device = _device(4201)
+        _register_devices(librenms_server, [_device(4201)])
         job = Job.objects.create(
             name="Completed import search",
             user=user,
@@ -243,23 +243,16 @@ class TestCompletedJobResults:
                 "cache_timeout": 600,
             },
         )
-        cache.set(
-            get_validated_device_cache_key(
-                server_key=SERVER_KEY,
-                filters=filters,
-                device_id=4201,
-                vc_enabled=True,
-                use_sysname=False,
-                strip_domain=True,
-            ),
-            cached_device,
-            timeout=600,
-        )
+        cache.set(get_import_device_cache_key(4201, SERVER_KEY), _device(4201), timeout=600)
+        # Mapped after the job cached the row: the loader validates the row again.
+        mapped = make_device("completed-job-mapped", librenms_cf={SERVER_KEY: {"id": 4201}})
 
         view = LibreNMSImportView()
         result = view._load_job_results(job.pk, user)
 
-        assert result == [cached_device]
+        assert [row["device_id"] for row in result] == [4201]
+        assert result[0]["_validation"]["existing_device"] == mapped
+        assert result[0]["_validation"]["existing_match_type"] == "librenms_id"
         assert view._active_server_key == SERVER_KEY
         assert view._cache_timestamp == "2026-08-30T12:00:00+00:00"
         assert view._cache_timeout == 600
@@ -385,6 +378,38 @@ class TestImportListRequest:
         assert not Job.objects.exists()
 
     @pytest.mark.django_db
+    def test_a_serial_rule_edit_makes_a_warm_search_cold_for_the_background_decision(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The stack detection keys on the serial rules, so after a rule edit the search queues a job instead."""
+        from unittest.mock import patch
+
+        from core.models import Job
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        _register_devices(librenms_server, [_device()])
+        client.force_login(_create_user(django_user_model, "serial-rule-readiness"))
+        # A synchronous search caches the LibreNMS rows and the search metadata.
+        assert client.get(_import_url(), _search_params()).status_code == 200
+
+        with patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue", return_value=1):
+            warm = client.get(_import_url(), _search_params(use_background_job="1"))
+            assert warm.context is not None and "table" in warm.context
+            assert not Job.objects.exists()
+
+            # An edit keeps the rule PK and the rule count; only the pattern changes.
+            NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+            cold = client.get(_import_url(), _search_params(use_background_job="1"))
+
+        assert cold.json()["use_polling"] is True
+        assert Job.objects.count() == 1
+
+    @pytest.mark.django_db
     def test_synchronous_search_renders_the_real_validated_device(
         self,
         client,
@@ -416,6 +441,168 @@ class TestImportListRequest:
         assert response.context["cache_timestamp"]
         assert response.context["cache_metadata_missing"] is False
         assert len(requests) == 1
+
+    @pytest.mark.django_db
+    def test_a_search_binds_no_device_that_stores_the_text_of_a_json_boolean_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """A Device stores "True" and LibreNMS sends `serial: true`; the batch serial lookup reads the value."""
+        make_device("search-boolean-text-holder", serial="True")
+        _register_devices(librenms_server, [{**_device(4116), "serial": True}])
+        client.force_login(_create_user(django_user_model, "search-boolean-serial"))
+
+        response = client.get(_import_url(), _search_params())
+
+        (row,) = response.context["table"].data
+        assert row["_validation"]["existing_device"] is None
+        assert row["_validation"]["existing_match_type"] is None
+
+    @pytest.mark.django_db
+    def test_a_warm_search_validates_a_row_again_that_stopped_at_an_unavailable_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """Validation stops before the site and type checks, so the cached row must not be reused once the lookup reads."""
+        from dcim.models import Device, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import is_serial_unavailable_issue
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        manufacturer = Manufacturer.objects.create(name="Test Vendor", slug="test-vendor")
+        DeviceType.objects.create(manufacturer=manufacturer, model="Test Router", slug="test-router")
+        Site.objects.create(name="Test Lab", slug="test-lab")
+        device = _device(4111)
+        stray = _stray_chassis_member("warm-unavailable", device["serial"])
+        _register_devices(librenms_server, [device])
+        client.force_login(_create_user(django_user_model, "warm-unavailable-serial"))
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, blocked = validation()
+        assert any(is_serial_unavailable_issue(issue) for issue in blocked["issues"])
+        assert blocked["site"]["found"] is False
+
+        # The stray member gets another serial, so the lookup reads and finds no holder.
+        Device.objects.filter(pk=stray.pk).update(serial="WARM-UNAVAILABLE-OTHER")
+        second, revalidated = validation()
+
+        assert second.context["from_cache"] is True
+        assert not any(is_serial_unavailable_issue(issue) for issue in revalidated["issues"])
+        assert revalidated["site"]["site"].name == "Test Lab"
+        assert revalidated["device_type"]["device_type"].model == "Test Router"
+
+    @pytest.mark.django_db
+    def test_a_warm_search_checks_the_holders_of_a_legacy_linked_serial_again(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The cached row confirms the migration on the serial, so a Device that takes the serial later must show."""
+        from django.template.loader import render_to_string
+
+        payload = _device(4121)
+        make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        _register_devices(librenms_server, [payload])
+        client.force_login(_create_user(django_user_model, "warm-legacy-serial"))
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, cached = validation()
+        assert cached["existing_match_type"] == "librenms_id"
+        assert cached["librenms_id_needs_migration"] is True
+        assert cached["legacy_id_serial_confirmed"] is True
+
+        make_device("warm-legacy-serial-rival", serial=payload["serial"])
+        second, warm = validation()
+
+        assert second.context["from_cache"] is True
+        assert warm["legacy_id_serial_confirmed"] is False
+        assert warm["legacy_id_serial_unavailable"] is False
+        assert warm["legacy_id_serial_shared"] is True
+        details = render_to_string(
+            "netbox_librenms_plugin/htmx/device_validation_details.html",
+            {"validation": warm, "libre_device": payload, "server_key": SERVER_KEY},
+        )
+        assert 'data-serial-state="shared"' in details
+        assert 'class="btn btn-sm btn-warning migrate-btn" disabled>' in details
+
+    @pytest.mark.django_db
+    def test_a_warm_search_drops_the_serial_confirmation_of_a_changed_stored_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """A stored serial that changed after caching confirms nothing, so the row reads neither confirmed nor shared."""
+        from dcim.models import Device
+
+        payload = _device(4122)
+        device = make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        _register_devices(librenms_server, [payload])
+        client.force_login(_create_user(django_user_model, "warm-legacy-changed-serial"))
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, cached = validation()
+        assert cached["serial_confirmed"] is True
+        assert cached["legacy_id_serial_confirmed"] is True
+
+        Device.objects.filter(pk=device.pk).update(serial="REPLACED-CHASSIS")
+        second, warm = validation()
+
+        assert second.context["from_cache"] is True
+        assert warm["serial_confirmed"] is False
+        assert warm["legacy_id_serial_confirmed"] is False
+        assert warm["legacy_id_serial_shared"] is False
+
+    @pytest.mark.django_db
+    def test_a_search_shows_no_countdown_for_metadata_of_other_serial_rules(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+        monkeypatch,
+    ):
+        """Searches under other serial rules share the metadata key, so the countdown must not use their time."""
+        from netbox_librenms_plugin.import_utils import process_device_filters
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        _register_devices(librenms_server, [_device(4131)])
+        client.force_login(_create_user(django_user_model, "countdown-other-rules"))
+
+        def search_then_other_rules_search(**kwargs):
+            result = process_device_filters(**kwargs)
+            # Another request edits a rule and runs the same search before this response reads the metadata.
+            NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+            process_device_filters(**{**kwargs, "serial_rules": SerialRules.load()})
+            return result
+
+        monkeypatch.setattr(
+            "netbox_librenms_plugin.views.imports.list.process_device_filters", search_then_other_rules_search
+        )
+        response = client.get(_import_url(), _search_params())
+
+        assert [row["device_id"] for row in response.context["table"].data] == [4131]
+        assert response.context["cache_timestamp"] is None
+        assert response.context["cache_metadata_missing"] is False
+        assert 'id="cache-info-display"' not in response.content.decode()
 
     @pytest.mark.django_db
     def test_every_filter_reaches_the_real_search_and_client_side_matching(
@@ -463,6 +650,316 @@ class TestImportListRequest:
         assert len(requests) == 1
         assert [row["device_id"] for row in second.context["table"].data] == [4701]
         assert second.context["from_cache"] is True
+
+    @pytest.mark.django_db
+    def test_the_background_results_page_reapplies_exclude_existing(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The page that a finished search opens keeps the form options, so the cached search filters again."""
+        from core.models import Job
+
+        requests = _register_devices(librenms_server, [_device(4801), _device(4802)])
+        user = _create_user(django_user_model, "results-exclude-existing")
+        client.force_login(user)
+        params = _search_params(exclude_existing="on")
+        first = client.get(_import_url(), params)
+        assert sorted(row["device_id"] for row in first.context["table"].data) == [4801, 4802]
+        make_device("results-exclude-existing-mapped", librenms_cf={SERVER_KEY: {"id": 4801}})
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={"device_ids": [4801, 4802], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
+        )
+
+        # The background search opens this URL: the form parameters and the job ID.
+        results = client.get(_import_url(), {**params, "use_background_job": "on", "job_id": job.pk})
+
+        assert results.status_code == 200
+        # Only the mapped row goes: the unmapped row stays in the cached result.
+        assert [row["device_id"] for row in results.context["table"].data] == [4802]
+        assert results.context["from_cache"] is True
+        assert len(requests) == 1
+
+    @pytest.mark.django_db
+    def test_the_background_results_page_validates_a_row_again_that_stopped_at_an_unavailable_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The results page validates the job's rows again, so a repaired serial lookup reads the site and type."""
+        from core.models import Job
+        from dcim.models import Device, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+        from netbox_librenms_plugin.import_utils.device_operations import is_serial_unavailable_issue
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        manufacturer = Manufacturer.objects.create(name="Test Vendor", slug="test-vendor")
+        DeviceType.objects.create(manufacturer=manufacturer, model="Test Router", slug="test-router")
+        Site.objects.create(name="Test Lab", slug="test-lab")
+        device = _device(4112)
+        stray = _stray_chassis_member("results-unavailable", device["serial"])
+        _register_devices(librenms_server, [device])
+        user = _create_user(django_user_model, "results-unavailable-serial")
+        client.force_login(user)
+        client.get(_import_url(), _search_params())
+        Device.objects.filter(pk=stray.pk).update(serial="RESULTS-UNAVAILABLE-OTHER")
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={
+                "device_ids": [4112],
+                "filters": {"hostname": "edge"},
+                "server_key": SERVER_KEY,
+                "serial_rules": serial_rules_version(),
+            },
+        )
+
+        # Without filter parameters the page reads the job's cached rows.
+        results = client.get(_import_url(), {"job_id": job.pk})
+
+        (row,) = results.context["table"].data
+        assert not any(is_serial_unavailable_issue(issue) for issue in row["_validation"]["issues"])
+        assert row["_validation"]["site"]["site"].name == "Test Lab"
+        assert row["_validation"]["device_type"]["device_type"].model == "Test Router"
+
+    @pytest.mark.django_db
+    def test_a_warm_search_validates_a_row_again_that_stopped_at_an_ambiguous_librenms_id(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """An ambiguous ID stops validation before the site and type checks; resolving it leaves a new device."""
+        from dcim.models import Device, DeviceType, Manufacturer, Site
+
+        manufacturer = Manufacturer.objects.create(name="Test Vendor", slug="test-vendor")
+        DeviceType.objects.create(manufacturer=manufacturer, model="Test Router", slug="test-router")
+        Site.objects.create(name="Test Lab", slug="test-lab")
+        _register_devices(librenms_server, [_device(4113)])
+        twins = [make_device(f"warm-ambiguous-{n}", librenms_cf={SERVER_KEY: {"id": 4113}}) for n in (1, 2)]
+        client.force_login(_create_user(django_user_model, "warm-ambiguous-id"))
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, blocked = validation()
+        assert blocked["ambiguous_librenms_id"] is True
+        assert blocked["site"]["found"] is False
+
+        Device.objects.filter(pk__in=[twin.pk for twin in twins]).delete()
+        second, revalidated = validation()
+
+        assert second.context["from_cache"] is True
+        assert revalidated["ambiguous_librenms_id"] is False
+        assert revalidated["site"]["site"].name == "Test Lab"
+        assert revalidated["device_type"]["device_type"].model == "Test Router"
+
+    @pytest.mark.django_db
+    def test_the_background_results_page_validates_a_row_again_after_its_ambiguous_librenms_id_is_resolved(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The results page validates the job's rows again, so the row gets the site and type checks it missed."""
+        from core.models import Job
+        from dcim.models import Device, DeviceType, Manufacturer, Site
+
+        manufacturer = Manufacturer.objects.create(name="Test Vendor", slug="test-vendor")
+        DeviceType.objects.create(manufacturer=manufacturer, model="Test Router", slug="test-router")
+        Site.objects.create(name="Test Lab", slug="test-lab")
+        _register_devices(librenms_server, [_device(4114)])
+        twins = [make_device(f"results-ambiguous-{n}", librenms_cf={SERVER_KEY: {"id": 4114}}) for n in (1, 2)]
+        user = _create_user(django_user_model, "results-ambiguous-id")
+        client.force_login(user)
+        client.get(_import_url(), _search_params())
+        Device.objects.filter(pk__in=[twin.pk for twin in twins]).delete()
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={"device_ids": [4114], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
+        )
+
+        results = client.get(_import_url(), {"job_id": job.pk})
+
+        (row,) = results.context["table"].data
+        assert row["_validation"]["ambiguous_librenms_id"] is False
+        assert row["_validation"]["site"]["site"].name == "Test Lab"
+        assert row["_validation"]["device_type"]["device_type"].model == "Test Router"
+
+    @pytest.mark.django_db
+    def test_a_warm_search_drops_the_duplicate_serial_blocker_after_both_holders_are_gone(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """Validation runs in full beside a duplicate serial, so only the second search can drop the blocker."""
+        from dcim.models import Device
+
+        device = _device(4115)
+        holders = [make_device(f"warm-duplicate-{n}", serial=device["serial"]) for n in (1, 2)]
+        _register_devices(librenms_server, [device])
+        client.force_login(_create_user(django_user_model, "warm-duplicate-serial"))
+        duplicate = f"Multiple NetBox devices share serial '{device['serial']}'"
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, blocked = validation()
+        assert any(duplicate in issue for issue in blocked["issues"])
+        assert blocked["serial_duplicate"] is True
+
+        Device.objects.filter(pk__in=[holder.pk for holder in holders]).delete()
+        second, revalidated = validation()
+
+        assert second.context["from_cache"] is True
+        assert not any(duplicate in issue for issue in revalidated["issues"])
+        assert revalidated["serial_duplicate"] is False
+
+    @pytest.mark.django_db
+    def test_the_background_results_page_applies_the_exclude_existing_option_of_the_job(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """A row that matches NetBox now leaves the page; a page whose rows all left is not expired."""
+        from core.models import Job
+
+        _register_devices(librenms_server, [_device(4116), _device(4117)])
+        user = _create_user(django_user_model, "results-job-exclude-existing")
+        client.force_login(user)
+        client.get(_import_url(), _search_params(exclude_existing="on"))
+        make_device("results-job-exclude-mapped", librenms_cf={SERVER_KEY: {"id": 4116}})
+
+        def job(device_ids):
+            return Job.objects.create(
+                name="Completed import search",
+                user=user,
+                job_id=uuid4(),
+                status="completed",
+                data={
+                    "device_ids": device_ids,
+                    "filters": {"hostname": "edge"},
+                    "server_key": SERVER_KEY,
+                    "exclude_existing": True,
+                },
+            )
+
+        results = client.get(_import_url(), {"job_id": job([4116, 4117]).pk})
+        all_matched = client.get(_import_url(), {"job_id": job([4116]).pk})
+
+        assert [row["device_id"] for row in results.context["table"].data] == [4117]
+        assert list(all_matched.context["table"].data) == []
+        assert b"Job results have expired" not in all_matched.content
+
+    @pytest.mark.django_db
+    def test_the_background_results_page_shows_the_row_that_the_last_search_read(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """LibreNMS renames the row after the job; the next search reads it, and the page matches the new name."""
+        from core.models import Job
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_search_cache_key
+
+        user = _create_user(django_user_model, "results-renamed-row")
+        client.force_login(user)
+        first = make_device("edge-4118")
+        renamed = make_device("results-renamed-row-new")
+        _register_devices(librenms_server, [_device(4118)])
+        assert (
+            client.get(_import_url(), _search_params()).context["table"].data[0]["_validation"]["existing_device"]
+            == first
+        )
+        _register_devices(librenms_server, [{**_device(4118), "sysName": renamed.name}])
+        # The device list expires before the per-device caches, so the next search is warm and reads the new name.
+        cache.delete(get_import_search_cache_key(SERVER_KEY, {"type": "hostname", "query": "edge"}, {}))
+        (shown,) = client.get(_import_url(), _search_params()).context["table"].data
+        assert shown["_validation"]["existing_device"] == renamed
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={"device_ids": [4118], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
+        )
+
+        results = client.get(_import_url(), {"job_id": job.pk})
+
+        (row,) = results.context["table"].data
+        assert row["_validation"]["existing_device"] == renamed
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("linked", [True, False])
+    def test_the_background_results_page_refreshes_a_row_whose_location_quotes_the_unavailable_text(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+        linked,
+    ):
+        """The site issue quotes the LibreNMS location, so a location with the blocker's words is no blocker."""
+        from core.models import Job
+
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+        from netbox_librenms_plugin.import_validation_helpers import SITE_ISSUE_PREFIX
+
+        device_id = 4114 if linked else 4115
+        location = "Site cannot be matched: annex"
+        device = {**_device(device_id), "location": location}
+        _register_devices(librenms_server, [device])
+        user = _create_user(django_user_model, f"results-quoted-location-{linked}")
+        client.force_login(user)
+        (searched,) = client.get(_import_url(), _search_params()).context["table"].data
+        site_issue = f"{SITE_ISSUE_PREFIX} '{location}'"
+        assert site_issue in searched["_validation"]["issues"]
+        if linked:
+            holder = make_device("results-quoted-location-linked", librenms_cf={SERVER_KEY: {"id": device_id}})
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={
+                "device_ids": [device_id],
+                "filters": {"hostname": "edge"},
+                "server_key": SERVER_KEY,
+                "serial_rules": serial_rules_version(),
+            },
+        )
+
+        results = client.get(_import_url(), {"job_id": job.pk})
+
+        (row,) = results.context["table"].data
+        validation = row["_validation"]
+        if linked:
+            # The refresh finds the Device that was linked after the search.
+            assert validation["existing_device"] == holder
+            assert site_issue not in validation["issues"]
+        else:
+            # The refresh keeps the site issue: it is no stale serial blocker.
+            assert validation["existing_device"] is None
+            assert site_issue in validation["issues"]
+        assert validation["can_import"] is False
 
     @pytest.mark.django_db
     def test_clear_cache_forces_a_fresh_http_search(
@@ -588,6 +1085,127 @@ class TestImportListRequest:
         assert overrides.context["strip_domain"] is False
 
     @pytest.mark.django_db
+    def test_a_serial_rule_edit_removes_the_cached_search_link_it_made_stale(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """A link to a search of other serial rules would detect its stacks again, so the page omits it."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        _register_devices(librenms_server, [{**_device(5301), "hostname": "stale-link-edge.example.test"}])
+        client.force_login(_create_user(django_user_model, "stale-cached-search-link"))
+        filters = {"hostname": "stale-link-edge"}
+        assert client.get(_import_url(), _search_params(librenms_hostname="stale-link-edge")).status_code == 200
+
+        def linked_filters():
+            response = client.get(_import_url(), {"server_key": SERVER_KEY})
+            assert response.status_code == 200
+            return [search["filters"] for search in response.context["cached_searches"]]
+
+        assert filters in linked_filters()
+        NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+        assert filters not in linked_filters()
+
+    @pytest.mark.django_db
+    def test_a_synchronous_search_reads_the_serial_rules_of_its_cached_search_link(
+        self, client, django_user_model, librenms_server, monkeypatch
+    ):
+        """A rule edit after the request read its rules must not split the rows from the link to them."""
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        _register_devices(librenms_server, [{**_device(5302), "hostname": "one-version-edge.example.test"}])
+        client.force_login(_create_user(django_user_model, "one-serial-rule-version"))
+        load = SerialRules.load
+        loads = []
+
+        def edit_after_the_first_load():
+            rules = load()
+            if not loads:
+                # The request's snapshot reads its rows before the edit commits.
+                assert rules.digest
+                NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+            loads.append(rules)
+            return rules
+
+        monkeypatch.setattr(SerialRules, "load", edit_after_the_first_load)
+
+        response = client.get(_import_url(), _search_params(librenms_hostname="one-version-edge"))
+
+        assert response.status_code == 200
+        (snapshot,) = loads
+        (search,) = [
+            search
+            for search in response.context["cached_searches"]
+            if search["filters"] == {"hostname": "one-version-edge"}
+        ]
+        assert search["serial_rules"] == serial_rules_version(snapshot)
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("job_has_rule_version", [True, False])
+    def test_job_only_results_validate_the_jobs_rows_under_current_serial_rules(
+        self, client, django_user_model, librenms_server, job_has_rule_version
+    ):
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_librenms_plugin.jobs import FilterDevicesJob
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        user = _create_user(django_user_model, "versioned-job-results")
+        client.force_login(user)
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        holder = make_device("job-serial-holder", serial="JOB-SERIAL-41")
+
+        def run_search(*ids):
+            _register_devices(
+                librenms_server, [{**_device(device_id), "serial": f"SN: JOB-SERIAL-{device_id}"} for device_id in ids]
+            )
+            job = Job.objects.create(name="Serial rule search", user=user, job_id=uuid4(), data={})
+            FilterDevicesJob.handle(
+                job=job,
+                filters={"hostname": "edge"},
+                vc_detection_enabled=False,
+                clear_cache=True,
+                show_disabled=False,
+                server_key=SERVER_KEY,
+            )
+            job.refresh_from_db()
+            assert job.status == JobStatusChoices.STATUS_COMPLETED, job.error
+            return job
+
+        def open_results(job):
+            response = client.get(_import_url(), {"job_id": job.pk})
+            assert response.status_code == 200
+            return response
+
+        first = run_search(41, 42)
+        before = {row["device_id"]: row["_validation"] for row in open_results(first).context["table"].data}
+        assert sorted(before) == [41, 42]
+        assert before[41]["existing_device"] is None
+
+        NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+        second = run_search(42, 43)
+        assert sorted(row["device_id"] for row in open_results(second).context["table"].data) == [42, 43]
+        if not job_has_rule_version:
+            first.data.pop("serial_rules", None)
+            first.save(update_fields=["data"])
+
+        response = open_results(first)
+
+        after = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+        assert sorted(after) == [41, 42]
+        assert after[41]["existing_device"] == holder
+        assert after[41]["existing_match_type"] == "serial"
+        assert message_texts(response.wsgi_request, "warning") == []
+
+    @pytest.mark.django_db
     def test_expired_completed_job_renders_one_actionable_warning(
         self,
         client,
@@ -595,6 +1213,8 @@ class TestImportListRequest:
         librenms_server,
     ):
         from core.models import Job
+
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
 
         user = _create_user(django_user_model, "expired-job-results")
         client.force_login(user)
@@ -607,6 +1227,7 @@ class TestImportListRequest:
                 "device_ids": [5101],
                 "filters": {"hostname": "edge"},
                 "server_key": SERVER_KEY,
+                "serial_rules": serial_rules_version(),
             },
         )
 

@@ -796,12 +796,8 @@ class TestLibreNMSAPIDeviceOperations:
         assert device_data["device_id"] == 123
 
     def test_get_device_info_not_found(self, local_librenms_api, librenms_server):
-        """Empty devices list returns (False, None) without raising."""
-        librenms_server.register(
-            "/api/v0/devices/1",
-            {"status": "ok", "devices": []},
-            method="GET",
-        )
+        """A 404 is the one answer that says the device is absent."""
+        librenms_server.register("/api/v0/devices/1", {"status": "error"}, status=404, method="GET")
 
         success, result = local_librenms_api.get_device_info(1)
         assert success is False
@@ -1380,13 +1376,15 @@ class TestLibreNMSAPIErrorHandling:
         assert result.status_code is None
 
     def test_invalid_json_response(self, local_librenms_api, librenms_server):
-        """Verify handling of invalid JSON responses — ValueError is now caught gracefully."""
+        """A 2xx body that is not JSON says nothing about the device, so it is unavailable, not absent."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
         librenms_server.register_raw(self.DEVICE_PATH, "not-json", method="GET")
 
-        # ValueError is now caught, returning (False, None) instead of propagating
         success, result = local_librenms_api.get_device_info(device_id=123, use_cache=False)
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code == 200
 
     def test_http_500_error_handling(self, local_librenms_api, librenms_server):
         """Verify that direct status handling classifies a 500 as server failure, not a missing device or malformed payload."""
@@ -1539,27 +1537,39 @@ def local_librenms_api(mock_librenms_api, librenms_server):
 class TestGetDeviceInfoResponseShape:
     """Cover response-shape branches in get_device_info()."""
 
-    def test_non_dict_device_entry_returns_failure(self, local_librenms_api, librenms_server):
-        """A non-dict entry in the devices list must not propagate as truthy data."""
-        librenms_server.register(
-            "/api/v0/devices/1",
+    @pytest.mark.parametrize(
+        "body",
+        [
             {"status": "ok", "devices": ["not-a-dict"]},
-            method="GET",
-        )
+            {"status": "ok"},
+            {"status": "error", "message": "database unavailable"},
+            {"status": "ok", "devices": {"device_id": 1}},
+        ],
+        ids=["non-dict-row", "missing-devices", "error-body", "non-list-devices"],
+    )
+    def test_a_body_without_a_device_row_is_unavailable_not_absent(self, local_librenms_api, librenms_server, body):
+        """A 2xx body without the device row says nothing about the device; only an HTTP 404 says it is absent."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+        librenms_server.register("/api/v0/devices/1", body, method="GET")
 
         success, data = local_librenms_api.get_device_info(device_id=1)
 
         assert success is False
-        assert data is None
+        assert isinstance(data, LibreNMSLookupError)
+        assert data.status_code == 200
 
-    def test_missing_devices_key_returns_failure(self, local_librenms_api, librenms_server):
-        """KeyError on missing 'devices' must be caught and return (False, None)."""
-        librenms_server.register("/api/v0/devices/1", {"status": "ok"}, method="GET")
+    @pytest.mark.parametrize("status", ["ok", "error"])
+    def test_an_empty_device_list_is_unavailable_not_absent(self, local_librenms_api, librenms_server, status):
+        """LibreNMS answers a missing device with a 404, so an empty list on a 200 confirms nothing."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+        librenms_server.register("/api/v0/devices/1", {"status": status, "devices": []}, method="GET")
 
         success, data = local_librenms_api.get_device_info(device_id=1)
 
         assert success is False
-        assert data is None
+        assert isinstance(data, LibreNMSLookupError)
 
 
 class TestGetDeviceTransceiversResponseShape:

@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_serial %}
 {# Modal-content fragment for the module replace / move dialog. #}
 {# Rendered by ModuleMismatchPreviewView.get and swapped into #htmx-modal-content. #}
 <div class="modal-header">
@@ -37,8 +38,8 @@
         </tr>
         <tr>
             <td><strong>Serial</strong></td>
-            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ installed_serial|default:"-" }}</td>
-            <td{% if serial_mismatch %} class="text-warning fw-semibold"{% endif %}>{{ librenms_serial|default:"-" }}</td>
+            <td class="text-break{% if serial_mismatch %} text-warning fw-semibold{% endif %}">{{ installed_serial|default:"-" }}</td>
+            <td class="text-break{% if serial_mismatch %} text-warning fw-semibold{% endif %}">{{ librenms_serial|page_text|default:"-" }}</td>
         </tr>
     </tbody>
 </table>
@@ -65,16 +66,39 @@
 </div>
 {% endif %}
 
+{% if serial_fit_refusal %}
+<div class="alert alert-warning py-2 mb-3" data-serial-fit-refusal>
+    <i class="mdi mdi-alert me-1"></i>
+    <div>{{ serial_fit_refusal }}</div>
+</div>
+{% endif %}
+
+{% if legacy_update and serial_mismatch or legacy_replace %}
+<div class="alert alert-warning py-2 mb-3" data-legacy-holder>
+    <i class="mdi mdi-alert me-1"></i>
+    <div>Another module on this device can be the same part. Reconcile the two modules before you write this serial.</div>
+</div>
+{% endif %}
+
 {% if serial_conflict %}
 <div class="alert alert-danger py-2 mb-3">
     <i class="mdi mdi-alert-circle me-1"></i>
     <div>
-        <strong>Serial conflict:</strong> <code>{{ librenms_serial }}</code> is currently installed at
+        <strong>Serial conflict:</strong> <code>{{ librenms_serial|page_text }}</code> is currently installed at
         <strong>{{ serial_conflict.device.name }}</strong> /
         Bay: <strong>{{ serial_conflict.module_bay.name }}</strong>.
         <br><small>
-            <em>Replace</em> will also remove it from that location.
+            {% if serial_conflict_owns_bay %}
+            <em>Replace</em> is not available: that module contains this bay, so removing it would also remove this bay.
+            {% elif replace_in_delete_scope and not serial_fit_refusal and not legacy_replace %}
+            <span data-replace-also-removes><em>Replace</em> will also remove it from that location.</span>
+            {% endif %}
+            {% if can_move_from %}
             <em>Move</em> will update its location to this bay instead of creating a new entry.
+            <span data-move-removes="{{ move_removal.count }}">
+                It first deletes {{ move_removal.count }} module{{ move_removal.count|pluralize }}{% if move_removal.names %}: {{ move_removal.names|join:", " }}{% endif %}{% if move_removal.hidden %} and {{ move_removal.hidden }} that you cannot view{% endif %} from this bay.
+            </span>
+            {% endif %}
         </small>
     </div>
 </div>
@@ -90,8 +114,25 @@
 <div class="alert alert-warning py-2 mb-3">
     <i class="mdi mdi-alert me-1"></i>
     <div>
-        <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> is assigned to multiple
+        <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial|page_text }}</code> is assigned to multiple
         modules. Please resolve the conflict manually before proceeding.
+    </div>
+</div>
+{% elif serial_conflict_unavailable %}
+<div class="alert alert-warning py-2 mb-3">
+    <i class="mdi mdi-alert me-1"></i>
+    <div>
+        <strong>Serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> cannot be matched, so
+        <em>Replace</em> is not available.
+    </div>
+</div>
+{% endif %}
+
+{% if installed_module and not replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_unavailable and not serial_conflict_hidden and not serial_conflict_owns_bay %}
+<div class="alert alert-warning py-2 mb-3">
+    <i class="mdi mdi-alert me-1"></i>
+    <div>
+        <em>Replace</em> is not available: you cannot delete every module that it would remove.
     </div>
 </div>
 {% endif %}
@@ -99,7 +140,7 @@
 <div class="d-flex gap-2 justify-content-end flex-wrap mt-3">
     <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
 
-    {% if serial_mismatch and not type_mismatch and not serial_conflict and not serial_conflict_hidden and not serial_conflict_ambiguous and installed_module %}
+    {% if serial_mismatch and not type_mismatch and not serial_conflict and not serial_conflict_hidden and not serial_conflict_ambiguous and installed_module and not serial_fit_refusal and not legacy_update %}
     {# Quick serial-only update — no delete/recreate needed #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:update_module_serial' pk=device_pk %}"
@@ -121,7 +162,7 @@
     </form>
     {% endif %}
 
-    {% if serial_conflict %}
+    {% if can_move_from %}
     {# Move the existing module here rather than creating a new entry #}
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:move_module' pk=device_pk %}"
@@ -133,6 +174,7 @@
           style="display:inline">
         {% csrf_token %}
         <input type="hidden" name="module_id" value="{{ installed_module.pk|default:'' }}">
+        <input type="hidden" name="move_token" value="{{ move_token }}">
         <input type="hidden" name="conflict_module_id" value="{{ serial_conflict.pk }}">
         <input type="hidden" name="target_bay_id" value="{{ target_bay_id }}">
         <input type="hidden" name="server_key" value="{{ server_key }}">
@@ -144,7 +186,10 @@
     {% endif %}
 
     {# Replace: delete current + install fresh from LibreNMS data #}
-    {% if installed_module and not serial_conflict_ambiguous and not serial_conflict_hidden %}
+    {% if installed_module and replace_in_delete_scope and not serial_conflict_ambiguous and not serial_conflict_unavailable and not serial_conflict_hidden and not serial_conflict_owns_bay and not serial_fit_refusal and not legacy_replace %}
+    <span class="small text-muted w-100 text-end order-first" data-replace-removes="{{ replace_removal.count }}">
+        <em>Replace</em> deletes {{ replace_removal.count }} module{{ replace_removal.count|pluralize }}{% if replace_removal.names %}: {{ replace_removal.names|join:", " }}{% endif %}{% if replace_removal.hidden %} and {{ replace_removal.hidden }} that you cannot view{% endif %}.
+    </span>
     <form method="post"
           action="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"
           hx-post="{% url 'plugins:netbox_librenms_plugin:replace_module' pk=device_pk %}"

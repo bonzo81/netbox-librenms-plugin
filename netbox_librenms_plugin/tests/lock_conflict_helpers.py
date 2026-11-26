@@ -7,6 +7,7 @@ waits (and fails with ``55P03`` under ``lock_timeout``) or fails at once with ``
 only committed rows: a test that locks a row it created itself must be transactional.
 """
 
+import re
 import time
 from contextlib import contextmanager
 
@@ -23,6 +24,40 @@ def second_connection():
     finally:
         other.rollback()
         other.close()
+
+
+def locks_row(sql, model, pk):
+    """Return whether the SQL statement *sql* locks the *model* row *pk*, at any lock strength.
+
+    Limit: it reads only positive id predicates; a locking statement whose WHERE clause holds NOT raises AssertionError.
+    """
+    table = re.escape(model._meta.db_table)
+    keyword = r"(?:WHERE|ON|USING|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|ORDER|LIMIT|FOR)\b"
+    # The target table can come after FROM or after any JOIN.
+    source = re.compile(rf'\b(?:FROM|JOIN) (?:"{table}"|{table}\b)(?: (?:AS )?(?!{keyword})("?)(\w+)\1)?')
+    row_lock = re.compile(r'\bFOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b(?: OF ("?\w+"?(?:, "?\w+"?)*))?')
+    # A clause without OF locks every table; OF locks only the tables it names.
+    clauses = row_lock.findall(sql)
+    where = sql.partition(" WHERE ")[2]
+    # A NOT can select a row without naming it, as NOT (id = 3) selects row 7.
+    if row_lock.search(sql) and re.search(r"\bNOT\b", where):
+        raise AssertionError(f"locks_row reads no locking statement with NOT: {sql}")
+    # A self-join reads the table more than once, so every alias must be checked.
+    for read in source.finditer(sql):
+        name = read.group(2)
+        locked = name or model._meta.db_table
+        if not any(not of or locked in of.replace('"', "").split(", ") for of in clauses):
+            continue
+        qualifier = rf'"{re.escape(name)}"|(?<![\w"]){re.escape(name)}' if name else rf'"{table}"|(?<![\w"]){table}'
+        # The key is qualified by the table or its alias, or it stands alone (not after another qualifier).
+        if re.search(rf'(?:(?:{qualifier})\.|(?<![\w."]))"?id"? (?:= {pk}\b|IN \([^)]*\b{pk}\b)', where):
+            return True
+    return False
+
+
+def first_row_lock(statements, model, pk):
+    """Return the index of the first captured SQL statement that locks the *model* row *pk*, at any lock strength."""
+    return next(i for i, sql in enumerate(statements) if locks_row(sql, model, pk))
 
 
 def lock_row(other, model, pk):

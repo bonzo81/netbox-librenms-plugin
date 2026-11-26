@@ -132,7 +132,8 @@ def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_lib
     import copy
 
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
-    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     recording = copy.deepcopy(load_recording("juniper-ex4400-vc-2member"))
     for key, value in recording["responses"].items():
@@ -154,7 +155,9 @@ def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_lib
         2: fpc_serials[121],
     }
     index_map = {row["entPhysicalIndex"]: row for row in inventory}
-    owners = attribute_inventory(inventory, list(members.values()), chassis_serial_key(chassis.master))
+    owners = attribute_inventory(
+        inventory, list(members.values()), SerialRules.load().for_device(chassis.master), "reported"
+    )
     psu = index_map[4]
     assert psu["entPhysicalDescr"].startswith("FPC 1 ")
     assert owners[inventory.index(psu)][0] == members[2]

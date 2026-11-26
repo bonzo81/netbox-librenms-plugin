@@ -154,9 +154,8 @@ def test_junos_virtual_chassis_imports_both_members_and_syncs_their_serials(
     unassigned = rows.filter(has_text=SERIAL_BY_POSITION[other["vc_position"]])
     _choose(page, unassigned.locator("input[role=combobox]"), other["name"])
     modal.get_by_role("button", name="Sync All").click()
-    success = page.get_by_role("alert").filter(
-        has_text=f"Successfully assigned {EXPECTED['member_count']} serial number(s)"
-    )
+    # Only the cleared member changes; the master already stores its serial, so it is not counted.
+    success = page.get_by_role("alert").filter(has_text="Successfully assigned 1 serial number(s)")
     expect(success).to_be_visible()
 
     _, members = _imported_members(netbox_api)

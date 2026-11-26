@@ -64,8 +64,13 @@ def librenms_server(settings, monkeypatch):
 
 
 def _register_inventory(server, inventory):
-    """Register the three routes a modules-tab refresh reads."""
-    server.inventory_response(LIBRENMS_ID, inventory)
+    """Register the three routes a modules-tab refresh reads; the inventory also reports the stack of two members."""
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.tests.conftest import stack_inventory
+
+    members = [SimpleNamespace(serial="", vc_position=position) for position in (1, 2)]
+    server.inventory_response(LIBRENMS_ID, [*inventory, *stack_inventory([], members)])
     server.register(f"/api/v0/devices/{LIBRENMS_ID}/transceivers", {"status": "ok", "transceivers": []})
     server.register(f"/api/v0/devices/{LIBRENMS_ID}/ports", {"status": "ok", "ports": []})
 

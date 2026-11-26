@@ -34,11 +34,11 @@ description: Background job architecture, import workflow, and task management p
 - This is a NetBox core design decision, not a plugin limitation. No amount of permissions (including `core.view_job`) bypasses it.
 
 ## Import Jobs
-- **`FilterDevicesJob`** — background device filtering with VC detection. `job.data` keys: `device_ids`, `total_processed`, `filters`, `server_key`, `vc_detection_enabled`, `cache_timeout`, `cached_at`, `completed`. Devices are cached individually via shared cache keys from `get_validated_device_cache_key()`.
+- **`FilterDevicesJob`** — background device filtering with VC detection. `job.data` keys: `device_ids`, `total_processed`, `filters`, `server_key`, `vc_detection_enabled`, `exclude_existing`, `use_sysname`, `strip_domain`, `cache_timeout`, `cached_at`, `completed`. The raw LibreNMS row of each device is cached under `get_import_device_cache_key()`.
 - **`ImportDevicesJob`** — background device/VM import. Calls `bulk_import_devices_shared()` for devices and `bulk_import_vms()` for VMs. `job.data` keys: `imported_device_pks`, `imported_vm_pks`, `imported_libre_device_ids`, `imported_libre_vm_ids`, `server_key`, `total`, `success_count`, `failed_count`, `skipped_count`, `virtual_chassis_created`, `errors`, `completed`.
 
 ## Shared Cache Key Pattern
-- Both synchronous and background modes use `get_validated_device_cache_key()` from `import_utils.py` to generate cache keys. This ensures `_load_job_results()` in the list view can retrieve devices regardless of which mode produced them.
+- Only LibreNMS-side data is cached: the device list, the stack detection, the chassis inventory and the raw row of each device. Every search and `_load_job_results()` validate each row again with `validate_search_row()`, so a cached row never shows an old NetBox match.
 - `get_active_cached_searches()` manages multi-search cache to let users run and switch between searches.
 - Never hardcode cache key formats; always use the helper functions.
 
@@ -57,7 +57,7 @@ The import page (`LibreNMSImportView` in `views/imports/list.py`) supports two m
 1. **Synchronous** — calls `process_device_filters()` directly, renders results inline.
 2. **Background** — enqueues `FilterDevicesJob`, returns `JsonResponse` with `job_id`/`job_pk`/`poll_url`. Frontend polls and redirects to `?job_id={pk}` on completion.
 
-Result loading: `_load_job_results(job_id)` reads `job.data["device_ids"]`, reconstructs devices from per-device cache using `get_validated_device_cache_key()`.
+Result loading: `_load_job_results(job_id)` reads `job.data["device_ids"]`, reads each raw row from `get_import_device_cache_key()` and validates it again with `validate_search_row()`.
 
 Filter fields: `librenms_location`, `librenms_type`, `librenms_os`, `librenms_hostname`, `librenms_sysname`, `librenms_hardware`, `enable_vc_detection`, `show_disabled`, `exclude_existing`.
 
@@ -75,7 +75,7 @@ Filter fields: `librenms_location`, `librenms_type`, `librenms_os`, `librenms_ho
 - `filters.py` — `process_device_filters(filters, ...)`, `fetch_device_with_cache(device_id, ...)`.
 - `device_operations.py` — `validate_device_for_import(device, ...)`, `bulk_import_devices_shared(devices, user, ...)`.
 - `vm_operations.py` — `bulk_import_vms(vm_imports, user, ...)`.
-- `cache.py` — `get_validated_device_cache_key()`, `get_cache_metadata_key()`, `get_active_cached_searches()`, `get_import_device_cache_key()`.
+- `cache.py` — `get_cache_metadata_key()`, `get_active_cached_searches()`, `get_import_device_cache_key()`, `get_chassis_inventory_cache_key()`.
 - `permissions.py` — `check_user_permissions(user, permissions)`, `require_permissions(user, permissions, action_description)`.
 - `virtual_chassis.py` — `create_virtual_chassis_with_members()`, `_sync_module_bay_counter()`.
 
